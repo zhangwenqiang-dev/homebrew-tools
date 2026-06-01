@@ -1,8 +1,8 @@
 class Cm < Formula
   desc "SSH, VNC, and rsync profile manager"
   homepage "https://github.com/zhangwenqiang-dev/homebrew-tools"
-  url "git@github.com-work2:zhangwenqiang-dev/homebrew-tools.git",
-      tag: "v0.1.1"
+  url "ssh://git@github.com-work2/zhangwenqiang-dev/homebrew-tools.git",
+      tag: "v0.1.2"
   license "MIT"
 
   depends_on "go" => :build
