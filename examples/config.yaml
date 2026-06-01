@@ -1,0 +1,21 @@
+profiles:
+  xcode-vnc:
+    description: Apple account: user@example.com
+    user: user
+    host: mac-host.example.com
+    identity_file: ~/.ssh/example.pem
+    sync:
+      push:
+        excludes:
+          - xcuserdata
+          - .svn
+          - .git
+          - .DS_Store
+      pull:
+        excludes: []
+    vnc:
+      username: mac-user
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900

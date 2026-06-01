@@ -1,0 +1,6 @@
+.cache/
+.tmp-*
+bin/
+.DS_Store
+docs/superpowers/
+scripts/

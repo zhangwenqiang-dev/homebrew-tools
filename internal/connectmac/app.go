@@ -1,0 +1,583 @@
+package connectmac
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
+)
+
+type Runner interface {
+	RunForeground(ctx context.Context, args []string) error
+	StartBackground(ctx context.Context, args []string) (int, error)
+	Stop(pid int) error
+	RunRsync(ctx context.Context, args []string) error
+	ForgetHost(ctx context.Context, host string) error
+	OpenURL(ctx context.Context, target string) error
+}
+
+type ExecRunner struct{}
+
+type App struct {
+	Out          io.Writer
+	Err          io.Writer
+	Runner       Runner
+	Validator    Validator
+	StateManager StateManager
+}
+
+func NewApp(out, err io.Writer) App {
+	return App{
+		Out:          out,
+		Err:          err,
+		Runner:       ExecRunner{},
+		Validator:    NewValidator(),
+		StateManager: NewStateManager(DefaultStateDir),
+	}
+}
+
+func (a App) Run(ctx context.Context, args []string) int {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		a.printUsage()
+		return 0
+	}
+	configPath := DefaultConfigPath
+	args = parseConfigFlag(args, &configPath)
+	if len(args) == 0 {
+		a.printUsage()
+		return 0
+	}
+	command := args[0]
+	switch command {
+	case "init":
+		return a.runInit(configPath)
+	case "list":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runList(cfg)
+	case "check":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runCheck(cfg, args[1:])
+	case "connect":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runConnect(ctx, cfg, args[1:])
+	case "ssh":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runSSH(ctx, cfg, args[1:])
+	case "start":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runStart(ctx, cfg, args[1:])
+	case "pull":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runPull(ctx, cfg, args[1:])
+	case "push":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runPush(ctx, cfg, args[1:])
+	case "forget-host":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runForgetHost(ctx, cfg, args[1:])
+	case "open-vnc":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runOpenVNC(ctx, cfg, args[1:])
+	case "stop":
+		return a.runStop(args[1:])
+	case "status":
+		return a.runStatus()
+	default:
+		fmt.Fprintf(a.Err, "unknown command %q\n\n", command)
+		a.printUsage()
+		return 2
+	}
+}
+
+func (a App) runInit(configPath string) int {
+	path, err := ExpandPath(configPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if _, err := os.Stat(path); err == nil {
+		fmt.Fprintf(a.Err, "config already exists: %s\n", path)
+		return 1
+	}
+	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if err := os.WriteFile(path, []byte(DefaultConfigTemplate()), 0o600); err != nil {
+		fmt.Fprintf(a.Err, "write config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "created config: %s\n", path)
+	return 0
+}
+
+func (a App) runList(cfg Config) int {
+	names := sortedProfileNames(cfg)
+	if len(names) == 0 {
+		fmt.Fprintln(a.Out, "no profiles configured")
+		return 0
+	}
+	for _, name := range names {
+		profile := cfg.Profiles[name]
+		if profile.Description != "" {
+			fmt.Fprintf(a.Out, "%s\t%s\n", name, profile.Description)
+		} else {
+			fmt.Fprintln(a.Out, name)
+		}
+	}
+	return 0
+}
+
+func (a App) runCheck(cfg Config, args []string) int {
+	profile, ok := requireProfileArg(a.Err, cfg, args)
+	if !ok {
+		return 2
+	}
+	errs := a.Validator.ValidateProfile(profile)
+	if len(errs) > 0 {
+		printErrors(a.Err, errs)
+		return 1
+	}
+	printSummary(a.Out, profile)
+	fmt.Fprintln(a.Out, "check passed")
+	return 0
+}
+
+func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {
+	profile, ok := requireProfileArg(a.Err, cfg, args)
+	if !ok {
+		return 2
+	}
+	if !a.validateAndSummarize(profile) {
+		return 1
+	}
+	sshArgs, err := SSHArgs(profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
+		fmt.Fprintf(a.Err, "ssh failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
+	profile, ok := requireProfileArg(a.Err, cfg, args)
+	if !ok {
+		return 2
+	}
+	if !a.validateAndSummarize(profile) {
+		return 1
+	}
+	sshArgs, err := SSHArgs(profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	pid, err := a.Runner.StartBackground(ctx, sshArgs)
+	if err != nil {
+		fmt.Fprintf(a.Err, "start ssh: %v\n", err)
+		return 1
+	}
+	if err := a.StateManager.Save(NewState(profile, pid)); err != nil {
+		fmt.Fprintf(a.Err, "save state: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "started %s with pid %d\n", profile.Name, pid)
+	return 0
+}
+
+func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Err, "usage: cm ssh <profile>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	errs := a.Validator.ValidateAccess(profile)
+	if len(errs) > 0 {
+		printErrors(a.Err, errs)
+		return 1
+	}
+	sshArgs, err := InteractiveSSHArgs(profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "SSH: %s@%s\n", profile.User, profile.Host)
+	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
+		fmt.Fprintf(a.Err, "ssh failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runOpenVNC(ctx context.Context, cfg Config, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Err, "usage: cm open-vnc <profile>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	target, err := VNCURL(profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "Opening %s\n", target)
+	if err := a.Runner.OpenURL(ctx, target); err != nil {
+		fmt.Fprintf(a.Err, "open failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Err, "usage: cm forget-host <profile>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	if profile.Host == "" {
+		fmt.Fprintln(a.Err, "host is required")
+		return 1
+	}
+	fmt.Fprintf(a.Out, "Removing known_hosts entries for %s\n", profile.Host)
+	if err := a.Runner.ForgetHost(ctx, profile.Host); err != nil {
+		fmt.Fprintf(a.Err, "ssh-keygen failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
+	if len(args) != 2 {
+		fmt.Fprintln(a.Err, "usage: cm pull <profile> <remote-path>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	if !a.validateRsyncAccess(profile) {
+		return 1
+	}
+	rsyncArgs, err := RsyncPullArgs(profile, args[1], ".", profile.Sync.Pull.Excludes)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "Pull: %s -> .\n", RemoteTarget(profile, args[1]))
+	if err := a.Runner.RunRsync(ctx, rsyncArgs); err != nil {
+		fmt.Fprintf(a.Err, "rsync failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
+	if len(args) != 3 {
+		fmt.Fprintln(a.Err, "usage: cm push <profile> <local-path> <remote-dir>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	if !a.validateRsyncAccess(profile) {
+		return 1
+	}
+	localPath, cleanup, err := PackagePath(args[1], profile.Sync.Push.Excludes)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	defer cleanup()
+	rsyncArgs, err := RsyncPushArgs(profile, localPath, args[2])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "Push: %s -> %s\n", localPath, RemoteTarget(profile, args[2]))
+	if err := a.Runner.RunRsync(ctx, rsyncArgs); err != nil {
+		fmt.Fprintf(a.Err, "rsync failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runStop(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Err, "usage: cm stop <profile>")
+		return 2
+	}
+	state, ok, err := a.StateManager.Load(args[0])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if !ok {
+		fmt.Fprintf(a.Err, "no running managed tunnel for %s\n", args[0])
+		return 1
+	}
+	if err := a.Runner.Stop(state.PID); err != nil {
+		fmt.Fprintf(a.Err, "stop pid %d: %v\n", state.PID, err)
+		return 1
+	}
+	if err := a.StateManager.Remove(args[0]); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "stopped %s\n", args[0])
+	return 0
+}
+
+func (a App) runStatus() int {
+	states, err := a.StateManager.List()
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if len(states) == 0 {
+		fmt.Fprintln(a.Out, "no managed tunnels running")
+		return 0
+	}
+	for _, state := range states {
+		fmt.Fprintf(a.Out, "%s\tpid=%d\ttarget=%s", state.Profile, state.PID, state.Target)
+		for _, tunnel := range state.Tunnels {
+			fmt.Fprintf(a.Out, "\t%s", TunnelSummary(tunnel))
+		}
+		fmt.Fprintln(a.Out)
+	}
+	return 0
+}
+
+func (a App) validateAndSummarize(profile Profile) bool {
+	errs := a.Validator.ValidateProfile(profile)
+	if len(errs) > 0 {
+		printErrors(a.Err, errs)
+		return false
+	}
+	printSummary(a.Out, profile)
+	return true
+}
+
+func (a App) validateRsyncAccess(profile Profile) bool {
+	errs := a.Validator.ValidateAccess(profile)
+	if a.Validator.CheckRsync != nil {
+		if err := a.Validator.CheckRsync(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		printErrors(a.Err, errs)
+		return false
+	}
+	return true
+}
+
+func (a App) loadConfig(path string) (Config, int) {
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return Config{}, 1
+	}
+	return cfg, 0
+}
+
+func (a App) printUsage() {
+	fmt.Fprint(a.Out, `Usage:
+  cm init [--config <path>]
+  cm list [--config <path>]
+  cm check <profile> [--config <path>]
+  cm connect <profile> [--config <path>]
+  cm ssh <profile> [--config <path>]
+  cm start <profile> [--config <path>]
+  cm pull <profile> <remote-path> [--config <path>]
+  cm push <profile> <local-path> <remote-dir> [--config <path>]
+  cm forget-host <profile> [--config <path>]
+  cm open-vnc <profile> [--config <path>]
+  cm stop <profile>
+  cm status
+`)
+}
+
+func (ExecRunner) RunForeground(ctx context.Context, args []string) error {
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (ExecRunner) StartBackground(ctx context.Context, args []string) (int, error) {
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pid := cmd.Process.Pid
+	return pid, cmd.Process.Release()
+}
+
+func (ExecRunner) Stop(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Kill()
+}
+
+func (ExecRunner) RunRsync(ctx context.Context, args []string) error {
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (ExecRunner) ForgetHost(ctx context.Context, host string) error {
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-R", host)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (ExecRunner) OpenURL(ctx context.Context, target string) error {
+	cmd := exec.CommandContext(ctx, "open", target)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func DefaultConfigTemplate() string {
+	return `profiles:
+  xcode-vnc:
+    description: Apple account: user@example.com
+    user: user
+    host: mac-host.example.com
+    identity_file: ~/.ssh/example.pem
+    sync:
+      push:
+        excludes:
+          - xcuserdata
+          - .svn
+          - .git
+          - .DS_Store
+      pull:
+        excludes: []
+    vnc:
+      username: mac-user
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`
+}
+
+func parseConfigFlag(args []string, configPath *string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" && i+1 < len(args) {
+			*configPath = args[i+1]
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+func requireProfileArg(errOut io.Writer, cfg Config, args []string) (Profile, bool) {
+	if len(args) != 1 {
+		fmt.Fprintln(errOut, "profile name is required")
+		return Profile{}, false
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(errOut, unknownProfileError(cfg, args[0]))
+		return Profile{}, false
+	}
+	return profile, true
+}
+
+func printSummary(out io.Writer, profile Profile) {
+	fmt.Fprintf(out, "Profile: %s\n", profile.Name)
+	if profile.Description != "" {
+		fmt.Fprintf(out, "Description: %s\n", profile.Description)
+	}
+	fmt.Fprintf(out, "SSH Target: %s@%s\n", profile.User, profile.Host)
+	fmt.Fprintf(out, "Identity: %s\n", profile.IdentityFile)
+	for _, tunnel := range profile.Tunnels {
+		fmt.Fprintf(out, "Tunnel: %s\n", TunnelSummary(tunnel))
+	}
+}
+
+func printErrors(out io.Writer, errs []error) {
+	for _, err := range errs {
+		fmt.Fprintf(out, "error: %v\n", err)
+	}
+}
+
+func sortedProfileNames(cfg Config) []string {
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func filepathDir(path string) string {
+	if idx := strings.LastIndex(path, string(os.PathSeparator)); idx >= 0 {
+		return path[:idx]
+	}
+	return "."
+}
