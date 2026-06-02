@@ -1,7 +1,7 @@
 class Cm < Formula
   desc "SSH, VNC, and rsync profile manager"
   homepage "https://github.com/zhangwenqiang-dev/homebrew-tools"
-  url "ssh://git@github.com-work2/zhangwenqiang-dev/homebrew-tools.git",
+  url "https://github.com/zhangwenqiang-dev/homebrew-tools.git",
       tag: "v0.1.6"
   license "MIT"
 
