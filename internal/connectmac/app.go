@@ -112,11 +112,22 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runStop(args[1:])
 	case "status":
 		return a.runStatus()
+	case "mcp":
+		return a.runMCP(ctx, configPath)
 	default:
 		fmt.Fprintf(a.Err, "unknown command %q\n\n", command)
 		a.printUsage()
 		return 2
 	}
+}
+
+func (a App) runMCP(ctx context.Context, configPath string) int {
+	server := MCPServer{App: a, ConfigPath: configPath}
+	if err := server.Serve(ctx, os.Stdin, a.Out); err != nil {
+		fmt.Fprintf(a.Err, "mcp failed: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func (a App) runInit(configPath string) int {
@@ -441,6 +452,7 @@ func (a App) printUsage() {
   cm push <profile> <local-path> <remote-dir> [--config <path>]
   cm forget-host <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
+  cm mcp [--config <path>]
   cm stop <profile>
   cm status
 `)

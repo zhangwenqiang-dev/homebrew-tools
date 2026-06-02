@@ -130,6 +130,12 @@ Use a custom config path:
 cm list --config ./examples/config.yaml
 ```
 
+Start the MCP server for AI clients:
+
+```bash
+cm mcp
+```
+
 ## Safety Checks
 
 Before starting SSH, `cm` checks:
@@ -257,3 +263,32 @@ profiles:
         excludes:
           - .DS_Store
 ```
+
+## MCP Server
+
+`cm mcp` starts a stdio MCP server for AI clients.
+
+Available tools:
+
+```text
+cm_list_profiles
+cm_check_profile
+cm_push
+cm_pull
+cm_forget_host
+```
+
+Tools with side effects require `confirm: true`. Without confirmation, they return a preview only.
+
+Example tool arguments:
+
+```json
+{
+  "profile": "xcode-vnc",
+  "local_path": "/Users/example/project",
+  "remote_dir": "~/Documents/",
+  "confirm": true
+}
+```
+
+`cm_ssh`, `cm_start`, `cm_stop`, and `cm_open_vnc` are intentionally not exposed through MCP.
