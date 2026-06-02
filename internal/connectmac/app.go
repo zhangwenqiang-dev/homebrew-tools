@@ -337,12 +337,13 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 		return 1
 	}
 	defer cleanup()
-	rsyncArgs, err := RsyncPushArgs(profile, localPath, args[2])
+	remoteDir := NormalizeRemotePath(args[2])
+	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
-	fmt.Fprintf(a.Out, "Push: %s -> %s\n", localPath, RemoteTarget(profile, args[2]))
+	fmt.Fprintf(a.Out, "Push: %s -> %s\n", localPath, RemoteTarget(profile, remoteDir))
 	if err := a.Runner.RunRsync(ctx, rsyncArgs); err != nil {
 		fmt.Fprintf(a.Err, "rsync failed: %v\n", err)
 		return 1

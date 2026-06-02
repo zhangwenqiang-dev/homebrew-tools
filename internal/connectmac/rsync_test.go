@@ -46,3 +46,32 @@ func TestRsyncPushArgs(t *testing.T) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
+
+func TestRsyncPushArgsNormalizesShellExpandedHomeRemoteDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	profile := validProfile("~/.ssh/example.pem")
+	got, err := RsyncPushArgs(profile, "/tmp/project.zip", filepath.Join(home, "Documents")+"/")
+	if err != nil {
+		t.Fatalf("RsyncPushArgs returned error: %v", err)
+	}
+	key := filepath.Join(home, ".ssh", "example.pem")
+	want := []string{
+		"-avzP",
+		"-e", "ssh -i " + key,
+		"/tmp/project.zip",
+		"user@mac-host.example.com:~/Documents/",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeRemotePathKeepsRemoteAbsolutePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	got := NormalizeRemotePath("/var/tmp/uploads/")
+	if got != "/var/tmp/uploads/" {
+		t.Fatalf("path = %q", got)
+	}
+}
