@@ -31,7 +31,7 @@ func TestRsyncPushArgs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	profile := validProfile("~/.ssh/example.pem")
-	got, err := RsyncPushArgs(profile, "/tmp/project.zip", "~/Downloads/")
+	got, err := RsyncPushArgs(profile, "/tmp/project", "~/Downloads/", []string{"xcuserdata", ".git"})
 	if err != nil {
 		t.Fatalf("RsyncPushArgs returned error: %v", err)
 	}
@@ -39,7 +39,9 @@ func TestRsyncPushArgs(t *testing.T) {
 	want := []string{
 		"-avzP",
 		"-e", "ssh -i " + key,
-		"/tmp/project.zip",
+		"--exclude", "xcuserdata",
+		"--exclude", ".git",
+		"/tmp/project",
 		"user@mac-host.example.com:~/Downloads/",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -51,7 +53,7 @@ func TestRsyncPushArgsNormalizesShellExpandedHomeRemoteDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	profile := validProfile("~/.ssh/example.pem")
-	got, err := RsyncPushArgs(profile, "/tmp/project.zip", filepath.Join(home, "Documents")+"/")
+	got, err := RsyncPushArgs(profile, "/tmp/project", filepath.Join(home, "Documents")+"/", nil)
 	if err != nil {
 		t.Fatalf("RsyncPushArgs returned error: %v", err)
 	}
@@ -59,7 +61,7 @@ func TestRsyncPushArgsNormalizesShellExpandedHomeRemoteDir(t *testing.T) {
 	want := []string{
 		"-avzP",
 		"-e", "ssh -i " + key,
-		"/tmp/project.zip",
+		"/tmp/project",
 		"user@mac-host.example.com:~/Documents/",
 	}
 	if !reflect.DeepEqual(got, want) {

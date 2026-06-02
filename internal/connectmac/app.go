@@ -331,14 +331,13 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 	if !a.validateRsyncAccess(profile) {
 		return 1
 	}
-	localPath, cleanup, err := PackagePath(args[1], profile.Sync.Push.Excludes)
-	if err != nil {
-		fmt.Fprintln(a.Err, err)
+	localPath := args[1]
+	if _, err := os.Stat(localPath); err != nil {
+		fmt.Fprintf(a.Err, "read local path %s: %v\n", localPath, err)
 		return 1
 	}
-	defer cleanup()
 	remoteDir := NormalizeRemotePath(args[2])
-	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir)
+	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, profile.Sync.Push.Excludes)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1

@@ -122,7 +122,7 @@ Upload a local file or directory to a remote directory:
 cm push xcode-vnc ./MyProject ~/Downloads/
 ```
 
-When pushing a directory, `cm` creates a temporary zip file first, uploads the zip, and removes the temporary zip after rsync finishes.
+When pushing a directory, `cm` uploads it directly with rsync and applies the profile's push exclude rules.
 
 Use a custom config path:
 
@@ -230,7 +230,7 @@ user@<profile-host>:~/Desktop/file.zip -> .
 cm push xcode-vnc ./build.zip ~/Downloads/
 ```
 
-For directories, `cm push` packages the directory as a temporary zip before uploading. By default, these paths are excluded from the zip:
+For directories, `cm push` uploads the directory directly with rsync. By default, these paths are excluded:
 
 ```text
 xcuserdata
