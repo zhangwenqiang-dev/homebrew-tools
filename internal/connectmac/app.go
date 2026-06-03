@@ -617,12 +617,14 @@ func (ExecRunner) OpenURL(ctx context.Context, target string) error {
 }
 
 func DefaultConfigTemplate() string {
-	return `profiles:
+	return `defaults:
+  user: ec2-user
+  identity_file: ~/.ssh/example.pem
+
+profiles:
   xcode-vnc:
     description: Apple account: user@example.com
-    user: user
     host: mac-host.example.com
-    identity_file: ~/.ssh/example.pem
     sync:
       push:
         excludes:

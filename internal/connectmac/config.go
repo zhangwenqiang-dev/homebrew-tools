@@ -15,7 +15,13 @@ const DefaultConfigPath = "~/.connectmac/config.yaml"
 const DefaultAWSUser = "ec2-user"
 
 type Config struct {
+	Defaults ProfileDefaults
 	Profiles map[string]Profile
+}
+
+type ProfileDefaults struct {
+	User         string
+	IdentityFile string
 }
 
 type Profile struct {
@@ -144,6 +150,9 @@ func mergeConfigs(dst *Config, src Config, source string) error {
 	if dst.Profiles == nil {
 		dst.Profiles = map[string]Profile{}
 	}
+	if err := mergeDefaults(&dst.Defaults, src.Defaults, source); err != nil {
+		return err
+	}
 	for name, profile := range src.Profiles {
 		if _, exists := dst.Profiles[name]; exists {
 			return fmt.Errorf("duplicate profile %q in %s", name, source)
@@ -153,10 +162,29 @@ func mergeConfigs(dst *Config, src Config, source string) error {
 	return nil
 }
 
+func mergeDefaults(dst *ProfileDefaults, src ProfileDefaults, source string) error {
+	if err := mergeDefaultString(&dst.User, src.User, "user", source); err != nil {
+		return err
+	}
+	return mergeDefaultString(&dst.IdentityFile, src.IdentityFile, "identity_file", source)
+}
+
+func mergeDefaultString(dst *string, src, name, source string) error {
+	if src == "" {
+		return nil
+	}
+	if *dst != "" && *dst != src {
+		return fmt.Errorf("conflicting default %q in %s", name, source)
+	}
+	*dst = src
+	return nil
+}
+
 func ParseConfig(data string) (Config, error) {
 	cfg := Config{Profiles: map[string]Profile{}}
 	var current *Profile
 	var currentTunnel *Tunnel
+	inDefaults := false
 	inProfiles := false
 	inTunnels := false
 	inSync := false
@@ -178,7 +206,23 @@ func ParseConfig(data string) (Config, error) {
 		line := strings.TrimSpace(raw)
 
 		switch {
+		case indent == 0 && line == "defaults:":
+			inDefaults = true
+			inProfiles = false
+			current = nil
+			currentTunnel = nil
+			inTunnels = false
+			inSync = false
+			syncDirection = ""
+			inSyncExcludes = false
+			inVNC = false
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
+			continue
 		case indent == 0 && line == "profiles:":
+			inDefaults = false
 			inProfiles = true
 			continue
 		case indent == 0:
@@ -198,6 +242,13 @@ func ParseConfig(data string) (Config, error) {
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
 			awsList = ""
+			continue
+		}
+
+		if inDefaults && indent == 2 {
+			if err := applyDefaultField(&cfg.Defaults, line); err != nil {
+				return Config{}, err
+			}
 			continue
 		}
 
@@ -471,19 +522,25 @@ func ExpandPath(path string) (string, error) {
 func (c Config) Profile(name string) (Profile, bool) {
 	p, ok := c.Profiles[name]
 	if ok {
-		p.ApplyDefaults()
+		p.ApplyDefaults(c.Defaults)
 	}
 	return p, ok
 }
 
 func (c *Config) ApplyDefaults() {
 	for name, profile := range c.Profiles {
-		profile.ApplyDefaults()
+		profile.ApplyDefaults(c.Defaults)
 		c.Profiles[name] = profile
 	}
 }
 
-func (p *Profile) ApplyDefaults() {
+func (p *Profile) ApplyDefaults(defaults ProfileDefaults) {
+	if p.User == "" {
+		p.User = defaults.User
+	}
+	if p.IdentityFile == "" {
+		p.IdentityFile = defaults.IdentityFile
+	}
 	if p.User == "" && p.AWS.Profile != "" {
 		p.User = DefaultAWSUser
 	}
@@ -502,6 +559,22 @@ func EC2HostFromPublicIPRegion(publicIP, region string) string {
 	}
 	dashedIP := strings.ReplaceAll(publicIP, ".", "-")
 	return fmt.Sprintf("ec2-%s.%s.compute.amazonaws.com", dashedIP, region)
+}
+
+func applyDefaultField(defaults *ProfileDefaults, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "user":
+		defaults.User = value
+	case "identity_file":
+		defaults.IdentityFile = value
+	default:
+		return fmt.Errorf("unsupported defaults field %q", key)
+	}
+	return nil
 }
 
 func applyVNCField(p *Profile, line string) error {

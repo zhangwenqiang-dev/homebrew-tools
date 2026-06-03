@@ -59,12 +59,14 @@ Safety requirements:
 ## Proposed Config
 
 ```yaml
+defaults:
+  user: ec2-user
+  identity_file: ~/.ssh/example.pem
+
 profiles:
   example:
     description: "Apple account: apple@example.com"
-    user: user
     host: mac-host.example.com
-    identity_file: ~/.ssh/example.pem
 
     aws:
       profile: default

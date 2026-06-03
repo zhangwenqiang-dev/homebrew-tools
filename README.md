@@ -35,16 +35,19 @@ For many profiles, keep shared or important entries in `config.yaml` and put add
 ```
 
 Each file uses the same `profiles:` structure. `cm` loads `config.yaml` first, then all `.yaml` and `.yml` files in `profiles/` by filename. Duplicate profile names are rejected.
+Shared `user` and `identity_file` values can be placed in top-level `defaults:`. Profile values override defaults.
 
 Example profile:
 
 ```yaml
+defaults:
+  user: ec2-user
+  identity_file: ~/.ssh/example.pem
+
 profiles:
   xcode-vnc:
     description: Apple account: user@example.com
-    user: user
     host: mac-host.example.com
-    identity_file: ~/.ssh/example.pem
     sync:
       push:
         excludes:
@@ -197,7 +200,7 @@ AWS credentials are read through the normal AWS SDK credential chain. Keep acces
 Before starting SSH, `cm` checks:
 
 - The named profile exists.
-- `user`, `host`, and `identity_file` are configured.
+- `user`, `host`, and `identity_file` are configured directly or through `defaults:`.
 - The private key path is under `~/.ssh/`.
 - The private key file exists.
 - The private key file is not group/world-readable on Unix-like systems.
