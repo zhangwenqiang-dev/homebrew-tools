@@ -68,6 +68,32 @@ func TestAppInitAndList(t *testing.T) {
 	if !strings.Contains(out.String(), "xcode-vnc") {
 		t.Fatalf("list output = %q", out.String())
 	}
+	if !strings.Contains(out.String(), "PROFILE") || !strings.Contains(out.String(), "DESCRIPTION") {
+		t.Fatalf("list output missing table header = %q", out.String())
+	}
+}
+
+func TestAppListFormatsProfilesAsTable(t *testing.T) {
+	cfg := Config{Profiles: map[string]Profile{
+		"short": {
+			Name:        "short",
+			Description: "Apple account: user@example.com",
+		},
+		"long-profile-name": {
+			Name: "long-profile-name",
+		},
+	}}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.runList(cfg); code != 0 {
+		t.Fatalf("list code = %d", code)
+	}
+	text := out.String()
+	for _, want := range []string{"PROFILE", "DESCRIPTION", "long-profile-name  -", "short"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("list output missing %q: %q", want, text)
+		}
+	}
 }
 
 func TestAppCheck(t *testing.T) {

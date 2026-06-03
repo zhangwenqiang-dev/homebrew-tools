@@ -365,16 +365,24 @@ func mcpText(text string) map[string]interface{} {
 
 func listProfilesText(cfg Config) string {
 	var b bytes.Buffer
-	for _, name := range sortedProfileNames(cfg) {
-		p := cfg.Profiles[name]
-		if p.Description != "" {
-			fmt.Fprintf(&b, "%s\t%s\n", name, p.Description)
-		} else {
-			fmt.Fprintln(&b, name)
+	names := sortedProfileNames(cfg)
+	if len(names) == 0 {
+		return "no profiles configured"
+	}
+	nameWidth := len("PROFILE")
+	for _, name := range names {
+		if len(name) > nameWidth {
+			nameWidth = len(name)
 		}
 	}
-	if b.Len() == 0 {
-		return "no profiles configured"
+	fmt.Fprintf(&b, "%-*s  %s\n", nameWidth, "PROFILE", "DESCRIPTION")
+	fmt.Fprintf(&b, "%s  %s\n", strings.Repeat("-", nameWidth), strings.Repeat("-", len("DESCRIPTION")))
+	for _, name := range names {
+		description := cfg.Profiles[name].Description
+		if description == "" {
+			description = "-"
+		}
+		fmt.Fprintf(&b, "%-*s  %s\n", nameWidth, name, description)
 	}
 	return b.String()
 }

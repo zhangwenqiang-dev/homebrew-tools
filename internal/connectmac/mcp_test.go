@@ -17,6 +17,9 @@ func TestMCPListProfiles(t *testing.T) {
 	if !strings.Contains(out, "xcode-vnc") {
 		t.Fatalf("output = %q", out)
 	}
+	if !strings.Contains(out, "PROFILE") || !strings.Contains(out, "DESCRIPTION") {
+		t.Fatalf("output missing table header = %q", out)
+	}
 	if len(runner.rsync) != 0 {
 		t.Fatal("list must not run rsync")
 	}

@@ -255,19 +255,7 @@ func (a App) runInit(configPath string) int {
 }
 
 func (a App) runList(cfg Config) int {
-	names := sortedProfileNames(cfg)
-	if len(names) == 0 {
-		fmt.Fprintln(a.Out, "no profiles configured")
-		return 0
-	}
-	for _, name := range names {
-		profile := cfg.Profiles[name]
-		if profile.Description != "" {
-			fmt.Fprintf(a.Out, "%s\t%s\n", name, profile.Description)
-		} else {
-			fmt.Fprintln(a.Out, name)
-		}
-	}
+	fmt.Fprint(a.Out, listProfilesText(cfg))
 	return 0
 }
 
