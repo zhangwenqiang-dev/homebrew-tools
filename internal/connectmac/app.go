@@ -121,7 +121,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 		if code != 0 {
 			return code
 		}
-		return a.runAWS(cfg, args[1:])
+		return a.runAWS(ctx, cfg, args[1:])
 	default:
 		fmt.Fprintf(a.Err, "unknown command %q\n\n", command)
 		a.printUsage()
@@ -138,7 +138,7 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 	return 0
 }
 
-func (a App) runAWS(cfg Config, args []string) int {
+func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
 		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|destroy> <profile> [--confirm]")
 		return 2
@@ -177,23 +177,37 @@ func (a App) runAWS(cfg Config, args []string) int {
 	case "create":
 		fmt.Fprint(a.Out, FormatMacPlan(plan))
 		if !confirm {
-			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm after AWS execution support is enabled.")
+			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to execute AWS creation.")
 			return 0
 		}
-		fmt.Fprintln(a.Err, "aws create execution is not implemented yet; no AWS resources were changed")
-		return 1
+		_, result, err := a.AWSService.Create(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws create failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
+		return 0
 	case "status":
-		fmt.Fprint(a.Out, FormatMacStatusPreview(plan))
-		fmt.Fprintln(a.Out, "AWS status execution is not implemented yet; no AWS APIs were called.")
+		_, status, err := a.AWSService.Status(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws status failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSStatus(plan, status))
 		return 0
 	case "destroy":
 		fmt.Fprint(a.Out, FormatMacDestroyPreview(plan))
 		if !confirm {
-			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm after AWS execution support is enabled.")
+			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to execute AWS destruction.")
 			return 0
 		}
-		fmt.Fprintln(a.Err, "aws destroy execution is not implemented yet; no AWS resources were changed")
-		return 1
+		_, result, err := a.AWSService.Destroy(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws destroy failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, result))
+		return 0
 	default:
 		fmt.Fprintf(a.Err, "unknown aws command %q\n", command)
 		return 2

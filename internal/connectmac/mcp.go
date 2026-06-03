@@ -129,11 +129,11 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	case "cm_aws_plan":
 		return s.mcpAWSPlan(cfg, call.Arguments)
 	case "cm_aws_status":
-		return s.mcpAWSStatus(cfg, call.Arguments)
+		return s.mcpAWSStatus(ctx, cfg, call.Arguments)
 	case "cm_aws_create_mac":
-		return s.mcpAWSCreateMac(cfg, call.Arguments)
+		return s.mcpAWSCreateMac(ctx, cfg, call.Arguments)
 	case "cm_aws_destroy_mac":
-		return s.mcpAWSDestroyMac(cfg, call.Arguments)
+		return s.mcpAWSDestroyMac(ctx, cfg, call.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", call.Name)
 	}
@@ -236,48 +236,66 @@ func (s MCPServer) mcpAWSPlan(cfg Config, args map[string]interface{}) (interfac
 	return mcpText(FormatMacPlan(plan)), nil
 }
 
-func (s MCPServer) mcpAWSStatus(cfg Config, args map[string]interface{}) (interface{}, error) {
-	plan, err := s.mcpMacPlan(cfg, args)
+func (s MCPServer) mcpAWSStatus(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
 		return nil, err
 	}
-	return mcpText(FormatMacStatusPreview(plan) + "AWS status execution is not implemented yet; no AWS APIs were called."), nil
+	_, status, err := s.App.AWSService.Status(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(FormatAWSStatus(plan, status)), nil
 }
 
-func (s MCPServer) mcpAWSCreateMac(cfg Config, args map[string]interface{}) (interface{}, error) {
-	plan, err := s.mcpMacPlan(cfg, args)
+func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
 		return nil, err
 	}
 	text := FormatMacPlan(plan)
 	if !boolArg(args, "confirm") {
-		return mcpText(text + "Preview only. Call again with confirm=true after AWS execution support is enabled."), nil
+		return mcpText(text + "Preview only. Call again with confirm=true to execute AWS creation."), nil
 	}
-	return mcpText(text + "AWS create execution is not implemented yet; no AWS resources were changed."), nil
+	_, result, err := s.App.AWSService.Create(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(text + FormatAWSCreateResult(plan, result)), nil
 }
 
-func (s MCPServer) mcpAWSDestroyMac(cfg Config, args map[string]interface{}) (interface{}, error) {
-	plan, err := s.mcpMacPlan(cfg, args)
+func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
 		return nil, err
 	}
 	text := FormatMacDestroyPreview(plan)
 	if !boolArg(args, "confirm") {
-		return mcpText(text + "Preview only. Call again with confirm=true after AWS execution support is enabled."), nil
+		return mcpText(text + "Preview only. Call again with confirm=true to execute AWS destruction."), nil
 	}
-	return mcpText(text + "AWS destroy execution is not implemented yet; no AWS resources were changed."), nil
+	_, result, err := s.App.AWSService.Destroy(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(text + FormatAWSDestroyResult(plan, result)), nil
 }
 
 func (s MCPServer) mcpMacPlan(cfg Config, args map[string]interface{}) (MacPlan, error) {
+	_, plan, err := s.mcpMacProfilePlan(cfg, args)
+	return plan, err
+}
+
+func (s MCPServer) mcpMacProfilePlan(cfg Config, args map[string]interface{}) (Profile, MacPlan, error) {
 	profile, err := requireMCPProfile(cfg, args)
 	if err != nil {
-		return MacPlan{}, err
+		return Profile{}, MacPlan{}, err
 	}
 	errs := s.App.Validator.ValidateAWSProfile(profile)
 	if len(errs) > 0 {
-		return MacPlan{}, errors.New(strings.TrimSpace(formatErrors(errs)))
+		return Profile{}, MacPlan{}, errors.New(strings.TrimSpace(formatErrors(errs)))
 	}
-	return s.App.AWSService.Plan(profile)
+	plan, err := s.App.AWSService.Plan(profile)
+	return profile, plan, err
 }
 
 func readMCPMessage(reader *bufio.Reader) ([]byte, error) {
@@ -421,8 +439,8 @@ func mcpTools() []map[string]interface{} {
 			"required": []string{"profile"},
 		}),
 		mcpTool("cm_aws_plan", "Preview AWS Mac Dedicated Host, EC2, and EIP operations for a profile.", profileSchema()),
-		mcpTool("cm_aws_status", "Preview AWS status lookup target for a profile.", profileSchema()),
-		mcpTool("cm_aws_create_mac", "Preview AWS Mac creation. Execution requires confirm=true after AWS execution support is enabled.", map[string]interface{}{
+		mcpTool("cm_aws_status", "Describe managed AWS Mac Dedicated Hosts, EC2 instances, and Elastic IP association for a profile.", profileSchema()),
+		mcpTool("cm_aws_create_mac", "Preview or execute AWS Mac creation. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -430,7 +448,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
-		mcpTool("cm_aws_destroy_mac", "Preview AWS Mac destruction. Execution requires confirm=true after AWS execution support is enabled.", map[string]interface{}{
+		mcpTool("cm_aws_destroy_mac", "Preview or execute AWS Mac destruction. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),

@@ -1,17 +1,25 @@
 package connectmac
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 )
 
 type AWSService struct {
-	Now func() time.Time
+	Now       func() time.Time
+	NewClient func(ctx context.Context, plan MacPlan) (AWSClient, error)
 }
 
 func NewAWSService() AWSService {
-	return AWSService{Now: time.Now}
+	return AWSService{
+		Now: time.Now,
+		NewClient: func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+			client, err := NewRealAWSClient(ctx, plan)
+			return client, err
+		},
+	}
 }
 
 func (s AWSService) Plan(profile Profile) (MacPlan, error) {
@@ -20,6 +28,140 @@ func (s AWSService) Plan(profile Profile) (MacPlan, error) {
 		now = s.Now()
 	}
 	return BuildMacPlan(profile, now)
+}
+
+func (s AWSService) Status(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	status, err := client.DescribeStatus(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	return plan, status, nil
+}
+
+func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCreateResult, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	if _, err := client.VerifyElasticIPOwner(ctx, plan); err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	var lastErr error
+	for _, instanceType := range plan.InstanceTypePriority {
+		ami := amiForInstanceType(AWSConfig{AMI: AWSAMIConfig{MacX86: profile.AWS.AMI.MacX86, MacARM: profile.AWS.AMI.MacARM}}, instanceType)
+		if ami == "" {
+			continue
+		}
+		for _, zoneID := range plan.AvailabilityZoneIDs {
+			hostID, err := client.AllocateHost(ctx, plan, zoneID, instanceType)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			instanceID, err := client.RunInstance(ctx, plan, hostID, instanceType, ami)
+			if err != nil {
+				_ = client.ReleaseHost(ctx, hostID)
+				lastErr = err
+				continue
+			}
+			associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
+			if err != nil {
+				_ = client.TerminateInstance(ctx, instanceID)
+				_ = client.ReleaseHost(ctx, hostID)
+				lastErr = err
+				continue
+			}
+			return plan, AWSCreateResult{
+				HostID:              hostID,
+				InstanceID:          instanceID,
+				AssociationID:       associationID,
+				AvailabilityZoneID:  zoneID,
+				InstanceType:        instanceType,
+				AMI:                 ami,
+				ElasticIPAllocation: plan.ElasticIPAllocationID,
+			}, nil
+		}
+	}
+	if lastErr != nil {
+		return MacPlan{}, AWSCreateResult{}, lastErr
+	}
+	return MacPlan{}, AWSCreateResult{}, fmt.Errorf("no aws create candidate was attempted")
+}
+
+func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSDestroyResult, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, AWSDestroyResult{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSDestroyResult{}, err
+	}
+	status, err := client.DescribeStatus(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSDestroyResult{}, err
+	}
+	result := AWSDestroyResult{}
+	for _, instance := range status.Instances {
+		if !managedTagsMatch(instance.Tags, plan) {
+			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to terminate instance %s because required safety tags do not match", instance.InstanceID)
+		}
+		if status.ElasticIP.AssociationID != "" && status.ElasticIP.InstanceID == instance.InstanceID {
+			if err := client.DisassociateElasticIP(ctx, status.ElasticIP.AssociationID); err != nil {
+				return MacPlan{}, AWSDestroyResult{}, err
+			}
+			result.DisassociatedElasticIP = true
+		}
+		if err := client.TerminateInstance(ctx, instance.InstanceID); err != nil {
+			return MacPlan{}, AWSDestroyResult{}, err
+		}
+		result.TerminatedInstances = append(result.TerminatedInstances, instance.InstanceID)
+	}
+	for _, host := range status.Hosts {
+		if !managedTagsMatch(host.Tags, plan) {
+			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match", host.HostID)
+		}
+		if err := client.ReleaseHost(ctx, host.HostID); err != nil {
+			return MacPlan{}, AWSDestroyResult{}, err
+		}
+		result.ReleasedHosts = append(result.ReleasedHosts, host.HostID)
+	}
+	return plan, result, nil
+}
+
+func (s AWSService) client(ctx context.Context, plan MacPlan) (AWSClient, error) {
+	if s.NewClient == nil {
+		return NewRealAWSClient(ctx, plan)
+	}
+	return s.NewClient(ctx, plan)
+}
+
+type AWSCreateResult struct {
+	HostID              string
+	InstanceID          string
+	AssociationID       string
+	AvailabilityZoneID  string
+	InstanceType        string
+	AMI                 string
+	ElasticIPAllocation string
+}
+
+type AWSDestroyResult struct {
+	DisassociatedElasticIP bool
+	TerminatedInstances    []string
+	ReleasedHosts          []string
 }
 
 func FormatMacPlan(plan MacPlan) string {
@@ -69,10 +211,69 @@ func FormatMacStatusPreview(plan MacPlan) string {
 	return b.String()
 }
 
+func FormatAWSStatus(plan MacPlan, status AWSStatus) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac status for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Caller: %s\n", status.CallerIdentity.ARN)
+	fmt.Fprintf(&b, "Account: %s\n", MaskAWSAccount(status.CallerIdentity.Account))
+	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
+	fmt.Fprintf(&b, "Dedicated hosts: %d\n", len(status.Hosts))
+	for _, host := range status.Hosts {
+		fmt.Fprintf(&b, "- host=%s state=%s type=%s zone=%s\n", host.HostID, host.State, host.InstanceType, host.ZoneID)
+	}
+	fmt.Fprintf(&b, "Instances: %d\n", len(status.Instances))
+	for _, instance := range status.Instances {
+		fmt.Fprintf(&b, "- instance=%s state=%s type=%s host=%s public_ip=%s\n", instance.InstanceID, instance.State, instance.InstanceType, instance.HostID, instance.PublicIP)
+	}
+	fmt.Fprintf(&b, "Elastic IP: allocation=%s association=%s instance=%s public_ip=%s\n", status.ElasticIP.AllocationID, status.ElasticIP.AssociationID, status.ElasticIP.InstanceID, status.ElasticIP.PublicIP)
+	return b.String()
+}
+
+func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac created for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Host: %s\n", result.HostID)
+	fmt.Fprintf(&b, "Instance: %s\n", result.InstanceID)
+	fmt.Fprintf(&b, "EIP association: %s\n", result.AssociationID)
+	fmt.Fprintf(&b, "Selected: %s %s %s\n", result.AvailabilityZoneID, result.InstanceType, result.AMI)
+	return b.String()
+}
+
+func FormatAWSDestroyResult(plan MacPlan, result AWSDestroyResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac destroy executed for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Disassociated Elastic IP: %t\n", result.DisassociatedElasticIP)
+	fmt.Fprintf(&b, "Terminated instances: %s\n", strings.Join(result.TerminatedInstances, ", "))
+	fmt.Fprintf(&b, "Released hosts: %s\n", strings.Join(result.ReleasedHosts, ", "))
+	return b.String()
+}
+
 func FormatAWSTags(tags []AWSTagConfig) string {
 	parts := make([]string, 0, len(tags))
 	for _, tag := range tags {
 		parts = append(parts, fmt.Sprintf("%s=%s", tag.Key, tag.Value))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func managedTagsMatch(tags []AWSTagConfig, plan MacPlan) bool {
+	return hasTag(tags, "cm-managed", "true") &&
+		hasTag(tags, "cm-profile", plan.ProfileName) &&
+		hasTag(tags, "cm-account-email", plan.AccountEmail)
+}
+
+func hasTag(tags []AWSTagConfig, key, value string) bool {
+	for _, tag := range tags {
+		if tag.Key == key && tag.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func MaskAWSAccount(account string) string {
+	if len(account) <= 8 {
+		return account
+	}
+	return account[:4] + "****" + account[len(account)-4:]
 }

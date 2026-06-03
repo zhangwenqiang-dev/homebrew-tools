@@ -175,7 +175,9 @@ cm aws create xcode-vnc
 cm aws destroy xcode-vnc
 ```
 
-Current AWS commands are safe previews only. They validate the profile, select the architecture-compatible AMI and instance type, and print the intended Dedicated Host, EC2, and Elastic IP operations. They do not call AWS APIs yet.
+`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, and Elastic IP association. `cm aws create` and `cm aws destroy` preview by default; pass `--confirm` to execute the AWS mutations.
+
+AWS credentials are read through the normal AWS SDK credential chain. Keep access keys in `~/.aws/credentials`, AWS SSO, environment variables, or IAM roles. Do not put AWS secret keys in `~/.connectmac/config.yaml`.
 
 ## Safety Checks
 
