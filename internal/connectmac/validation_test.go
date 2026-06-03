@@ -56,6 +56,41 @@ func TestValidateProfileRejectsKeyOutsideSSHDir(t *testing.T) {
 	}
 }
 
+func TestValidateAWSProfileSuccess(t *testing.T) {
+	profile := validAWSProfile()
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateAWSProfileRejectsInvalidZoneID(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.AvailabilityZoneIDs = []string{"us-west-2a"}
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if !containsError(errs, "must end with -az1") {
+		t.Fatalf("expected zone id error, got %v", errs)
+	}
+}
+
+func TestValidateAWSProfileRejectsExplicitIntelWithoutFallback(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.InstanceTypePriority = []string{"mac1.metal"}
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if !containsError(errs, "allow_intel_fallback") {
+		t.Fatalf("expected intel fallback error, got %v", errs)
+	}
+}
+
+func TestValidateAWSProfileRequiresARMAMI(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.AMI.MacARM = ""
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if !containsError(errs, "aws.ami.mac_arm") {
+		t.Fatalf("expected arm ami error, got %v", errs)
+	}
+}
+
 func NewValidatorForTest(portChecker PortChecker) Validator {
 	if portChecker == nil {
 		portChecker = func(int) error { return nil }
@@ -91,6 +126,26 @@ func validProfile(key string) Profile {
 			RemoteHost: "localhost",
 			RemotePort: 5900,
 		}},
+	}
+}
+
+func validAWSProfile() Profile {
+	return Profile{
+		Name: "xcode-vnc",
+		AWS: AWSConfig{
+			Profile:               "cm-xcode",
+			Region:                "us-west-2",
+			ShortName:             "xcode",
+			AccountEmail:          "user@example.com",
+			AMI:                   AWSAMIConfig{MacX86: "ami-0538568e5d3653bea", MacARM: "ami-063755aadeb97329a"},
+			KeyName:               "example-key",
+			SubnetID:              "<subnet-id>",
+			SecurityGroupID:       "<security-group-id>",
+			ElasticIPAllocationID: "<elastic-ip-allocation-id>",
+			ElasticIPOwnerTag:     AWSTagConfig{Key: "Apple", Value: "user@example.com"},
+			AvailabilityZoneIDs:   []string{"usw2-az1", "usw2-az2"},
+			InstanceTypePriority:  []string{"mac2.metal", "mac2-m2.metal"},
+		},
 	}
 }
 

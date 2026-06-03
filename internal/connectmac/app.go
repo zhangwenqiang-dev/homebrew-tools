@@ -27,6 +27,7 @@ type App struct {
 	Runner       Runner
 	Validator    Validator
 	StateManager StateManager
+	AWSService   AWSService
 }
 
 func NewApp(out, err io.Writer) App {
@@ -36,6 +37,7 @@ func NewApp(out, err io.Writer) App {
 		Runner:       ExecRunner{},
 		Validator:    NewValidator(),
 		StateManager: NewStateManager(DefaultStateDir),
+		AWSService:   NewAWSService(),
 	}
 }
 
@@ -114,6 +116,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runStatus()
 	case "mcp":
 		return a.runMCP(ctx, configPath)
+	case "aws":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runAWS(cfg, args[1:])
 	default:
 		fmt.Fprintf(a.Err, "unknown command %q\n\n", command)
 		a.printUsage()
@@ -128,6 +136,68 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 		return 1
 	}
 	return 0
+}
+
+func (a App) runAWS(cfg Config, args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|destroy> <profile> [--confirm]")
+		return 2
+	}
+	command := args[0]
+	profileName := args[1]
+	confirm := false
+	for _, arg := range args[2:] {
+		switch arg {
+		case "--confirm":
+			confirm = true
+		default:
+			fmt.Fprintf(a.Err, "unknown aws option %q\n", arg)
+			return 2
+		}
+	}
+	profile, ok := cfg.Profile(profileName)
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, profileName))
+		return 2
+	}
+	errs := a.Validator.ValidateAWSProfile(profile)
+	if len(errs) > 0 {
+		printErrors(a.Err, errs)
+		return 1
+	}
+	plan, err := a.AWSService.Plan(profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	switch command {
+	case "plan":
+		fmt.Fprint(a.Out, FormatMacPlan(plan))
+		return 0
+	case "create":
+		fmt.Fprint(a.Out, FormatMacPlan(plan))
+		if !confirm {
+			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm after AWS execution support is enabled.")
+			return 0
+		}
+		fmt.Fprintln(a.Err, "aws create execution is not implemented yet; no AWS resources were changed")
+		return 1
+	case "status":
+		fmt.Fprint(a.Out, FormatMacStatusPreview(plan))
+		fmt.Fprintln(a.Out, "AWS status execution is not implemented yet; no AWS APIs were called.")
+		return 0
+	case "destroy":
+		fmt.Fprint(a.Out, FormatMacDestroyPreview(plan))
+		if !confirm {
+			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm after AWS execution support is enabled.")
+			return 0
+		}
+		fmt.Fprintln(a.Err, "aws destroy execution is not implemented yet; no AWS resources were changed")
+		return 1
+	default:
+		fmt.Fprintf(a.Err, "unknown aws command %q\n", command)
+		return 2
+	}
 }
 
 func (a App) runInit(configPath string) int {
@@ -452,6 +522,10 @@ func (a App) printUsage() {
   cm push <profile> <local-path> <remote-dir> [--config <path>]
   cm forget-host <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
+  cm aws plan <profile> [--config <path>]
+  cm aws create <profile> [--confirm] [--config <path>]
+  cm aws status <profile> [--config <path>]
+  cm aws destroy <profile> [--confirm] [--config <path>]
   cm mcp [--config <path>]
   cm stop <profile>
   cm status
@@ -527,6 +601,36 @@ func DefaultConfigTemplate() string {
         excludes: []
     vnc:
       username: mac-user
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      short_name: xcode
+      account_email: user@example.com
+      ami:
+        mac_x86: ami-0538568e5d3653bea
+        mac_arm: ami-063755aadeb97329a
+      key_name: example-key
+      subnet_id: "<subnet-id>"
+      security_group_id: "<security-group-id>"
+      elastic_ip_allocation_id: "<elastic-ip-allocation-id>"
+      elastic_ip_owner_tag:
+        key: Apple
+        value: user@example.com
+      availability_zone_ids:
+        - usw2-az1
+        - usw2-az2
+        - usw2-az3
+        - usw2-az4
+      instance_type_priority:
+        - mac2.metal
+        - mac2-m2.metal
+        - mac-m4.metal
+        - mac2-m2pro.metal
+        - mac-m4pro.metal
+        - mac2-m1ultra.metal
+        - mac-m4max.metal
+        - mac-m3ultra.metal
+      allow_intel_fallback: false
     tunnels:
       - local_port: 5900
         remote_host: localhost

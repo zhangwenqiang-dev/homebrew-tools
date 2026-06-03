@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMCPListProfiles(t *testing.T) {
@@ -83,6 +84,19 @@ func TestMCPForgetHostConfirmRuns(t *testing.T) {
 	}
 }
 
+func TestMCPAWSPlan(t *testing.T) {
+	app, config, runner := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_aws_plan", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "AWS Mac plan") || !strings.Contains(out, "xcode-xcode-20260603-user@example.com") {
+		t.Fatalf("output = %q", out)
+	}
+	if len(runner.rsync) != 0 || runner.forgotHost != "" {
+		t.Fatal("aws plan must not run side-effect commands")
+	}
+}
+
 func mcpTestApp(t *testing.T) (App, string, *fakeRunner) {
 	t.Helper()
 	dir := t.TempDir()
@@ -98,6 +112,9 @@ func mcpTestApp(t *testing.T) (App, string, *fakeRunner) {
 			Dir:       filepath.Join(dir, "state"),
 			IsRunning: func(pid int) bool { return pid == 55 },
 		},
+		AWSService: AWSService{Now: func() time.Time {
+			return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+		}},
 	}
 	return app, config, runner
 }

@@ -24,10 +24,37 @@ type Profile struct {
 	Tunnels      []Tunnel
 	Sync         SyncConfig
 	VNC          VNCConfig
+	AWS          AWSConfig
 }
 
 type VNCConfig struct {
 	Username string
+}
+
+type AWSConfig struct {
+	Profile               string
+	Region                string
+	ShortName             string
+	AccountEmail          string
+	AMI                   AWSAMIConfig
+	KeyName               string
+	SubnetID              string
+	SecurityGroupID       string
+	ElasticIPAllocationID string
+	ElasticIPOwnerTag     AWSTagConfig
+	AvailabilityZoneIDs   []string
+	InstanceTypePriority  []string
+	AllowIntelFallback    bool
+}
+
+type AWSAMIConfig struct {
+	MacX86 string
+	MacARM string
+}
+
+type AWSTagConfig struct {
+	Key   string
+	Value string
 }
 
 type SyncConfig struct {
@@ -71,6 +98,10 @@ func ParseConfig(data string) (Config, error) {
 	syncDirection := ""
 	inSyncExcludes := false
 	inVNC := false
+	inAWS := false
+	inAWSAMI := false
+	inAWSEIPOwnerTag := false
+	awsList := ""
 
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	for scanner.Scan() {
@@ -98,6 +129,10 @@ func ParseConfig(data string) (Config, error) {
 			syncDirection = ""
 			inSyncExcludes = false
 			inVNC = false
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
 			continue
 		}
 
@@ -111,6 +146,10 @@ func ParseConfig(data string) (Config, error) {
 			syncDirection = ""
 			inSyncExcludes = false
 			inVNC = false
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
 			currentTunnel = nil
 			continue
 		}
@@ -125,6 +164,10 @@ func ParseConfig(data string) (Config, error) {
 			syncDirection = ""
 			inSyncExcludes = false
 			inVNC = false
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
 		}
@@ -139,6 +182,28 @@ func ParseConfig(data string) (Config, error) {
 			syncDirection = ""
 			inSyncExcludes = false
 			inVNC = true
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if indent == 4 && line == "aws:" {
+			if currentTunnel != nil {
+				current.Tunnels = append(current.Tunnels, *currentTunnel)
+				currentTunnel = nil
+			}
+			inTunnels = false
+			inSync = false
+			syncDirection = ""
+			inSyncExcludes = false
+			inVNC = false
+			inAWS = true
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
 		}
@@ -219,6 +284,74 @@ func ParseConfig(data string) (Config, error) {
 			continue
 		}
 
+		if inAWS && indent == 6 && line == "ami:" {
+			inAWSAMI = true
+			inAWSEIPOwnerTag = false
+			awsList = ""
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && indent == 6 && line == "elastic_ip_owner_tag:" {
+			inAWSAMI = false
+			inAWSEIPOwnerTag = true
+			awsList = ""
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && indent == 6 && (line == "availability_zone_ids:" || line == "instance_type_priority:") {
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = strings.TrimSuffix(line, ":")
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && indent == 6 {
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
+			if err := applyAWSField(current, line); err != nil {
+				return Config{}, err
+			}
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && inAWSAMI && indent == 8 {
+			if err := applyAWSAMIField(current, line); err != nil {
+				return Config{}, err
+			}
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && inAWSEIPOwnerTag && indent == 8 {
+			if err := applyAWSTagField(&current.AWS.ElasticIPOwnerTag, line); err != nil {
+				return Config{}, err
+			}
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && awsList != "" && indent == 8 && strings.HasPrefix(line, "- ") {
+			item := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "- ")), `"'`)
+			if item == "" {
+				return Config{}, fmt.Errorf("aws %s item cannot be empty", awsList)
+			}
+			switch awsList {
+			case "availability_zone_ids":
+				current.AWS.AvailabilityZoneIDs = append(current.AWS.AvailabilityZoneIDs, item)
+			case "instance_type_priority":
+				current.AWS.InstanceTypePriority = append(current.AWS.InstanceTypePriority, item)
+			default:
+				return Config{}, fmt.Errorf("unsupported aws list %q", awsList)
+			}
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
 		if indent == 4 {
 			if currentTunnel != nil {
 				current.Tunnels = append(current.Tunnels, *currentTunnel)
@@ -229,6 +362,10 @@ func ParseConfig(data string) (Config, error) {
 			syncDirection = ""
 			inSyncExcludes = false
 			inVNC = false
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			awsList = ""
 			if err := applyProfileField(current, line); err != nil {
 				return Config{}, err
 			}
@@ -281,6 +418,71 @@ func applyVNCField(p *Profile, line string) error {
 		p.VNC.Username = value
 	default:
 		return fmt.Errorf("unsupported vnc field %q", key)
+	}
+	return nil
+}
+
+func applyAWSField(p *Profile, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "profile":
+		p.AWS.Profile = value
+	case "region":
+		p.AWS.Region = value
+	case "short_name":
+		p.AWS.ShortName = value
+	case "account_email":
+		p.AWS.AccountEmail = value
+	case "key_name":
+		p.AWS.KeyName = value
+	case "subnet_id":
+		p.AWS.SubnetID = value
+	case "security_group_id":
+		p.AWS.SecurityGroupID = value
+	case "elastic_ip_allocation_id":
+		p.AWS.ElasticIPAllocationID = value
+	case "allow_intel_fallback":
+		p.AWS.AllowIntelFallback, err = strconv.ParseBool(value)
+	default:
+		return fmt.Errorf("unsupported aws field %q", key)
+	}
+	if err != nil {
+		return fmt.Errorf("%s must be true or false", key)
+	}
+	return nil
+}
+
+func applyAWSAMIField(p *Profile, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "mac_x86":
+		p.AWS.AMI.MacX86 = value
+	case "mac_arm":
+		p.AWS.AMI.MacARM = value
+	default:
+		return fmt.Errorf("unsupported aws ami field %q", key)
+	}
+	return nil
+}
+
+func applyAWSTagField(tag *AWSTagConfig, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "key":
+		tag.Key = value
+	case "value":
+		tag.Value = value
+	default:
+		return fmt.Errorf("unsupported aws tag field %q", key)
 	}
 	return nil
 }

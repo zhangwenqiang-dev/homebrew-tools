@@ -26,6 +26,28 @@ profiles:
           - .DS_Store
     vnc:
       username: mac-user
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      short_name: xcode
+      account_email: user@example.com
+      ami:
+        mac_x86: ami-0538568e5d3653bea
+        mac_arm: ami-063755aadeb97329a
+      key_name: example-key
+      subnet_id: "<subnet-id>"
+      security_group_id: "<security-group-id>"
+      elastic_ip_allocation_id: "<elastic-ip-allocation-id>"
+      elastic_ip_owner_tag:
+        key: Apple
+        value: user@example.com
+      availability_zone_ids:
+        - usw2-az1
+        - usw2-az2
+      instance_type_priority:
+        - mac2.metal
+        - mac2-m2.metal
+      allow_intel_fallback: false
     tunnels:
       - local_port: 5900
         remote_host: localhost
@@ -58,6 +80,24 @@ func TestParseConfig(t *testing.T) {
 	}
 	if profile.VNC.Username != "mac-user" {
 		t.Fatalf("vnc username = %q, want mac-user", profile.VNC.Username)
+	}
+	if profile.AWS.Profile != "cm-xcode" {
+		t.Fatalf("aws profile = %q, want cm-xcode", profile.AWS.Profile)
+	}
+	if profile.AWS.AMI.MacX86 != "ami-0538568e5d3653bea" {
+		t.Fatalf("aws ami mac_x86 = %q", profile.AWS.AMI.MacX86)
+	}
+	if profile.AWS.AMI.MacARM != "ami-063755aadeb97329a" {
+		t.Fatalf("aws ami mac_arm = %q", profile.AWS.AMI.MacARM)
+	}
+	if len(profile.AWS.AvailabilityZoneIDs) != 2 {
+		t.Fatalf("availability zone count = %d, want 2", len(profile.AWS.AvailabilityZoneIDs))
+	}
+	if len(profile.AWS.InstanceTypePriority) != 2 {
+		t.Fatalf("instance type priority count = %d, want 2", len(profile.AWS.InstanceTypePriority))
+	}
+	if profile.AWS.AllowIntelFallback {
+		t.Fatal("allow_intel_fallback = true, want false")
 	}
 	if profile.Tunnels[0].LocalPort != 5900 || profile.Tunnels[0].RemoteHost != "localhost" || profile.Tunnels[0].RemotePort != 5900 {
 		t.Fatalf("unexpected tunnel: %+v", profile.Tunnels[0])

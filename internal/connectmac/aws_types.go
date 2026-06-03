@@ -1,0 +1,124 @@
+package connectmac
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+var DefaultMacInstanceTypePriority = []string{
+	"mac2.metal",
+	"mac2-m2.metal",
+	"mac-m4.metal",
+	"mac2-m2pro.metal",
+	"mac-m4pro.metal",
+	"mac2-m1ultra.metal",
+	"mac-m4max.metal",
+	"mac-m3ultra.metal",
+	"mac1.metal",
+}
+
+var SupportedMacInstanceTypes = map[string]bool{
+	"mac1.metal":         true,
+	"mac2.metal":         true,
+	"mac2-m1ultra.metal": true,
+	"mac2-m2.metal":      true,
+	"mac2-m2pro.metal":   true,
+	"mac-m3ultra.metal":  true,
+	"mac-m4.metal":       true,
+	"mac-m4max.metal":    true,
+	"mac-m4pro.metal":    true,
+}
+
+type MacPlan struct {
+	ProfileName           string
+	ResourceName          string
+	Region                string
+	AWSProfile            string
+	AccountEmail          string
+	AvailabilityZoneIDs   []string
+	InstanceTypePriority  []string
+	SelectedInstanceType  string
+	SelectedAMI           string
+	KeyName               string
+	SubnetID              string
+	SecurityGroupID       string
+	ElasticIPAllocationID string
+	ElasticIPOwnerTag     AWSTagConfig
+	Tags                  []AWSTagConfig
+}
+
+func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
+	if len(profile.AWS.InstanceTypePriority) == 0 {
+		profile.AWS.InstanceTypePriority = append([]string(nil), DefaultMacInstanceTypePriority...)
+	}
+	if !profile.AWS.AllowIntelFallback {
+		profile.AWS.InstanceTypePriority = withoutIntel(profile.AWS.InstanceTypePriority)
+	}
+	selectedInstanceType := ""
+	selectedAMI := ""
+	for _, instanceType := range profile.AWS.InstanceTypePriority {
+		if !SupportedMacInstanceTypes[instanceType] {
+			return MacPlan{}, fmt.Errorf("unsupported aws instance type %q", instanceType)
+		}
+		ami := amiForInstanceType(profile.AWS, instanceType)
+		if ami == "" {
+			continue
+		}
+		selectedInstanceType = instanceType
+		selectedAMI = ami
+		break
+	}
+	if selectedInstanceType == "" {
+		return MacPlan{}, fmt.Errorf("no architecture-compatible aws instance type and AMI configured")
+	}
+	resourceName := MacResourceName(profile.AWS.ShortName, now, profile.AWS.AccountEmail)
+	return MacPlan{
+		ProfileName:           profile.Name,
+		ResourceName:          resourceName,
+		Region:                profile.AWS.Region,
+		AWSProfile:            profile.AWS.Profile,
+		AccountEmail:          profile.AWS.AccountEmail,
+		AvailabilityZoneIDs:   append([]string(nil), profile.AWS.AvailabilityZoneIDs...),
+		InstanceTypePriority:  append([]string(nil), profile.AWS.InstanceTypePriority...),
+		SelectedInstanceType:  selectedInstanceType,
+		SelectedAMI:           selectedAMI,
+		KeyName:               profile.AWS.KeyName,
+		SubnetID:              profile.AWS.SubnetID,
+		SecurityGroupID:       profile.AWS.SecurityGroupID,
+		ElasticIPAllocationID: profile.AWS.ElasticIPAllocationID,
+		ElasticIPOwnerTag:     profile.AWS.ElasticIPOwnerTag,
+		Tags: []AWSTagConfig{
+			{Key: "Name", Value: resourceName},
+			{Key: "cm-managed", Value: "true"},
+			{Key: "cm-profile", Value: profile.Name},
+			{Key: "cm-account-email", Value: profile.AWS.AccountEmail},
+		},
+	}, nil
+}
+
+func MacResourceName(shortName string, now time.Time, accountEmail string) string {
+	return fmt.Sprintf("xcode-%s-%s-%s", strings.ToLower(shortName), now.Format("20060102"), accountEmail)
+}
+
+func IsIntelMacInstanceType(instanceType string) bool {
+	return instanceType == "mac1.metal"
+}
+
+func amiForInstanceType(cfg AWSConfig, instanceType string) string {
+	if IsIntelMacInstanceType(instanceType) {
+		return cfg.AMI.MacX86
+	}
+	return cfg.AMI.MacARM
+}
+
+func withoutIntel(instanceTypes []string) []string {
+	out := make([]string, 0, len(instanceTypes))
+	for _, instanceType := range instanceTypes {
+		if IsIntelMacInstanceType(instanceType) {
+			continue
+		}
+		out = append(out, instanceType)
+	}
+	return out
+}

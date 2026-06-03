@@ -81,6 +81,75 @@ func (v Validator) ValidateAccess(profile Profile) []error {
 	return errs
 }
 
+func (v Validator) ValidateAWSProfile(profile Profile) []error {
+	var errs []error
+	if profile.Name == "" {
+		errs = append(errs, errors.New("profile name is empty"))
+	}
+	requiredAWS := []struct {
+		name  string
+		value string
+	}{
+		{"aws.profile", profile.AWS.Profile},
+		{"aws.region", profile.AWS.Region},
+		{"aws.short_name", profile.AWS.ShortName},
+		{"aws.account_email", profile.AWS.AccountEmail},
+		{"aws.key_name", profile.AWS.KeyName},
+		{"aws.subnet_id", profile.AWS.SubnetID},
+		{"aws.security_group_id", profile.AWS.SecurityGroupID},
+		{"aws.elastic_ip_allocation_id", profile.AWS.ElasticIPAllocationID},
+		{"aws.elastic_ip_owner_tag.key", profile.AWS.ElasticIPOwnerTag.Key},
+		{"aws.elastic_ip_owner_tag.value", profile.AWS.ElasticIPOwnerTag.Value},
+	}
+	for _, field := range requiredAWS {
+		if field.value == "" {
+			errs = append(errs, fmt.Errorf("%s is required", field.name))
+		}
+	}
+	if len(profile.AWS.AvailabilityZoneIDs) == 0 {
+		errs = append(errs, errors.New("aws.availability_zone_ids is required"))
+	}
+	for _, zoneID := range profile.AWS.AvailabilityZoneIDs {
+		if !validAvailabilityZoneID(zoneID) {
+			errs = append(errs, fmt.Errorf("aws availability zone id %q must end with -az1, -az2, -az3, or -az4", zoneID))
+		}
+	}
+	instanceTypes := profile.AWS.InstanceTypePriority
+	explicitInstanceTypes := len(instanceTypes) > 0
+	if len(instanceTypes) == 0 {
+		instanceTypes = DefaultMacInstanceTypePriority
+	}
+	if !profile.AWS.AllowIntelFallback && !explicitInstanceTypes {
+		instanceTypes = withoutIntel(instanceTypes)
+	}
+	hasARM := false
+	hasIntel := false
+	for _, instanceType := range instanceTypes {
+		if !SupportedMacInstanceTypes[instanceType] {
+			errs = append(errs, fmt.Errorf("unsupported aws instance type %q", instanceType))
+			continue
+		}
+		if IsIntelMacInstanceType(instanceType) {
+			hasIntel = true
+			if explicitInstanceTypes && !profile.AWS.AllowIntelFallback {
+				errs = append(errs, errors.New("mac1.metal requires aws.allow_intel_fallback: true"))
+			}
+			continue
+		}
+		hasARM = true
+	}
+	if hasARM && profile.AWS.AMI.MacARM == "" {
+		errs = append(errs, errors.New("aws.ami.mac_arm is required for Apple Silicon Mac instance types"))
+	}
+	if hasIntel && profile.AWS.AMI.MacX86 == "" {
+		errs = append(errs, errors.New("aws.ami.mac_x86 is required for mac1.metal"))
+	}
+	if !hasARM && !hasIntel {
+		errs = append(errs, errors.New("aws.instance_type_priority has no usable instance types"))
+	}
+	return errs
+}
+
 func ValidateNamedProfile(cfg Config, name string, validator Validator) (Profile, []error) {
 	profile, ok := cfg.Profile(name)
 	if !ok {
@@ -146,6 +215,13 @@ func validateIdentityFile(path string) error {
 		return fmt.Errorf("identity file permissions are too open: %s has mode %o; run chmod 600 %s", path, info.Mode().Perm(), path)
 	}
 	return nil
+}
+
+func validAvailabilityZoneID(zoneID string) bool {
+	return strings.HasSuffix(zoneID, "-az1") ||
+		strings.HasSuffix(zoneID, "-az2") ||
+		strings.HasSuffix(zoneID, "-az3") ||
+		strings.HasSuffix(zoneID, "-az4")
 }
 
 func unknownProfileError(cfg Config, name string) error {

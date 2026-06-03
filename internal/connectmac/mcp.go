@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -125,6 +126,14 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		return s.mcpPull(ctx, cfg, call.Arguments)
 	case "cm_forget_host":
 		return s.mcpForgetHost(ctx, cfg, call.Arguments)
+	case "cm_aws_plan":
+		return s.mcpAWSPlan(cfg, call.Arguments)
+	case "cm_aws_status":
+		return s.mcpAWSStatus(cfg, call.Arguments)
+	case "cm_aws_create_mac":
+		return s.mcpAWSCreateMac(cfg, call.Arguments)
+	case "cm_aws_destroy_mac":
+		return s.mcpAWSDestroyMac(cfg, call.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", call.Name)
 	}
@@ -217,6 +226,58 @@ func (s MCPServer) validateMCPRsync(profile Profile) bool {
 		}
 	}
 	return len(errs) == 0
+}
+
+func (s MCPServer) mcpAWSPlan(cfg Config, args map[string]interface{}) (interface{}, error) {
+	plan, err := s.mcpMacPlan(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(FormatMacPlan(plan)), nil
+}
+
+func (s MCPServer) mcpAWSStatus(cfg Config, args map[string]interface{}) (interface{}, error) {
+	plan, err := s.mcpMacPlan(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(FormatMacStatusPreview(plan) + "AWS status execution is not implemented yet; no AWS APIs were called."), nil
+}
+
+func (s MCPServer) mcpAWSCreateMac(cfg Config, args map[string]interface{}) (interface{}, error) {
+	plan, err := s.mcpMacPlan(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	text := FormatMacPlan(plan)
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true after AWS execution support is enabled."), nil
+	}
+	return mcpText(text + "AWS create execution is not implemented yet; no AWS resources were changed."), nil
+}
+
+func (s MCPServer) mcpAWSDestroyMac(cfg Config, args map[string]interface{}) (interface{}, error) {
+	plan, err := s.mcpMacPlan(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	text := FormatMacDestroyPreview(plan)
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true after AWS execution support is enabled."), nil
+	}
+	return mcpText(text + "AWS destroy execution is not implemented yet; no AWS resources were changed."), nil
+}
+
+func (s MCPServer) mcpMacPlan(cfg Config, args map[string]interface{}) (MacPlan, error) {
+	profile, err := requireMCPProfile(cfg, args)
+	if err != nil {
+		return MacPlan{}, err
+	}
+	errs := s.App.Validator.ValidateAWSProfile(profile)
+	if len(errs) > 0 {
+		return MacPlan{}, errors.New(strings.TrimSpace(formatErrors(errs)))
+	}
+	return s.App.AWSService.Plan(profile)
 }
 
 func readMCPMessage(reader *bufio.Reader) ([]byte, error) {
@@ -352,6 +413,24 @@ func mcpTools() []map[string]interface{} {
 			"required": []string{"profile", "remote_path"},
 		}),
 		mcpTool("cm_forget_host", "Preview or remove known_hosts entries for a profile host. Requires confirm=true to execute.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"profile": stringSchema(),
+				"confirm": map[string]string{"type": "boolean"},
+			},
+			"required": []string{"profile"},
+		}),
+		mcpTool("cm_aws_plan", "Preview AWS Mac Dedicated Host, EC2, and EIP operations for a profile.", profileSchema()),
+		mcpTool("cm_aws_status", "Preview AWS status lookup target for a profile.", profileSchema()),
+		mcpTool("cm_aws_create_mac", "Preview AWS Mac creation. Execution requires confirm=true after AWS execution support is enabled.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"profile": stringSchema(),
+				"confirm": map[string]string{"type": "boolean"},
+			},
+			"required": []string{"profile"},
+		}),
+		mcpTool("cm_aws_destroy_mac", "Preview AWS Mac destruction. Execution requires confirm=true after AWS execution support is enabled.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),

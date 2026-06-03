@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRunner struct {
@@ -202,6 +203,23 @@ func TestAppOpenVNCUsesRunner(t *testing.T) {
 	}
 }
 
+func TestAppAWSPlan(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"aws", "plan", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("aws plan code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"AWS Mac plan", "Selected instance type: mac2.metal", "Selected AMI: ami-063755aadeb97329a"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("aws plan output missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestAppUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
@@ -223,6 +241,9 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 			Dir:       filepath.Join(stateDir, "state"),
 			IsRunning: func(pid int) bool { return pid == 55 },
 		},
+		AWSService: AWSService{Now: func() time.Time {
+			return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+		}},
 	}
 }
 
