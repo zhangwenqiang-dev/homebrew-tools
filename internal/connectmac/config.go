@@ -39,7 +39,6 @@ type AWSConfig struct {
 	ResourceName          string
 	Creator               string
 	CreatorName           string
-	CreatorDate           string
 	AccountEmail          string
 	AMI                   AWSAMIConfig
 	KeyName               string
@@ -504,7 +503,7 @@ func applyAWSField(p *Profile, line string) error {
 	case "creator_name":
 		p.AWS.CreatorName = value
 	case "creator_date", "creator_time":
-		p.AWS.CreatorDate = value
+		// Legacy no-op. AWS already records resource creation and launch times.
 	case "account_email":
 		p.AWS.AccountEmail = value
 	case "key_name":

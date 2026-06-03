@@ -31,7 +31,6 @@ profiles:
       region: us-west-2
       creator: xc
       creator_name: Xiao Chen
-      creator_date: 20260601
       account_email: user@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea
@@ -91,9 +90,6 @@ func TestParseConfig(t *testing.T) {
 	}
 	if profile.AWS.CreatorName != "Xiao Chen" {
 		t.Fatalf("aws creator_name = %q, want Xiao Chen", profile.AWS.CreatorName)
-	}
-	if profile.AWS.CreatorDate != "20260601" {
-		t.Fatalf("aws creator_date = %q, want 20260601", profile.AWS.CreatorDate)
 	}
 	if profile.AWS.AMI.MacX86 != "ami-0538568e5d3653bea" {
 		t.Fatalf("aws ami mac_x86 = %q", profile.AWS.AMI.MacX86)

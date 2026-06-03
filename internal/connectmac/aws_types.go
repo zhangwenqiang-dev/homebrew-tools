@@ -48,7 +48,7 @@ type MacPlan struct {
 	Tags                  []AWSTagConfig
 }
 
-func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
+func BuildMacPlan(profile Profile, _ time.Time) (MacPlan, error) {
 	if len(profile.AWS.InstanceTypePriority) == 0 {
 		profile.AWS.InstanceTypePriority = append([]string(nil), DefaultMacInstanceTypePriority...)
 	}
@@ -88,11 +88,6 @@ func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
 	if profile.AWS.CreatorName != "" {
 		tags = append(tags, AWSTagConfig{Key: "cm-creator-name", Value: profile.AWS.CreatorName})
 	}
-	creatorDate := profile.AWS.CreatorDate
-	if creatorDate == "" {
-		creatorDate = now.Format("20060102")
-	}
-	tags = append(tags, AWSTagConfig{Key: "cm-creator-date", Value: creatorDate})
 	return MacPlan{
 		ProfileName:           profile.Name,
 		ResourceName:          resourceName,

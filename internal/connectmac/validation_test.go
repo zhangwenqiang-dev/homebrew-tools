@@ -137,7 +137,6 @@ func validAWSProfile() Profile {
 			Region:                "us-west-2",
 			Creator:               "xc",
 			CreatorName:           "Xiao Chen",
-			CreatorDate:           "20260601",
 			AccountEmail:          "user@example.com",
 			AMI:                   AWSAMIConfig{MacX86: "ami-0538568e5d3653bea", MacARM: "ami-063755aadeb97329a"},
 			KeyName:               "example-key",
