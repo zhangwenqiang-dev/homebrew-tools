@@ -26,6 +26,14 @@ func TestValidateProfileMissingKey(t *testing.T) {
 	}
 }
 
+func TestValidateProfileRequiresIdentityFile(t *testing.T) {
+	profile := validProfile("")
+	errs := NewValidatorForTest(nil).ValidateProfile(profile)
+	if !containsError(errs, "identity_file is required") {
+		t.Fatalf("expected identity file required error, got %v", errs)
+	}
+}
+
 func TestValidateProfileBadKeyPermissions(t *testing.T) {
 	key := writeSSHKey(t, 0o644)
 	profile := validProfile(key)
