@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -89,7 +90,65 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", expanded, err)
 	}
+	profilesDir := filepath.Join(filepath.Dir(expanded), "profiles")
+	dirCfg, err := LoadProfilesDir(profilesDir)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := mergeConfigs(&cfg, dirCfg, profilesDir); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func LoadProfilesDir(dir string) (Config, error) {
+	cfg := Config{Profiles: map[string]Profile{}}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return Config{}, fmt.Errorf("read profiles dir %s: %w", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return Config{}, fmt.Errorf("read profile file %s: %w", path, err)
+		}
+		fileCfg, err := ParseConfig(string(data))
+		if err != nil {
+			return Config{}, fmt.Errorf("parse profile file %s: %w", path, err)
+		}
+		if err := mergeConfigs(&cfg, fileCfg, path); err != nil {
+			return Config{}, err
+		}
+	}
+	return cfg, nil
+}
+
+func mergeConfigs(dst *Config, src Config, source string) error {
+	if dst.Profiles == nil {
+		dst.Profiles = map[string]Profile{}
+	}
+	for name, profile := range src.Profiles {
+		if _, exists := dst.Profiles[name]; exists {
+			return fmt.Errorf("duplicate profile %q in %s", name, source)
+		}
+		dst.Profiles[name] = profile
+	}
+	return nil
 }
 
 func ParseConfig(data string) (Config, error) {

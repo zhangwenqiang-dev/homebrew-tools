@@ -139,3 +139,63 @@ func TestLoadConfigMissingFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestLoadConfigMergesProfilesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+profiles:
+  base:
+    description: Base profile
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profilesDir := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesDir, "extra.yaml"), []byte(`
+profiles:
+  extra:
+    description: Extra profile
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if _, ok := cfg.Profile("base"); !ok {
+		t.Fatal("expected base profile")
+	}
+	if _, ok := cfg.Profile("extra"); !ok {
+		t.Fatal("expected extra profile from profiles dir")
+	}
+}
+
+func TestLoadConfigRejectsDuplicateProfilesDirectoryProfile(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+profiles:
+  duplicate:
+    description: Main
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profilesDir := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesDir, "duplicate.yaml"), []byte(`
+profiles:
+  duplicate:
+    description: Duplicate
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "duplicate profile") {
+		t.Fatalf("expected duplicate profile error, got %v", err)
+	}
+}

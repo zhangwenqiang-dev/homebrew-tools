@@ -28,6 +28,14 @@ The default config path is:
 ~/.connectmac/config.yaml
 ```
 
+For many profiles, keep shared or important entries in `config.yaml` and put additional files under:
+
+```text
+~/.connectmac/profiles/*.yaml
+```
+
+Each file uses the same `profiles:` structure. `cm` loads `config.yaml` first, then all `.yaml` and `.yml` files in `profiles/` by filename. Duplicate profile names are rejected.
+
 Example profile:
 
 ```yaml
