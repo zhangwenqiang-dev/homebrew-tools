@@ -11,6 +11,8 @@ import (
 )
 
 const DefaultConfigPath = "~/.connectmac/config.yaml"
+const DefaultAWSUser = "ec2-user"
+const DefaultAWSIdentityFile = "~/.ssh/hs-zwq-xcode.pem"
 
 type Config struct {
 	Profiles map[string]Profile
@@ -482,7 +484,10 @@ func (c *Config) ApplyDefaults() {
 
 func (p *Profile) ApplyDefaults() {
 	if p.User == "" && p.AWS.Profile != "" {
-		p.User = "ec2-user"
+		p.User = DefaultAWSUser
+	}
+	if p.IdentityFile == "" && p.AWS.Profile != "" {
+		p.IdentityFile = DefaultAWSIdentityFile
 	}
 }
 

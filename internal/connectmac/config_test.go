@@ -214,4 +214,7 @@ profiles:
 	if profile.User != "ec2-user" {
 		t.Fatalf("user = %q, want ec2-user", profile.User)
 	}
+	if profile.IdentityFile != "~/.ssh/hs-zwq-xcode.pem" {
+		t.Fatalf("identity_file = %q, want ~/.ssh/hs-zwq-xcode.pem", profile.IdentityFile)
+	}
 }
