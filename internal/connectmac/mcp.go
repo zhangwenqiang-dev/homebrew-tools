@@ -132,6 +132,8 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		return s.mcpAWSStatus(ctx, cfg, call.Arguments)
 	case "cm_aws_create_mac":
 		return s.mcpAWSCreateMac(ctx, cfg, call.Arguments)
+	case "cm_aws_adopt_mac":
+		return s.mcpAWSAdoptMac(ctx, cfg, call.Arguments)
 	case "cm_aws_destroy_mac":
 		return s.mcpAWSDestroyMac(ctx, cfg, call.Arguments)
 	default:
@@ -262,6 +264,26 @@ func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[str
 		return nil, err
 	}
 	return mcpText(text + FormatAWSCreateResult(plan, result)), nil
+}
+
+func (s MCPServer) mcpAWSAdoptMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	_, status, err := s.App.AWSService.AdoptionPreview(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	text := FormatAWSAdoptionPreview(plan, status)
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true to tag these resources as cm-managed."), nil
+	}
+	_, result, err := s.App.AWSService.Adopt(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(text + FormatAWSAdoptResult(plan, result)), nil
 }
 
 func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -441,6 +463,14 @@ func mcpTools() []map[string]interface{} {
 		mcpTool("cm_aws_plan", "Preview AWS Mac Dedicated Host, EC2, and EIP operations for a profile.", profileSchema()),
 		mcpTool("cm_aws_status", "Describe managed AWS Mac Dedicated Hosts, EC2 instances, and Elastic IP association for a profile.", profileSchema()),
 		mcpTool("cm_aws_create_mac", "Preview or execute AWS Mac creation. Requires confirm=true to execute.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"profile": stringSchema(),
+				"confirm": map[string]string{"type": "boolean"},
+			},
+			"required": []string{"profile"},
+		}),
+		mcpTool("cm_aws_adopt_mac", "Preview or tag existing AWS Mac resources as cm-managed. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),

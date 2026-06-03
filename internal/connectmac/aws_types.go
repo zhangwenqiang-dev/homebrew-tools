@@ -72,7 +72,10 @@ func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
 	if selectedInstanceType == "" {
 		return MacPlan{}, fmt.Errorf("no architecture-compatible aws instance type and AMI configured")
 	}
-	resourceName := MacResourceName(profile.AWS.ShortName, now, profile.AWS.AccountEmail)
+	resourceName := profile.AWS.ResourceName
+	if resourceName == "" {
+		resourceName = MacResourceName(profile.AWS.ShortName, now, profile.AWS.AccountEmail)
+	}
 	return MacPlan{
 		ProfileName:           profile.Name,
 		ResourceName:          resourceName,

@@ -15,6 +15,8 @@ import (
 type AWSClient interface {
 	CallerIdentity(ctx context.Context) (CallerIdentity, error)
 	DescribeStatus(ctx context.Context, plan MacPlan) (AWSStatus, error)
+	DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error)
+	TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error
 	AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error)
 	RunInstance(ctx context.Context, plan MacPlan, hostID, instanceType, amiID string) (string, error)
 	VerifyElasticIPOwner(ctx context.Context, plan MacPlan) (ElasticIP, error)
@@ -119,6 +121,45 @@ func (c RealAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSSta
 		Instances:      instances,
 		ElasticIP:      eip,
 	}, nil
+}
+
+func (c RealAWSClient) DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error) {
+	identity, err := c.CallerIdentity(ctx)
+	if err != nil {
+		return AWSStatus{}, err
+	}
+	hosts, err := c.describeHostsByName(ctx, plan.ResourceName)
+	if err != nil {
+		return AWSStatus{}, err
+	}
+	instances, err := c.describeInstancesByName(ctx, plan.ResourceName)
+	if err != nil {
+		return AWSStatus{}, err
+	}
+	eip, err := c.describeElasticIP(ctx, plan.ElasticIPAllocationID)
+	if err != nil {
+		return AWSStatus{}, err
+	}
+	return AWSStatus{
+		CallerIdentity: identity,
+		Hosts:          hosts,
+		Instances:      instances,
+		ElasticIP:      eip,
+	}, nil
+}
+
+func (c RealAWSClient) TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error {
+	if len(resourceIDs) == 0 {
+		return nil
+	}
+	_, err := c.ec2.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: resourceIDs,
+		Tags:      toEC2Tags(tags),
+	})
+	if err != nil {
+		return fmt.Errorf("tag resources %v: %w", resourceIDs, err)
+	}
+	return nil
 }
 
 func (c RealAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error) {
@@ -251,12 +292,55 @@ func (c RealAWSClient) describeManagedHosts(ctx context.Context, plan MacPlan) (
 	return hosts, nil
 }
 
+func (c RealAWSClient) describeHostsByName(ctx context.Context, name string) ([]DedicatedHostStatus, error) {
+	out, err := c.ec2.DescribeHosts(ctx, &ec2.DescribeHostsInput{
+		Filter: []ec2types.Filter{{Name: aws.String("tag:Name"), Values: []string{name}}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe hosts by name: %w", err)
+	}
+	hosts := make([]DedicatedHostStatus, 0, len(out.Hosts))
+	for _, host := range out.Hosts {
+		hosts = append(hosts, DedicatedHostStatus{
+			HostID:       aws.ToString(host.HostId),
+			State:        string(host.State),
+			InstanceType: aws.ToString(host.HostProperties.InstanceType),
+			ZoneID:       aws.ToString(host.AvailabilityZoneId),
+			Tags:         fromEC2Tags(host.Tags),
+		})
+	}
+	return hosts, nil
+}
+
 func (c RealAWSClient) describeManagedInstances(ctx context.Context, plan MacPlan) ([]InstanceStatus, error) {
 	out, err := c.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		Filters: managedFilters(plan),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("describe instances: %w", err)
+	}
+	var instances []InstanceStatus
+	for _, reservation := range out.Reservations {
+		for _, instance := range reservation.Instances {
+			instances = append(instances, InstanceStatus{
+				InstanceID:   aws.ToString(instance.InstanceId),
+				State:        string(instance.State.Name),
+				InstanceType: string(instance.InstanceType),
+				HostID:       aws.ToString(instance.Placement.HostId),
+				PublicIP:     aws.ToString(instance.PublicIpAddress),
+				Tags:         fromEC2Tags(instance.Tags),
+			})
+		}
+	}
+	return instances, nil
+}
+
+func (c RealAWSClient) describeInstancesByName(ctx context.Context, name string) ([]InstanceStatus, error) {
+	out, err := c.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{{Name: aws.String("tag:Name"), Values: []string{name}}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe instances by name: %w", err)
 	}
 	var instances []InstanceStatus
 	for _, reservation := range out.Reservations {

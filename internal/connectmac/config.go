@@ -35,6 +35,7 @@ type AWSConfig struct {
 	Profile               string
 	Region                string
 	ShortName             string
+	ResourceName          string
 	AccountEmail          string
 	AMI                   AWSAMIConfig
 	KeyName               string
@@ -434,6 +435,8 @@ func applyAWSField(p *Profile, line string) error {
 		p.AWS.Region = value
 	case "short_name":
 		p.AWS.ShortName = value
+	case "resource_name":
+		p.AWS.ResourceName = value
 	case "account_email":
 		p.AWS.AccountEmail = value
 	case "key_name":

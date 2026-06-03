@@ -52,6 +52,7 @@ profiles:
       profile: cm-xcode
       region: us-west-2
       short_name: xcode
+      resource_name: ""
       account_email: user@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea
@@ -171,11 +172,14 @@ Preview AWS Mac Dedicated Host automation:
 ```bash
 cm aws plan xcode-vnc
 cm aws status xcode-vnc
+cm aws adopt xcode-vnc
 cm aws create xcode-vnc
 cm aws destroy xcode-vnc
 ```
 
 `cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, and Elastic IP association. `cm aws create` and `cm aws destroy` preview by default; pass `--confirm` to execute the AWS mutations.
+
+Use `aws.resource_name` only when adopting resources that were created before `cm` managed them. Leave it empty for new resources so `cm` generates `xcode-<short-name>-<yyyymmdd>-<account-email>`.
 
 AWS credentials are read through the normal AWS SDK credential chain. Keep access keys in `~/.aws/credentials`, AWS SSO, environment variables, or IAM roles. Do not put AWS secret keys in `~/.connectmac/config.yaml`.
 

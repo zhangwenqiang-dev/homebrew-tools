@@ -19,6 +19,7 @@ profiles:
       profile: cm-xcode
       region: us-west-2
       short_name: xcode
+      resource_name: ""
       account_email: user@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea

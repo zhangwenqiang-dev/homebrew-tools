@@ -46,6 +46,55 @@ func (s AWSService) Status(ctx context.Context, profile Profile) (MacPlan, AWSSt
 	return plan, status, nil
 }
 
+func (s AWSService) AdoptionPreview(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	status, err := client.DescribeAdoptionCandidates(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	if err := validateAdoptionCandidates(plan, status); err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	return plan, status, nil
+}
+
+func (s AWSService) Adopt(ctx context.Context, profile Profile) (MacPlan, AWSAdoptResult, error) {
+	plan, status, err := s.AdoptionPreview(ctx, profile)
+	if err != nil {
+		return MacPlan{}, AWSAdoptResult{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSAdoptResult{}, err
+	}
+	resourceIDs := make([]string, 0, len(status.Hosts)+len(status.Instances))
+	for _, host := range status.Hosts {
+		resourceIDs = append(resourceIDs, host.HostID)
+	}
+	for _, instance := range status.Instances {
+		resourceIDs = append(resourceIDs, instance.InstanceID)
+	}
+	tags := []AWSTagConfig{
+		{Key: "cm-managed", Value: "true"},
+		{Key: "cm-profile", Value: plan.ProfileName},
+		{Key: "cm-account-email", Value: plan.AccountEmail},
+	}
+	if err := client.TagResources(ctx, resourceIDs, tags); err != nil {
+		return MacPlan{}, AWSAdoptResult{}, err
+	}
+	return plan, AWSAdoptResult{
+		TaggedResources: resourceIDs,
+		Tags:            tags,
+	}, nil
+}
+
 func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCreateResult, error) {
 	plan, err := s.Plan(profile)
 	if err != nil {
@@ -164,6 +213,11 @@ type AWSDestroyResult struct {
 	ReleasedHosts          []string
 }
 
+type AWSAdoptResult struct {
+	TaggedResources []string
+	Tags            []AWSTagConfig
+}
+
 func FormatMacPlan(plan MacPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac plan for profile %s\n", plan.ProfileName)
@@ -198,6 +252,32 @@ func FormatMacDestroyPreview(plan MacPlan) string {
 	fmt.Fprintln(&b, "- Disassociate Elastic IP only if attached to the managed instance")
 	fmt.Fprintln(&b, "- Terminate the managed EC2 instance")
 	fmt.Fprintln(&b, "- Release the managed Dedicated Host when AWS allows release")
+	return b.String()
+}
+
+func FormatAWSAdoptionPreview(plan MacPlan, status AWSStatus) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac adoption preview for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Resource name: %s\n", plan.ResourceName)
+	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
+	fmt.Fprintf(&b, "Hosts matched by Name: %d\n", len(status.Hosts))
+	for _, host := range status.Hosts {
+		fmt.Fprintf(&b, "- host=%s state=%s type=%s zone=%s\n", host.HostID, host.State, host.InstanceType, host.ZoneID)
+	}
+	fmt.Fprintf(&b, "Instances matched by Name: %d\n", len(status.Instances))
+	for _, instance := range status.Instances {
+		fmt.Fprintf(&b, "- instance=%s state=%s type=%s host=%s public_ip=%s\n", instance.InstanceID, instance.State, instance.InstanceType, instance.HostID, instance.PublicIP)
+	}
+	fmt.Fprintf(&b, "Elastic IP owner tag: %s=%s\n", plan.ElasticIPOwnerTag.Key, plan.ElasticIPOwnerTag.Value)
+	fmt.Fprintf(&b, "Tags to add: cm-managed=true, cm-profile=%s, cm-account-email=%s\n", plan.ProfileName, plan.AccountEmail)
+	return b.String()
+}
+
+func FormatAWSAdoptResult(plan MacPlan, result AWSAdoptResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac resources adopted for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Tagged resources: %s\n", strings.Join(result.TaggedResources, ", "))
+	fmt.Fprintf(&b, "Added tags: %s\n", FormatAWSTags(result.Tags))
 	return b.String()
 }
 
@@ -260,6 +340,34 @@ func managedTagsMatch(tags []AWSTagConfig, plan MacPlan) bool {
 	return hasTag(tags, "cm-managed", "true") &&
 		hasTag(tags, "cm-profile", plan.ProfileName) &&
 		hasTag(tags, "cm-account-email", plan.AccountEmail)
+}
+
+func validateAdoptionCandidates(plan MacPlan, status AWSStatus) error {
+	if len(status.Hosts) == 0 {
+		return fmt.Errorf("no dedicated host found with Name=%s", plan.ResourceName)
+	}
+	if len(status.Instances) == 0 {
+		return fmt.Errorf("no instance found with Name=%s", plan.ResourceName)
+	}
+	if !hasTag(status.ElasticIP.Tags, plan.ElasticIPOwnerTag.Key, plan.ElasticIPOwnerTag.Value) {
+		return fmt.Errorf("elastic ip %s is missing required owner tag %s=%s", plan.ElasticIPAllocationID, plan.ElasticIPOwnerTag.Key, plan.ElasticIPOwnerTag.Value)
+	}
+	for _, instance := range status.Instances {
+		matchedHost := false
+		for _, host := range status.Hosts {
+			if instance.HostID == host.HostID {
+				matchedHost = true
+				break
+			}
+		}
+		if !matchedHost {
+			return fmt.Errorf("instance %s is not running on a matched dedicated host", instance.InstanceID)
+		}
+		if status.ElasticIP.InstanceID != "" && status.ElasticIP.InstanceID != instance.InstanceID {
+			return fmt.Errorf("elastic ip %s is associated with unexpected instance %s", plan.ElasticIPAllocationID, status.ElasticIP.InstanceID)
+		}
+	}
+	return nil
 }
 
 func hasTag(tags []AWSTagConfig, key, value string) bool {

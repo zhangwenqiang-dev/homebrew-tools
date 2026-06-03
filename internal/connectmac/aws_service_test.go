@@ -152,6 +152,28 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	}
 }
 
+func TestAWSServiceAdoptTagsMatchedResources(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-xcode-20260603-user@example.com"}}}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-xcode-20260603-user@example.com"}}}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", InstanceID: "i-1", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Adopt(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Adopt returned error: %v", err)
+	}
+	want := []string{"adoption", "tag:h-1,i-1"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if strings.Join(result.TaggedResources, ",") != "h-1,i-1" {
+		t.Fatalf("tagged resources = %v", result.TaggedResources)
+	}
+}
+
 func testAWSService(fake *fakeAWSClient) AWSService {
 	return AWSService{
 		Now: func() time.Time {
@@ -184,6 +206,16 @@ func (c *fakeAWSClient) CallerIdentity(ctx context.Context) (CallerIdentity, err
 func (c *fakeAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSStatus, error) {
 	c.calls = append(c.calls, "status")
 	return c.status, nil
+}
+
+func (c *fakeAWSClient) DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error) {
+	c.calls = append(c.calls, "adoption")
+	return c.status, nil
+}
+
+func (c *fakeAWSClient) TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error {
+	c.calls = append(c.calls, "tag:"+strings.Join(resourceIDs, ","))
+	return nil
 }
 
 func (c *fakeAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error) {
