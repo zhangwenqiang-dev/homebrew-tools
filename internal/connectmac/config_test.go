@@ -191,3 +191,27 @@ profiles:
 		t.Fatalf("expected duplicate profile error, got %v", err)
 	}
 }
+
+func TestLoadConfigDefaultsAWSUser(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+profiles:
+  aws-only:
+    aws:
+      profile: website
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	profile, ok := cfg.Profile("aws-only")
+	if !ok {
+		t.Fatal("expected aws-only profile")
+	}
+	if profile.User != "ec2-user" {
+		t.Fatalf("user = %q, want ec2-user", profile.User)
+	}
+}

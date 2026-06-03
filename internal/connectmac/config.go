@@ -96,6 +96,7 @@ func LoadConfig(path string) (Config, error) {
 	if err := mergeConfigs(&cfg, dirCfg, profilesDir); err != nil {
 		return Config{}, err
 	}
+	cfg.ApplyDefaults()
 	return cfg, nil
 }
 
@@ -466,7 +467,23 @@ func ExpandPath(path string) (string, error) {
 
 func (c Config) Profile(name string) (Profile, bool) {
 	p, ok := c.Profiles[name]
+	if ok {
+		p.ApplyDefaults()
+	}
 	return p, ok
+}
+
+func (c *Config) ApplyDefaults() {
+	for name, profile := range c.Profiles {
+		profile.ApplyDefaults()
+		c.Profiles[name] = profile
+	}
+}
+
+func (p *Profile) ApplyDefaults() {
+	if p.User == "" && p.AWS.Profile != "" {
+		p.User = "ec2-user"
+	}
 }
 
 func applyVNCField(p *Profile, line string) error {
