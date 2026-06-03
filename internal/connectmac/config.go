@@ -39,7 +39,7 @@ type AWSConfig struct {
 	ResourceName          string
 	Creator               string
 	CreatorName           string
-	CreatorTime           string
+	CreatorDate           string
 	AccountEmail          string
 	AMI                   AWSAMIConfig
 	KeyName               string
@@ -503,8 +503,8 @@ func applyAWSField(p *Profile, line string) error {
 		p.AWS.Creator = value
 	case "creator_name":
 		p.AWS.CreatorName = value
-	case "creator_time":
-		p.AWS.CreatorTime = value
+	case "creator_date", "creator_time":
+		p.AWS.CreatorDate = value
 	case "account_email":
 		p.AWS.AccountEmail = value
 	case "key_name":

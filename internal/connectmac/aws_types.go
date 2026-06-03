@@ -88,11 +88,11 @@ func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
 	if profile.AWS.CreatorName != "" {
 		tags = append(tags, AWSTagConfig{Key: "cm-creator-name", Value: profile.AWS.CreatorName})
 	}
-	creatorTime := profile.AWS.CreatorTime
-	if creatorTime == "" {
-		creatorTime = now.Format("20060102")
+	creatorDate := profile.AWS.CreatorDate
+	if creatorDate == "" {
+		creatorDate = now.Format("20060102")
 	}
-	tags = append(tags, AWSTagConfig{Key: "cm-creator-time", Value: creatorTime})
+	tags = append(tags, AWSTagConfig{Key: "cm-creator-date", Value: creatorDate})
 	return MacPlan{
 		ProfileName:           profile.Name,
 		ResourceName:          resourceName,

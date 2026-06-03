@@ -639,7 +639,7 @@ func DefaultConfigTemplate() string {
       region: us-west-2
       creator: xc
       creator_name: "Xiao Chen"
-      creator_time: ""
+      creator_date: ""
       resource_name: ""
       account_email: user@example.com
       ami:
