@@ -115,6 +115,9 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		if err != nil {
 			return nil, err
 		}
+		if text := missingMCPInputText(profile, false); text != "" {
+			return mcpText(text), nil
+		}
 		errs := s.App.Validator.ValidateProfile(profile)
 		if len(errs) > 0 {
 			return mcpText(formatErrors(errs)), nil
@@ -145,6 +148,9 @@ func (s MCPServer) mcpPush(ctx context.Context, cfg Config, args map[string]inte
 	profile, err := requireMCPProfile(cfg, args)
 	if err != nil {
 		return nil, err
+	}
+	if text := missingMCPInputText(profile, false); text != "" {
+		return mcpText(text), nil
 	}
 	localPath, err := requiredString(args, "local_path")
 	if err != nil {
@@ -179,6 +185,9 @@ func (s MCPServer) mcpPull(ctx context.Context, cfg Config, args map[string]inte
 	profile, err := requireMCPProfile(cfg, args)
 	if err != nil {
 		return nil, err
+	}
+	if text := missingMCPInputText(profile, false); text != "" {
+		return mcpText(text), nil
 	}
 	remotePath, err := requiredString(args, "remote_path")
 	if err != nil {
@@ -255,6 +264,9 @@ func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[str
 	if err != nil {
 		return nil, err
 	}
+	if text := missingMCPInputText(profile, true); text != "" {
+		return mcpText(text), nil
+	}
 	text := FormatMacPlan(plan)
 	if !boolArg(args, "confirm") {
 		return mcpText(text + "Preview only. Call again with confirm=true to execute AWS creation."), nil
@@ -270,6 +282,9 @@ func (s MCPServer) mcpAWSAdoptMac(ctx context.Context, cfg Config, args map[stri
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
 		return nil, err
+	}
+	if text := missingMCPInputText(profile, true); text != "" {
+		return mcpText(text), nil
 	}
 	_, status, err := s.App.AWSService.AdoptionPreview(ctx, profile)
 	if err != nil {
@@ -390,6 +405,29 @@ func listProfilesText(cfg Config) string {
 func profileSummaryText(profile Profile) string {
 	var b bytes.Buffer
 	printSummary(&b, profile)
+	return b.String()
+}
+
+func missingMCPInputText(profile Profile, requireCreator bool) string {
+	var missing []string
+	if profile.IdentityFile == "" {
+		missing = append(missing, "identity_file")
+	}
+	if requireCreator && profile.AWS.Creator == "" {
+		missing = append(missing, "aws.creator")
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Profile %s is missing required input: %s\n", profile.Name, strings.Join(missing, ", "))
+	fmt.Fprintln(&b, "Ask the user to provide these values, then update the profile config or defaults.")
+	if profile.IdentityFile == "" {
+		fmt.Fprintln(&b, "- identity_file: PEM name or path, for example example-key or ~/.ssh/example-key.pem")
+	}
+	if requireCreator && profile.AWS.Creator == "" {
+		fmt.Fprintln(&b, "- aws.creator: creator display name for AWS cm-creator tag")
+	}
 	return b.String()
 }
 

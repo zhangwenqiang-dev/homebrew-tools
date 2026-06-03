@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +23,30 @@ func TestMCPListProfiles(t *testing.T) {
 	}
 	if len(runner.rsync) != 0 {
 		t.Fatal("list must not run rsync")
+	}
+}
+
+func TestMCPCheckAsksForMissingIdentityFile(t *testing.T) {
+	app, config, _ := mcpTestAppWithConfig(t, strings.ReplaceAll(strings.ReplaceAll(sampleConfig,
+		"  identity_file: ~/.ssh/default.pem\n", ""),
+		"    identity_file: ~/.ssh/example.pem\n", ""))
+	out := runMCPCall(t, app, config, "cm_check_profile", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "missing required input: identity_file") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestMCPAWSCreateAsksForMissingCreator(t *testing.T) {
+	configData := strings.ReplaceAll(sampleConfig, "  aws:\n    creator: Default Creator\n", "")
+	configData = strings.ReplaceAll(configData, "      creator: Xiao Chen\n", "")
+	app, config, _ := mcpTestAppWithConfig(t, configData)
+	out := runMCPCall(t, app, config, "cm_aws_create_mac", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "missing required input: aws.creator") {
+		t.Fatalf("output = %q", out)
 	}
 }
 
@@ -105,6 +130,21 @@ func mcpTestApp(t *testing.T) (App, string, *fakeRunner) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
+	return mcpTestAppWithPath(t, dir, config)
+}
+
+func mcpTestAppWithConfig(t *testing.T, configData string) (App, string, *fakeRunner) {
+	t.Helper()
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return mcpTestAppWithPath(t, dir, config)
+}
+
+func mcpTestAppWithPath(t *testing.T, dir, config string) (App, string, *fakeRunner) {
+	t.Helper()
 	runner := &fakeRunner{}
 	app := App{
 		Out:       &bytes.Buffer{},

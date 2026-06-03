@@ -110,6 +110,38 @@ func TestAppCheck(t *testing.T) {
 	}
 }
 
+func TestAppCheckPromptsForMissingIdentityFile(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(sshDir, "prompt-key.pem")
+	if err := os.WriteFile(key, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configData := strings.ReplaceAll(sampleConfig, "  identity_file: ~/.ssh/default.pem\n", "")
+	configData = strings.ReplaceAll(configData, "    identity_file: ~/.ssh/example.pem\n", "")
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.In = strings.NewReader("prompt-key\n")
+	if code := app.Run(context.Background(), []string{"check", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("check code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "identity_file for xcode-vnc") {
+		t.Fatalf("expected prompt, got %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "Identity: ~/.ssh/prompt-key.pem") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
 func TestAppConnectUsesRunner(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

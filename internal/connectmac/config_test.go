@@ -136,6 +136,22 @@ func TestExpandPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeIdentityFileInput(t *testing.T) {
+	cases := map[string]string{
+		"example-key":          "~/.ssh/example-key.pem",
+		"example-key.pem":      "~/.ssh/example-key.pem",
+		"~/.ssh/example-key":   "~/.ssh/example-key",
+		"/tmp/example-key.pem": "/tmp/example-key.pem",
+		"  example-key.pem  ":  "~/.ssh/example-key.pem",
+		"":                     "",
+	}
+	for input, want := range cases {
+		if got := NormalizeIdentityFileInput(input); got != want {
+			t.Fatalf("NormalizeIdentityFileInput(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestLoadConfigMissingFile(t *testing.T) {
 	_, err := LoadConfig(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {

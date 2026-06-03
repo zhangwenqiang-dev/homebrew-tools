@@ -1,6 +1,7 @@
 package connectmac
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ type Runner interface {
 type ExecRunner struct{}
 
 type App struct {
+	In           io.Reader
 	Out          io.Writer
 	Err          io.Writer
 	Runner       Runner
@@ -32,6 +34,7 @@ type App struct {
 
 func NewApp(out, err io.Writer) App {
 	return App{
+		In:           os.Stdin,
 		Out:          out,
 		Err:          err,
 		Runner:       ExecRunner{},
@@ -160,6 +163,9 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintln(a.Err, unknownProfileError(cfg, profileName))
 		return 2
 	}
+	if (command == "create" || command == "adopt") && confirm {
+		profile = a.promptMissingAWSCreator(profile)
+	}
 	errs := a.Validator.ValidateAWSProfile(profile)
 	if len(errs) > 0 {
 		printErrors(a.Err, errs)
@@ -264,6 +270,7 @@ func (a App) runCheck(cfg Config, args []string) int {
 	if !ok {
 		return 2
 	}
+	profile = a.promptMissingIdentityFile(profile)
 	errs := a.Validator.ValidateProfile(profile)
 	if len(errs) > 0 {
 		printErrors(a.Err, errs)
@@ -279,6 +286,7 @@ func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {
 	if !ok {
 		return 2
 	}
+	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateAndSummarize(profile) {
 		return 1
 	}
@@ -299,6 +307,7 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 	if !ok {
 		return 2
 	}
+	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateAndSummarize(profile) {
 		return 1
 	}
@@ -330,6 +339,7 @@ func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
 		return 2
 	}
+	profile = a.promptMissingIdentityFile(profile)
 	errs := a.Validator.ValidateAccess(profile)
 	if len(errs) > 0 {
 		printErrors(a.Err, errs)
@@ -403,6 +413,7 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
 		return 2
 	}
+	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateRsyncAccess(profile) {
 		return 1
 	}
@@ -429,6 +440,7 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
 		return 2
 	}
+	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateRsyncAccess(profile) {
 		return 1
 	}
@@ -519,6 +531,43 @@ func (a App) validateRsyncAccess(profile Profile) bool {
 		return false
 	}
 	return true
+}
+
+func (a App) promptMissingIdentityFile(profile Profile) Profile {
+	if profile.IdentityFile != "" {
+		return profile
+	}
+	value := a.promptLine(fmt.Sprintf("identity_file for %s (PEM name or path): ", profile.Name))
+	if value == "" {
+		return profile
+	}
+	profile.IdentityFile = NormalizeIdentityFileInput(value)
+	return profile
+}
+
+func (a App) promptMissingAWSCreator(profile Profile) Profile {
+	if profile.AWS.Creator != "" {
+		return profile
+	}
+	value := a.promptLine(fmt.Sprintf("aws.creator for %s: ", profile.Name))
+	if value == "" {
+		return profile
+	}
+	profile.AWS.Creator = value
+	return profile
+}
+
+func (a App) promptLine(prompt string) string {
+	if a.In == nil {
+		return ""
+	}
+	fmt.Fprint(a.Err, prompt)
+	reader := bufio.NewReader(a.In)
+	line, err := reader.ReadString('\n')
+	if err != nil && len(line) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(line)
 }
 
 func (a App) loadConfig(path string) (Config, int) {

@@ -543,6 +543,20 @@ func ExpandPath(path string) (string, error) {
 	return path, nil
 }
 
+func NormalizeIdentityFileInput(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "/") || value == "~" {
+		return value
+	}
+	if !strings.HasSuffix(value, ".pem") {
+		value += ".pem"
+	}
+	return "~/.ssh/" + value
+}
+
 func (c Config) Profile(name string) (Profile, bool) {
 	p, ok := c.Profiles[name]
 	if ok {
