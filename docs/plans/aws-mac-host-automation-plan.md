@@ -345,6 +345,151 @@ aws ec2 release-hosts \
 - [ ] Update Homebrew Formula tag.
 - [ ] Push main and tags.
 
+## Optimization Backlog From 2026-06-03 Robin Flow
+
+The Robin Mac startup flow exposed gaps that should be addressed before the AWS workflow is considered smooth for daily operations. The concrete scenario was:
+
+- A profile needed a Mac for one Apple account.
+- Automatic host allocation failed across several instance/AZ combinations because AWS returned `InsufficientHostCapacity`.
+- A Dedicated Host was then created manually in another AZ.
+- `cm` could not adopt the empty host because adoption currently expects both a host and an instance.
+- The configured subnet was in a different AZ from the manually created host, so the remaining launch flow required manual subnet discovery.
+- The EC2 key pair and local PEM path had to be aligned after the instance was launched.
+
+### Priority 1: Reuse or Adopt an Existing Empty Dedicated Host
+
+Add support for continuing from a manually created or previously available Dedicated Host.
+
+Proposed commands:
+
+```bash
+cm aws adopt-host <profile> --host-id <host-id> [--confirm]
+cm aws launch-on-host <profile> --host-id <host-id> [--confirm]
+```
+
+Alternative: extend `cm aws create` so it first searches for reusable hosts by explicit `host_id`, `resource_name`, tags, account email, or matching type/AZ before allocating a new host.
+
+Requirements:
+
+- Allow adoption of a Dedicated Host even when no EC2 instance exists yet.
+- Tag adopted hosts with `cm-managed=true`, `cm-profile=<profile>`, `cm-account-email=<email>`, and optional `cm-creator=<creator>`.
+- Verify adopted host state is usable before launch.
+- Verify adopted host instance type matches the profile-selected instance type.
+- Verify adopted host AZ is one of the configured `availability_zone_ids`.
+- Keep preview mode by default; require `--confirm` for tagging or launching.
+
+### Priority 2: Validate and Auto-Select Subnet by Host AZ
+
+The launch subnet must be in the same AZ as the target Dedicated Host. Today the config has one `subnet_id`, which can silently mismatch when the host is created in another AZ.
+
+Planned improvements:
+
+- During plan/create/launch-on-host, describe the configured subnet and compare its `AvailabilityZoneId` with the selected host AZ.
+- If mismatched, fail early with a clear message.
+- Add optional config for per-AZ subnet mapping:
+
+```yaml
+aws:
+  subnets_by_az:
+    usw2-az1: <subnet-id>
+    usw2-az2: <subnet-id>
+    usw2-az3: <subnet-id>
+    usw2-az4: <subnet-id>
+```
+
+- If `subnets_by_az` is present, automatically choose the subnet for the selected host AZ.
+- Optionally support auto-discovery: find a subnet in the same VPC and AZ as the configured base subnet.
+
+### Priority 3: Better Capacity Retry Matrix
+
+When AWS returns `InsufficientHostCapacity`, operators need a clear attempt matrix rather than only the final failed candidate.
+
+Planned improvements:
+
+- Record every attempted `(availability_zone_id, instance_type)` pair.
+- Print a concise result table:
+
+```text
+usw2-az1 mac2-m2.metal      insufficient capacity
+usw2-az2 mac2-m2.metal      insufficient capacity
+usw2-az1 mac2-m2pro.metal   insufficient capacity
+```
+
+- Add flags:
+
+```bash
+cm aws create <profile> --try-all
+cm aws create <profile> --az usw2-az3 --instance-type mac2-m2.metal --confirm
+```
+
+- Keep cleanup behavior strict: if instance launch or EIP association fails after host allocation, cleanup the resources created by that attempt unless the user explicitly asks to keep them.
+
+### Priority 4: Resource Name and Account Email Matching
+
+Manual resources can preserve account email case, while generated names may normalize it. This can make adoption miss valid resources.
+
+Planned improvements:
+
+- Decide whether generated `xcode-<account-email>` should preserve configured email case.
+- During adoption, support matching by:
+  - exact `aws.resource_name`
+  - generated `xcode-<account-email>`
+  - `cm-account-email`
+  - configured EIP owner tag value
+  - optional case-insensitive Name fallback
+- Always show which matcher found the resource.
+
+### Priority 5: Key Pair and Local PEM Consistency Check
+
+The AWS key pair and local SSH identity file are related but configured separately.
+
+Planned improvements:
+
+- In `cm check`, warn when:
+  - `aws.key_name` is set
+  - `identity_file` basename does not plausibly match the key name
+  - the matching local PEM does not exist under `~/.ssh`
+- Do not hard-fail on name mismatch because teams may name PEM files differently.
+- Keep hard failures for missing `identity_file`, PEM outside `~/.ssh`, or unsafe permissions.
+
+### Priority 6: Wait Until the Mac Is SSH-Ready
+
+EC2 Mac can report `running` before SSH is ready. Add a readiness command for the post-create wait.
+
+Proposed command:
+
+```bash
+cm aws wait-ready <profile> [--timeout 20m]
+```
+
+Behavior:
+
+- Poll `cm aws status`.
+- Wait for the managed instance to be `running`.
+- Wait for EIP association to point to the managed instance.
+- Optionally wait for EC2 status checks when available.
+- Probe SSH with `BatchMode=yes` and a short timeout.
+- Print progress every poll interval.
+- Exit successfully only after a lightweight remote command succeeds, such as `echo ok`.
+
+### Priority 7: Update MCP Tools
+
+Mirror the new CLI workflow in MCP so AI can safely continue after partial manual work.
+
+Proposed tools:
+
+```text
+cm_aws_adopt_host
+cm_aws_launch_on_host
+cm_aws_wait_ready
+```
+
+MCP safety behavior:
+
+- Adoption and launch previews are allowed without confirmation.
+- Any AWS mutation requires `confirm: true`.
+- Results should include host ID, instance ID, EIP association ID, selected subnet, selected instance type, and next suggested command.
+
 ## Open Questions
 
 1. Should `cm aws create` write the newly created public host into the profile automatically, or only print it for manual update?
