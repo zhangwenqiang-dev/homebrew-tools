@@ -69,6 +69,7 @@ profiles:
       subnet_id: "<subnet-id>"
       security_group_id: "<security-group-id>"
       elastic_ip_allocation_id: "<elastic-ip-allocation-id>"
+      elastic_ip_public_ip: "<elastic-ip-public-ip>"
       elastic_ip_owner_tag:
         key: Apple
         value: user@example.com

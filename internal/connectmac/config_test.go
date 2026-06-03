@@ -218,3 +218,50 @@ profiles:
 		t.Fatalf("identity_file = %q, want ~/.ssh/hs-zwq-xcode.pem", profile.IdentityFile)
 	}
 }
+
+func TestLoadConfigDefaultsAWSHostFromElasticIP(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+profiles:
+  west:
+    aws:
+      profile: website
+      region: us-west-2
+      elastic_ip_public_ip: 192.0.2.10
+  east:
+    aws:
+      profile: website
+      region: us-east-1
+      elastic_ip_public_ip: 198.51.100.20
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	west, ok := cfg.Profile("west")
+	if !ok {
+		t.Fatal("expected west profile")
+	}
+	if west.Host != "ec2-192-0-2-10.us-west-2.compute.amazonaws.com" {
+		t.Fatalf("west host = %q", west.Host)
+	}
+	east, ok := cfg.Profile("east")
+	if !ok {
+		t.Fatal("expected east profile")
+	}
+	if east.Host != "ec2-198-51-100-20.compute-1.amazonaws.com" {
+		t.Fatalf("east host = %q", east.Host)
+	}
+}
+
+func TestEC2HostFromPublicIPRegionRejectsInvalidInput(t *testing.T) {
+	if got := EC2HostFromPublicIPRegion("not-an-ip", "us-west-2"); got != "" {
+		t.Fatalf("host = %q, want empty", got)
+	}
+	if got := EC2HostFromPublicIPRegion("192.0.2.10", ""); got != "" {
+		t.Fatalf("host = %q, want empty", got)
+	}
+}

@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,6 +47,7 @@ type AWSConfig struct {
 	SubnetID              string
 	SecurityGroupID       string
 	ElasticIPAllocationID string
+	ElasticIPPublicIP     string
 	ElasticIPOwnerTag     AWSTagConfig
 	AvailabilityZoneIDs   []string
 	InstanceTypePriority  []string
@@ -489,6 +491,24 @@ func (p *Profile) ApplyDefaults() {
 	if p.IdentityFile == "" && p.AWS.Profile != "" {
 		p.IdentityFile = DefaultAWSIdentityFile
 	}
+	if p.Host == "" && p.AWS.Profile != "" {
+		p.Host = EC2HostFromPublicIPRegion(p.AWS.ElasticIPPublicIP, p.AWS.Region)
+	}
+}
+
+func EC2HostFromPublicIPRegion(publicIP, region string) string {
+	if publicIP == "" || region == "" {
+		return ""
+	}
+	ip := net.ParseIP(publicIP)
+	if ip == nil || ip.To4() == nil {
+		return ""
+	}
+	dashedIP := strings.ReplaceAll(publicIP, ".", "-")
+	if region == "us-east-1" {
+		return fmt.Sprintf("ec2-%s.compute-1.amazonaws.com", dashedIP)
+	}
+	return fmt.Sprintf("ec2-%s.%s.compute.amazonaws.com", dashedIP, region)
 }
 
 func applyVNCField(p *Profile, line string) error {
@@ -535,6 +555,8 @@ func applyAWSField(p *Profile, line string) error {
 		p.AWS.SecurityGroupID = value
 	case "elastic_ip_allocation_id":
 		p.AWS.ElasticIPAllocationID = value
+	case "elastic_ip_public_ip":
+		p.AWS.ElasticIPPublicIP = value
 	case "allow_intel_fallback":
 		p.AWS.AllowIntelFallback, err = strconv.ParseBool(value)
 	default:
