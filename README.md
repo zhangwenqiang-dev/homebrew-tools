@@ -35,7 +35,7 @@ For many profiles, keep shared or important entries in `config.yaml` and put add
 ```
 
 Each file uses the same `profiles:` structure. `cm` loads `config.yaml` first, then all `.yaml` and `.yml` files in `profiles/` by filename. Duplicate profile names are rejected.
-Shared `user` and `identity_file` values can be placed in top-level `defaults:`. Profile values override defaults.
+Shared `user`, `identity_file`, and `aws.creator` values can be placed in top-level `defaults:`. Profile values override defaults.
 
 Example profile:
 
@@ -43,6 +43,8 @@ Example profile:
 defaults:
   user: ec2-user
   identity_file: ~/.ssh/example.pem
+  aws:
+    creator: "Xiao Chen"
 
 profiles:
   xcode-vnc:
@@ -62,7 +64,6 @@ profiles:
     aws:
       profile: cm-xcode
       region: us-west-2
-      creator: "Xiao Chen"
       resource_name: ""
       account_email: user@example.com
       ami:

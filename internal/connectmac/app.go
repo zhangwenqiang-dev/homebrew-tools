@@ -608,6 +608,8 @@ func DefaultConfigTemplate() string {
 	return `defaults:
   user: ec2-user
   identity_file: ~/.ssh/example.pem
+  aws:
+    creator: "Xiao Chen"
 
 profiles:
   xcode-vnc:
@@ -627,7 +629,6 @@ profiles:
     aws:
       profile: cm-xcode
       region: us-west-2
-      creator: "Xiao Chen"
       resource_name: ""
       account_email: user@example.com
       ami:

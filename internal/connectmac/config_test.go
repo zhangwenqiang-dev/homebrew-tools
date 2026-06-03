@@ -11,6 +11,8 @@ const sampleConfig = `
 defaults:
   user: default-user
   identity_file: ~/.ssh/default.pem
+  aws:
+    creator: Default Creator
 profiles:
   xcode-vnc:
     description: Apple account: user@example.com
@@ -114,6 +116,9 @@ func TestParseConfig(t *testing.T) {
 	if cfg.Defaults.IdentityFile != "~/.ssh/default.pem" {
 		t.Fatalf("defaults identity_file = %q", cfg.Defaults.IdentityFile)
 	}
+	if cfg.Defaults.AWS.Creator != "Default Creator" {
+		t.Fatalf("defaults aws creator = %q", cfg.Defaults.AWS.Creator)
+	}
 }
 
 func TestExpandPath(t *testing.T) {
@@ -148,6 +153,8 @@ func TestLoadConfigMergesProfilesDirectory(t *testing.T) {
 defaults:
   user: ec2-user
   identity_file: ~/.ssh/shared.pem
+  aws:
+    creator: Shared Creator
 profiles:
   base:
     description: Base profile
@@ -181,6 +188,9 @@ profiles:
 	}
 	if extra.IdentityFile != "~/.ssh/shared.pem" {
 		t.Fatalf("extra identity_file = %q, want ~/.ssh/shared.pem", extra.IdentityFile)
+	}
+	if extra.AWS.Creator != "Shared Creator" {
+		t.Fatalf("extra aws creator = %q, want Shared Creator", extra.AWS.Creator)
 	}
 }
 
@@ -217,6 +227,8 @@ func TestLoadConfigRejectsConflictingDefaults(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`
 defaults:
   identity_file: ~/.ssh/main.pem
+  aws:
+    creator: Main Creator
 profiles:
 `), 0o600); err != nil {
 		t.Fatal(err)
@@ -235,6 +247,35 @@ profiles:
 	_, err := LoadConfig(config)
 	if err == nil || !strings.Contains(err.Error(), "conflicting default") {
 		t.Fatalf("expected conflicting default error, got %v", err)
+	}
+}
+
+func TestLoadConfigRejectsConflictingAWSDefaults(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+defaults:
+  aws:
+    creator: Main Creator
+profiles:
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profilesDir := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesDir, "defaults.yaml"), []byte(`
+defaults:
+  aws:
+    creator: Other Creator
+profiles:
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "aws.creator") {
+		t.Fatalf("expected conflicting aws.creator default error, got %v", err)
 	}
 }
 
@@ -272,12 +313,15 @@ func TestLoadConfigProfileOverridesDefaults(t *testing.T) {
 defaults:
   user: default-user
   identity_file: ~/.ssh/default.pem
+  aws:
+    creator: Default Creator
 profiles:
   explicit:
     user: explicit-user
     identity_file: ~/.ssh/explicit.pem
     aws:
       profile: website
+      creator: Explicit Creator
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +338,36 @@ profiles:
 	}
 	if profile.IdentityFile != "~/.ssh/explicit.pem" {
 		t.Fatalf("identity_file = %q, want ~/.ssh/explicit.pem", profile.IdentityFile)
+	}
+	if profile.AWS.Creator != "Explicit Creator" {
+		t.Fatalf("aws creator = %q, want Explicit Creator", profile.AWS.Creator)
+	}
+}
+
+func TestLoadConfigDefaultsAWSCreator(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+defaults:
+  aws:
+    creator: Shared Creator
+profiles:
+  aws-only:
+    aws:
+      profile: website
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	profile, ok := cfg.Profile("aws-only")
+	if !ok {
+		t.Fatal("expected aws-only profile")
+	}
+	if profile.AWS.Creator != "Shared Creator" {
+		t.Fatalf("aws creator = %q, want Shared Creator", profile.AWS.Creator)
 	}
 }
 

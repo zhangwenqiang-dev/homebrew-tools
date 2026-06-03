@@ -22,6 +22,11 @@ type Config struct {
 type ProfileDefaults struct {
 	User         string
 	IdentityFile string
+	AWS          AWSDefaults
+}
+
+type AWSDefaults struct {
+	Creator string
 }
 
 type Profile struct {
@@ -166,7 +171,10 @@ func mergeDefaults(dst *ProfileDefaults, src ProfileDefaults, source string) err
 	if err := mergeDefaultString(&dst.User, src.User, "user", source); err != nil {
 		return err
 	}
-	return mergeDefaultString(&dst.IdentityFile, src.IdentityFile, "identity_file", source)
+	if err := mergeDefaultString(&dst.IdentityFile, src.IdentityFile, "identity_file", source); err != nil {
+		return err
+	}
+	return mergeDefaultString(&dst.AWS.Creator, src.AWS.Creator, "aws.creator", source)
 }
 
 func mergeDefaultString(dst *string, src, name, source string) error {
@@ -185,6 +193,7 @@ func ParseConfig(data string) (Config, error) {
 	var current *Profile
 	var currentTunnel *Tunnel
 	inDefaults := false
+	inDefaultsAWS := false
 	inProfiles := false
 	inTunnels := false
 	inSync := false
@@ -211,6 +220,7 @@ func ParseConfig(data string) (Config, error) {
 			inProfiles = false
 			current = nil
 			currentTunnel = nil
+			inDefaultsAWS = false
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
@@ -223,6 +233,7 @@ func ParseConfig(data string) (Config, error) {
 			continue
 		case indent == 0 && line == "profiles:":
 			inDefaults = false
+			inDefaultsAWS = false
 			inProfiles = true
 			continue
 		case indent == 0:
@@ -245,7 +256,20 @@ func ParseConfig(data string) (Config, error) {
 			continue
 		}
 
+		if inDefaults && indent == 2 && line == "aws:" {
+			inDefaultsAWS = true
+			continue
+		}
+
+		if inDefaults && inDefaultsAWS && indent == 4 {
+			if err := applyDefaultAWSField(&cfg.Defaults.AWS, line); err != nil {
+				return Config{}, err
+			}
+			continue
+		}
+
 		if inDefaults && indent == 2 {
+			inDefaultsAWS = false
 			if err := applyDefaultField(&cfg.Defaults, line); err != nil {
 				return Config{}, err
 			}
@@ -541,6 +565,9 @@ func (p *Profile) ApplyDefaults(defaults ProfileDefaults) {
 	if p.IdentityFile == "" {
 		p.IdentityFile = defaults.IdentityFile
 	}
+	if p.AWS.Creator == "" {
+		p.AWS.Creator = defaults.AWS.Creator
+	}
 	if p.User == "" && p.AWS.Profile != "" {
 		p.User = DefaultAWSUser
 	}
@@ -573,6 +600,20 @@ func applyDefaultField(defaults *ProfileDefaults, line string) error {
 		defaults.IdentityFile = value
 	default:
 		return fmt.Errorf("unsupported defaults field %q", key)
+	}
+	return nil
+}
+
+func applyDefaultAWSField(defaults *AWSDefaults, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "creator":
+		defaults.Creator = value
+	default:
+		return fmt.Errorf("unsupported defaults aws field %q", key)
 	}
 	return nil
 }

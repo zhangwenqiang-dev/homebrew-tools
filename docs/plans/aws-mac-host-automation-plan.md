@@ -62,6 +62,8 @@ Safety requirements:
 defaults:
   user: ec2-user
   identity_file: ~/.ssh/example.pem
+  aws:
+    creator: "Xiao Chen"
 
 profiles:
   example:
@@ -71,7 +73,6 @@ profiles:
     aws:
       profile: default
       region: us-west-2
-      creator: "Xiao Chen"
       account_email: apple@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea
