@@ -252,7 +252,7 @@ profiles:
 	if !ok {
 		t.Fatal("expected east profile")
 	}
-	if east.Host != "ec2-198-51-100-20.compute-1.amazonaws.com" {
+	if east.Host != "ec2-198-51-100-20.us-east-1.compute.amazonaws.com" {
 		t.Fatalf("east host = %q", east.Host)
 	}
 }

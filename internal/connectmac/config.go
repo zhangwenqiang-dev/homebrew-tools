@@ -505,9 +505,6 @@ func EC2HostFromPublicIPRegion(publicIP, region string) string {
 		return ""
 	}
 	dashedIP := strings.ReplaceAll(publicIP, ".", "-")
-	if region == "us-east-1" {
-		return fmt.Sprintf("ec2-%s.compute-1.amazonaws.com", dashedIP)
-	}
 	return fmt.Sprintf("ec2-%s.%s.compute.amazonaws.com", dashedIP, region)
 }
 
