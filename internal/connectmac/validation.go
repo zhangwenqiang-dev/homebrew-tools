@@ -92,7 +92,6 @@ func (v Validator) ValidateAWSProfile(profile Profile) []error {
 	}{
 		{"aws.profile", profile.AWS.Profile},
 		{"aws.region", profile.AWS.Region},
-		{"aws.short_name", profile.AWS.ShortName},
 		{"aws.account_email", profile.AWS.AccountEmail},
 		{"aws.key_name", profile.AWS.KeyName},
 		{"aws.subnet_id", profile.AWS.SubnetID},

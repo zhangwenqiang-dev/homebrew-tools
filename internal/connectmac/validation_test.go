@@ -135,7 +135,8 @@ func validAWSProfile() Profile {
 		AWS: AWSConfig{
 			Profile:               "cm-xcode",
 			Region:                "us-west-2",
-			ShortName:             "xcode",
+			Creator:               "xc",
+			CreatorName:           "Xiao Chen",
 			AccountEmail:          "user@example.com",
 			AMI:                   AWSAMIConfig{MacX86: "ami-0538568e5d3653bea", MacARM: "ami-063755aadeb97329a"},
 			KeyName:               "example-key",

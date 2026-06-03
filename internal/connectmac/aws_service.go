@@ -86,6 +86,11 @@ func (s AWSService) Adopt(ctx context.Context, profile Profile) (MacPlan, AWSAdo
 		{Key: "cm-profile", Value: plan.ProfileName},
 		{Key: "cm-account-email", Value: plan.AccountEmail},
 	}
+	for _, tag := range plan.Tags {
+		if tag.Key == "cm-creator" || tag.Key == "cm-creator-name" {
+			tags = append(tags, tag)
+		}
+	}
 	if err := client.TagResources(ctx, resourceIDs, tags); err != nil {
 		return MacPlan{}, AWSAdoptResult{}, err
 	}

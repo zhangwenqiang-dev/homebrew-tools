@@ -18,8 +18,8 @@ Creation flow:
 
 1. Allocate a Mac Dedicated Host in a configured AWS region and allowed availability zone IDs matching `*-az[1-4]`.
 2. Use this resource name format for Dedicated Host and EC2 instance:
-   `xcode-<operator-short-name>-<yyyymmdd>-<account-email>`.
-   The operator short name is the lowercase abbreviation of the person creating the Mac, such as `xc`; the account email is the Apple account identifier.
+   `xcode-<yyyymmdd>-<account-email>`.
+   Store the creator separately with tags such as `cm-creator=xc` and `cm-creator-name=Xiao Chen`; the account email is the Apple account identifier.
 3. Supported Mac instance families:
    `mac1`, `mac2`, `mac2-m1ultra`, `mac2-m2`, `mac2-m2pro`, `mac-m3ultra`, `mac-m4`, `mac-m4max`, `mac-m4pro`.
 4. Default `instance_type_priority` should prefer Apple Silicon and cheaper baseline machines before expensive performance machines:
@@ -69,7 +69,8 @@ profiles:
     aws:
       profile: default
       region: us-west-2
-      short_name: xc
+      creator: xc
+      creator_name: "Xiao Chen"
       account_email: apple@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea
@@ -207,7 +208,7 @@ aws ec2 release-hosts \
 - Modify: `examples/config.yaml`
 
 - [ ] Add `AWSConfig` to profile config with fields matching the proposed YAML.
-- [ ] Add tests that parse `aws.profile`, `region`, `short_name`, `account_email`, `aws.ami.mac_x86`, `aws.ami.mac_arm`, `key_name`, `subnet_id`, `security_group_id`, `elastic_ip_allocation_id`, `elastic_ip_owner_tag`, `availability_zone_ids`, `instance_type_priority`, and `allow_intel_fallback`.
+- [ ] Add tests that parse `aws.profile`, `region`, `creator`, `creator_name`, `account_email`, `aws.ami.mac_x86`, `aws.ami.mac_arm`, `key_name`, `subnet_id`, `security_group_id`, `elastic_ip_allocation_id`, `elastic_ip_owner_tag`, `availability_zone_ids`, `instance_type_priority`, and `allow_intel_fallback`.
 - [ ] Ensure missing `aws` config does not break existing SSH, VNC, push, and pull commands.
 - [ ] Add sanitized example config only.
 - [ ] Run `go test ./...`.
@@ -218,13 +219,13 @@ aws ec2 release-hosts \
 - Modify: `internal/connectmac/validation.go`
 - Modify: `internal/connectmac/validation_test.go`
 
-- [ ] Validate that AWS commands require `region`, `short_name`, `account_email`, `key_name`, `subnet_id`, `security_group_id`, `elastic_ip_allocation_id`, at least one architecture-compatible AMI, and at least one availability zone ID.
+- [ ] Validate that AWS commands require `region`, `account_email`, `key_name`, `subnet_id`, `security_group_id`, `elastic_ip_allocation_id`, at least one architecture-compatible AMI, and at least one availability zone ID.
 - [ ] Validate availability zone IDs with pattern ending in `-az1`, `-az2`, `-az3`, or `-az4`.
 - [ ] Validate supported instance types.
 - [ ] Reject `mac1.metal` when `allow_intel_fallback` is false.
 - [ ] Validate AMI architecture selection: `mac1.metal` must use `aws.ami.mac_x86`; every Apple Silicon Mac instance type must use `aws.ami.mac_arm`.
 - [ ] Validate generated resource name format:
-  `xcode-<operator-short-name>-<yyyymmdd>-<account-email>`.
+  `xcode-<yyyymmdd>-<account-email>`.
 - [ ] Run `go test ./...`.
 
 ### Task 3: Build Planning Model

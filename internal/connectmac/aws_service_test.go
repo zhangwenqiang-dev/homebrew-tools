@@ -16,7 +16,7 @@ func TestBuildMacPlanSelectsARMDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildMacPlan returned error: %v", err)
 	}
-	if plan.ResourceName != "xcode-xcode-20260603-user@example.com" {
+	if plan.ResourceName != "xcode-20260603-user@example.com" {
 		t.Fatalf("resource name = %q", plan.ResourceName)
 	}
 	if plan.SelectedInstanceType != "mac2.metal" {
@@ -79,7 +79,7 @@ func TestAWSServiceStatusUsesClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status returned error: %v", err)
 	}
-	if plan.ResourceName != "xcode-xcode-20260603-user@example.com" {
+	if plan.ResourceName != "xcode-20260603-user@example.com" {
 		t.Fatalf("resource name = %q", plan.ResourceName)
 	}
 	if len(status.Hosts) != 1 || status.Hosts[0].HostID != "h-1" {
@@ -155,8 +155,8 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 func TestAWSServiceAdoptTagsMatchedResources(t *testing.T) {
 	fake := &fakeAWSClient{
 		status: AWSStatus{
-			Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-xcode-20260603-user@example.com"}}}},
-			Instances: []InstanceStatus{{InstanceID: "i-1", HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-xcode-20260603-user@example.com"}}}},
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-20260603-user@example.com"}}}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-20260603-user@example.com"}}}},
 			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", InstanceID: "i-1", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
 		},
 	}

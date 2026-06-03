@@ -29,7 +29,8 @@ profiles:
     aws:
       profile: cm-xcode
       region: us-west-2
-      short_name: xcode
+      creator: xc
+      creator_name: Xiao Chen
       account_email: user@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea
@@ -83,6 +84,12 @@ func TestParseConfig(t *testing.T) {
 	}
 	if profile.AWS.Profile != "cm-xcode" {
 		t.Fatalf("aws profile = %q, want cm-xcode", profile.AWS.Profile)
+	}
+	if profile.AWS.Creator != "xc" {
+		t.Fatalf("aws creator = %q, want xc", profile.AWS.Creator)
+	}
+	if profile.AWS.CreatorName != "Xiao Chen" {
+		t.Fatalf("aws creator_name = %q, want Xiao Chen", profile.AWS.CreatorName)
 	}
 	if profile.AWS.AMI.MacX86 != "ami-0538568e5d3653bea" {
 		t.Fatalf("aws ami mac_x86 = %q", profile.AWS.AMI.MacX86)

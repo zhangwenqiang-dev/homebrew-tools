@@ -51,7 +51,8 @@ profiles:
     aws:
       profile: cm-xcode
       region: us-west-2
-      short_name: xc
+      creator: xc
+      creator_name: "Xiao Chen"
       resource_name: ""
       account_email: user@example.com
       ami:
@@ -179,7 +180,7 @@ cm aws destroy xcode-vnc
 
 `cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, and Elastic IP association. `cm aws create` and `cm aws destroy` preview by default; pass `--confirm` to execute the AWS mutations.
 
-Use `aws.short_name` for the lowercase abbreviation of the person or operator creating the Mac, such as `xc`. Use `aws.account_email` for the Apple account email. Leave `aws.resource_name` empty for new resources so `cm` generates `xcode-<operator-short-name>-<yyyymmdd>-<account-email>`. Set `aws.resource_name` only when adopting resources that were created before `cm` managed them.
+Use `aws.creator` and `aws.creator_name` to tag who originally created the Mac, such as `xc` and `Xiao Chen`. Use `aws.account_email` for the Apple account email. Leave `aws.resource_name` empty for new resources so `cm` generates `xcode-<yyyymmdd>-<account-email>`. Set `aws.resource_name` only when adopting resources that were created before `cm` managed them.
 
 AWS credentials are read through the normal AWS SDK credential chain. Keep access keys in `~/.aws/credentials`, AWS SSO, environment variables, or IAM roles. Do not put AWS secret keys in `~/.connectmac/config.yaml`.
 
