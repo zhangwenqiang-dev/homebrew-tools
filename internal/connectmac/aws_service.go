@@ -87,7 +87,7 @@ func (s AWSService) Adopt(ctx context.Context, profile Profile) (MacPlan, AWSAdo
 		{Key: "cm-account-email", Value: plan.AccountEmail},
 	}
 	for _, tag := range plan.Tags {
-		if tag.Key == "cm-creator" || tag.Key == "cm-creator-name" {
+		if tag.Key == "cm-creator" {
 			tags = append(tags, tag)
 		}
 	}

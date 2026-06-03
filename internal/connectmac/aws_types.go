@@ -85,9 +85,6 @@ func BuildMacPlan(profile Profile, _ time.Time) (MacPlan, error) {
 	if profile.AWS.Creator != "" {
 		tags = append(tags, AWSTagConfig{Key: "cm-creator", Value: profile.AWS.Creator})
 	}
-	if profile.AWS.CreatorName != "" {
-		tags = append(tags, AWSTagConfig{Key: "cm-creator-name", Value: profile.AWS.CreatorName})
-	}
 	return MacPlan{
 		ProfileName:           profile.Name,
 		ResourceName:          resourceName,
