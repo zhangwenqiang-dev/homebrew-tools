@@ -74,7 +74,7 @@ func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
 	}
 	resourceName := profile.AWS.ResourceName
 	if resourceName == "" {
-		resourceName = MacResourceName(now, profile.AWS.AccountEmail)
+		resourceName = MacResourceName(profile.AWS.AccountEmail)
 	}
 	tags := []AWSTagConfig{
 		{Key: "Name", Value: resourceName},
@@ -88,6 +88,11 @@ func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
 	if profile.AWS.CreatorName != "" {
 		tags = append(tags, AWSTagConfig{Key: "cm-creator-name", Value: profile.AWS.CreatorName})
 	}
+	creatorTime := profile.AWS.CreatorTime
+	if creatorTime == "" {
+		creatorTime = now.Format("20060102")
+	}
+	tags = append(tags, AWSTagConfig{Key: "cm-creator-time", Value: creatorTime})
 	return MacPlan{
 		ProfileName:           profile.Name,
 		ResourceName:          resourceName,
@@ -107,8 +112,8 @@ func BuildMacPlan(profile Profile, now time.Time) (MacPlan, error) {
 	}, nil
 }
 
-func MacResourceName(now time.Time, accountEmail string) string {
-	return fmt.Sprintf("xcode-%s-%s", now.Format("20060102"), strings.ToLower(accountEmail))
+func MacResourceName(accountEmail string) string {
+	return fmt.Sprintf("xcode-%s", strings.ToLower(accountEmail))
 }
 
 func IsIntelMacInstanceType(instanceType string) bool {

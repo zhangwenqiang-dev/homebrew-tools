@@ -89,7 +89,7 @@ func TestMCPAWSPlan(t *testing.T) {
 	out := runMCPCall(t, app, config, "cm_aws_plan", map[string]interface{}{
 		"profile": "xcode-vnc",
 	})
-	if !strings.Contains(out, "AWS Mac plan") || !strings.Contains(out, "xcode-20260603-user@example.com") {
+	if !strings.Contains(out, "AWS Mac plan") || !strings.Contains(out, "xcode-user@example.com") {
 		t.Fatalf("output = %q", out)
 	}
 	if len(runner.rsync) != 0 || runner.forgotHost != "" {
