@@ -637,7 +637,7 @@ func DefaultConfigTemplate() string {
     aws:
       profile: cm-xcode
       region: us-west-2
-      short_name: xcode
+      short_name: xc
       resource_name: ""
       account_email: user@example.com
       ami:

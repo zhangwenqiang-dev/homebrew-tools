@@ -18,7 +18,8 @@ Creation flow:
 
 1. Allocate a Mac Dedicated Host in a configured AWS region and allowed availability zone IDs matching `*-az[1-4]`.
 2. Use this resource name format for Dedicated Host and EC2 instance:
-   `xcode-<lowercase-short-name>-<yyyymmdd>-<account-email>`.
+   `xcode-<operator-short-name>-<yyyymmdd>-<account-email>`.
+   The operator short name is the lowercase abbreviation of the person creating the Mac, such as `xc`; the account email is the Apple account identifier.
 3. Supported Mac instance families:
    `mac1`, `mac2`, `mac2-m1ultra`, `mac2-m2`, `mac2-m2pro`, `mac-m3ultra`, `mac-m4`, `mac-m4max`, `mac-m4pro`.
 4. Default `instance_type_priority` should prefer Apple Silicon and cheaper baseline machines before expensive performance machines:
@@ -68,7 +69,7 @@ profiles:
     aws:
       profile: default
       region: us-west-2
-      short_name: example
+      short_name: xc
       account_email: apple@example.com
       ami:
         mac_x86: ami-0538568e5d3653bea
@@ -223,7 +224,7 @@ aws ec2 release-hosts \
 - [ ] Reject `mac1.metal` when `allow_intel_fallback` is false.
 - [ ] Validate AMI architecture selection: `mac1.metal` must use `aws.ami.mac_x86`; every Apple Silicon Mac instance type must use `aws.ami.mac_arm`.
 - [ ] Validate generated resource name format:
-  `xcode-<lowercase-short-name>-<yyyymmdd>-<account-email>`.
+  `xcode-<operator-short-name>-<yyyymmdd>-<account-email>`.
 - [ ] Run `go test ./...`.
 
 ### Task 3: Build Planning Model
