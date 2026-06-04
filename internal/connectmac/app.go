@@ -143,16 +143,25 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|wait-ready|adopt|destroy> <profile> [--confirm]")
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile> [--confirm] [--host-id <id>]")
 		return 2
 	}
 	command := args[0]
 	profileName := args[1]
 	confirm := false
-	for _, arg := range args[2:] {
+	hostID := ""
+	for i := 2; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "--confirm":
 			confirm = true
+		case "--host-id":
+			i++
+			if i >= len(args) || args[i] == "" {
+				fmt.Fprintln(a.Err, "--host-id requires a value")
+				return 2
+			}
+			hostID = args[i]
 		default:
 			fmt.Fprintf(a.Err, "unknown aws option %q\n", arg)
 			return 2
@@ -163,7 +172,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintln(a.Err, unknownProfileError(cfg, profileName))
 		return 2
 	}
-	if (command == "create" || command == "adopt") && confirm {
+	if (command == "create" || command == "adopt" || command == "adopt-host" || command == "launch-on-host") && confirm {
 		profile = a.promptMissingAWSCreator(profile)
 	}
 	errs := a.Validator.ValidateAWSProfile(profile)
@@ -232,6 +241,56 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSAdoptResult(plan, result))
+		return 0
+	case "adopt-host":
+		if hostID == "" {
+			fmt.Fprintln(a.Err, "--host-id is required for aws adopt-host")
+			return 2
+		}
+		_, host, err := a.AWSService.AdoptHostPreview(ctx, profile, hostID)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws adopt-host failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSAdoptHostPreview(plan, host))
+		if !confirm {
+			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to tag this host as cm-managed.")
+			return 0
+		}
+		_, result, err := a.AWSService.AdoptHost(ctx, profile, hostID)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws adopt-host failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSAdoptResult(plan, result))
+		return 0
+	case "launch-on-host":
+		if hostID == "" {
+			fmt.Fprintln(a.Err, "--host-id is required for aws launch-on-host")
+			return 2
+		}
+		_, preview, err := a.AWSService.LaunchOnHostPreview(ctx, profile, hostID)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws launch-on-host failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSLaunchOnHostPreview(plan, preview))
+		if !confirm {
+			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to launch EC2 on this host.")
+			return 0
+		}
+		_, result, err := a.AWSService.LaunchOnHost(ctx, profile, hostID)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws launch-on-host failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
+		_, status, err := a.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
 	case "destroy":
 		fmt.Fprint(a.Out, FormatMacDestroyPreview(plan))
@@ -610,6 +669,8 @@ func (a App) printUsage() {
   cm aws status <profile> [--config <path>]
   cm aws wait-ready <profile> [--config <path>]
   cm aws adopt <profile> [--confirm] [--config <path>]
+  cm aws adopt-host <profile> --host-id <id> [--confirm] [--config <path>]
+  cm aws launch-on-host <profile> --host-id <id> [--confirm] [--config <path>]
   cm aws destroy <profile> [--confirm] [--config <path>]
   cm mcp [--config <path>]
   cm stop <profile>

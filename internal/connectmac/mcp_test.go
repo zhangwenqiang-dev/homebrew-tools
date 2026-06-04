@@ -150,11 +150,13 @@ func TestMCPAWSWaitReady(t *testing.T) {
 	}
 }
 
-func TestMCPToolsIncludesAWSWaitReady(t *testing.T) {
+func TestMCPToolsIncludesAWSHostWorkflow(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	out := runMCPToolsList(t, app, config)
-	if !strings.Contains(out, "cm_aws_wait_ready") {
-		t.Fatalf("tools output = %q", out)
+	for _, want := range []string{"cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("tools output missing %q: %q", want, out)
+		}
 	}
 }
 

@@ -403,9 +403,18 @@ Requirements:
 - Allow adoption of a Dedicated Host even when no EC2 instance exists yet.
 - Tag adopted hosts with `cm-managed=true`, `cm-profile=<profile>`, `cm-account-email=<email>`, and optional `cm-creator=<creator>`.
 - Verify adopted host state is usable before launch.
+- Verify adopted host has no currently running instances before adoption or launch-on-host.
 - Verify adopted host instance type matches the profile-selected instance type.
 - Verify adopted host AZ is one of the configured `availability_zone_ids`.
 - Keep preview mode by default; require `--confirm` for tagging or launching.
+
+Implemented in progress:
+
+- `cm aws adopt-host <profile> --host-id <host-id>` previews and confirms tagging an existing empty Dedicated Host.
+- `cm aws launch-on-host <profile> --host-id <host-id>` previews and confirms launching EC2 on an existing empty Dedicated Host.
+- Both commands verify host state, instance type, allowed AZ, and empty host instances before mutation.
+- `launch-on-host` reuses `subnets_by_az` and subnet AZ validation before starting EC2.
+- MCP mirrors the workflow through `cm_aws_adopt_host` and `cm_aws_launch_on_host`.
 
 ### Priority 2: Validate and Auto-Select Subnet by Host AZ
 

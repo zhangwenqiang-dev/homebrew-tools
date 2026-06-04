@@ -125,16 +125,7 @@ func (s AWSService) Adopt(ctx context.Context, profile Profile) (MacPlan, AWSAdo
 	for _, instance := range status.Instances {
 		resourceIDs = append(resourceIDs, instance.InstanceID)
 	}
-	tags := []AWSTagConfig{
-		{Key: "cm-managed", Value: "true"},
-		{Key: "cm-profile", Value: plan.ProfileName},
-		{Key: "cm-account-email", Value: plan.AccountEmail},
-	}
-	for _, tag := range plan.Tags {
-		if tag.Key == "cm-creator" {
-			tags = append(tags, tag)
-		}
-	}
+	tags := adoptionTags(plan)
 	if err := client.TagResources(ctx, resourceIDs, tags); err != nil {
 		return MacPlan{}, AWSAdoptResult{}, err
 	}
@@ -142,6 +133,41 @@ func (s AWSService) Adopt(ctx context.Context, profile Profile) (MacPlan, AWSAdo
 		TaggedResources: resourceIDs,
 		Tags:            tags,
 	}, nil
+}
+
+func (s AWSService) AdoptHostPreview(ctx context.Context, profile Profile, hostID string) (MacPlan, DedicatedHostStatus, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, DedicatedHostStatus{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, DedicatedHostStatus{}, err
+	}
+	host, err := client.DescribeHostByID(ctx, hostID)
+	if err != nil {
+		return MacPlan{}, DedicatedHostStatus{}, err
+	}
+	if err := validateHostForProfile(plan, host); err != nil {
+		return MacPlan{}, DedicatedHostStatus{}, err
+	}
+	return plan, host, nil
+}
+
+func (s AWSService) AdoptHost(ctx context.Context, profile Profile, hostID string) (MacPlan, AWSAdoptResult, error) {
+	plan, host, err := s.AdoptHostPreview(ctx, profile, hostID)
+	if err != nil {
+		return MacPlan{}, AWSAdoptResult{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSAdoptResult{}, err
+	}
+	tags := adoptionTags(plan)
+	if err := client.TagResources(ctx, []string{host.HostID}, tags); err != nil {
+		return MacPlan{}, AWSAdoptResult{}, err
+	}
+	return plan, AWSAdoptResult{TaggedResources: []string{host.HostID}, Tags: tags}, nil
 }
 
 func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCreateResult, error) {
@@ -206,6 +232,68 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 	return MacPlan{}, AWSCreateResult{}, fmt.Errorf("no aws create candidate was attempted")
 }
 
+func (s AWSService) LaunchOnHostPreview(ctx context.Context, profile Profile, hostID string) (MacPlan, AWSLaunchOnHostPreview, error) {
+	plan, host, err := s.AdoptHostPreview(ctx, profile, hostID)
+	if err != nil {
+		return MacPlan{}, AWSLaunchOnHostPreview{}, err
+	}
+	instanceType := host.InstanceType
+	ami := amiForInstanceType(profile.AWS, instanceType)
+	if ami == "" {
+		return MacPlan{}, AWSLaunchOnHostPreview{}, fmt.Errorf("no architecture-compatible AMI configured for host instance type %s", instanceType)
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSLaunchOnHostPreview{}, err
+	}
+	subnetID, err := subnetForLaunch(ctx, client, plan, host.ZoneID)
+	if err != nil {
+		return MacPlan{}, AWSLaunchOnHostPreview{}, err
+	}
+	return plan, AWSLaunchOnHostPreview{
+		HostID:             host.HostID,
+		AvailabilityZoneID: host.ZoneID,
+		InstanceType:       instanceType,
+		AMI:                ami,
+		SubnetID:           subnetID,
+	}, nil
+}
+
+func (s AWSService) LaunchOnHost(ctx context.Context, profile Profile, hostID string) (MacPlan, AWSCreateResult, error) {
+	plan, preview, err := s.LaunchOnHostPreview(ctx, profile, hostID)
+	if err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	if _, err := client.VerifyElasticIPOwner(ctx, plan); err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	attemptPlan := plan
+	attemptPlan.SubnetID = preview.SubnetID
+	instanceID, err := client.RunInstance(ctx, attemptPlan, preview.HostID, preview.InstanceType, preview.AMI)
+	if err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
+	if err != nil {
+		_ = client.TerminateInstance(ctx, instanceID)
+		return MacPlan{}, AWSCreateResult{}, err
+	}
+	return plan, AWSCreateResult{
+		HostID:              preview.HostID,
+		InstanceID:          instanceID,
+		AssociationID:       associationID,
+		AvailabilityZoneID:  preview.AvailabilityZoneID,
+		InstanceType:        preview.InstanceType,
+		AMI:                 preview.AMI,
+		SubnetID:            preview.SubnetID,
+		ElasticIPAllocation: plan.ElasticIPAllocationID,
+	}, nil
+}
+
 func subnetForLaunch(ctx context.Context, client AWSClient, plan MacPlan, availabilityZoneID string) (string, error) {
 	subnetID := plan.SubnetForAZ(availabilityZoneID)
 	if subnetID == "" {
@@ -219,6 +307,54 @@ func subnetForLaunch(ctx context.Context, client AWSClient, plan MacPlan, availa
 		return "", fmt.Errorf("subnet %s is in %s, but selected host availability zone is %s", subnetID, actualZoneID, availabilityZoneID)
 	}
 	return subnetID, nil
+}
+
+func adoptionTags(plan MacPlan) []AWSTagConfig {
+	tags := []AWSTagConfig{
+		{Key: "cm-managed", Value: "true"},
+		{Key: "cm-profile", Value: plan.ProfileName},
+		{Key: "cm-account-email", Value: plan.AccountEmail},
+	}
+	for _, tag := range plan.Tags {
+		if tag.Key == "cm-creator" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func validateHostForProfile(plan MacPlan, host DedicatedHostStatus) error {
+	if host.HostID == "" {
+		return fmt.Errorf("dedicated host id is empty")
+	}
+	if host.State != "available" {
+		return fmt.Errorf("dedicated host %s state is %s, want available", host.HostID, emptyStatus(host.State))
+	}
+	if len(host.InstanceIDs) > 0 {
+		return fmt.Errorf("dedicated host %s is not empty; running instances: %s", host.HostID, strings.Join(host.InstanceIDs, ", "))
+	}
+	if host.InstanceType == "" {
+		return fmt.Errorf("dedicated host %s instance type is empty", host.HostID)
+	}
+	if !containsString(plan.InstanceTypePriority, host.InstanceType) {
+		return fmt.Errorf("dedicated host %s type %s is not allowed by instance_type_priority", host.HostID, host.InstanceType)
+	}
+	if host.ZoneID == "" {
+		return fmt.Errorf("dedicated host %s availability zone id is empty", host.HostID)
+	}
+	if !containsString(plan.AvailabilityZoneIDs, host.ZoneID) {
+		return fmt.Errorf("dedicated host %s zone %s is not allowed by availability_zone_ids", host.HostID, host.ZoneID)
+	}
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func AWSStatusReady(status AWSStatus) bool {
@@ -335,6 +471,14 @@ type AWSAdoptResult struct {
 	Tags            []AWSTagConfig
 }
 
+type AWSLaunchOnHostPreview struct {
+	HostID             string
+	AvailabilityZoneID string
+	InstanceType       string
+	AMI                string
+	SubnetID           string
+}
+
 func FormatMacPlan(plan MacPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac plan for profile %s\n", plan.ProfileName)
@@ -399,6 +543,27 @@ func FormatAWSAdoptResult(plan MacPlan, result AWSAdoptResult) string {
 	fmt.Fprintf(&b, "AWS Mac resources adopted for profile %s\n", plan.ProfileName)
 	fmt.Fprintf(&b, "Tagged resources: %s\n", strings.Join(result.TaggedResources, ", "))
 	fmt.Fprintf(&b, "Added tags: %s\n", FormatAWSTags(result.Tags))
+	return b.String()
+}
+
+func FormatAWSAdoptHostPreview(plan MacPlan, host DedicatedHostStatus) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac adopt-host preview for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Host: %s\n", host.HostID)
+	fmt.Fprintf(&b, "State: %s\n", host.State)
+	fmt.Fprintf(&b, "Instance type: %s\n", host.InstanceType)
+	fmt.Fprintf(&b, "Availability zone: %s\n", host.ZoneID)
+	fmt.Fprintf(&b, "Tags to add: %s\n", FormatAWSTags(adoptionTags(plan)))
+	return b.String()
+}
+
+func FormatAWSLaunchOnHostPreview(plan MacPlan, preview AWSLaunchOnHostPreview) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac launch-on-host preview for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Host: %s\n", preview.HostID)
+	fmt.Fprintf(&b, "Selected: %s %s %s\n", preview.AvailabilityZoneID, preview.InstanceType, preview.AMI)
+	fmt.Fprintf(&b, "Subnet: %s\n", preview.SubnetID)
+	fmt.Fprintf(&b, "Elastic IP allocation: %s\n", plan.ElasticIPAllocationID)
 	return b.String()
 }
 

@@ -16,6 +16,7 @@ type AWSClient interface {
 	CallerIdentity(ctx context.Context) (CallerIdentity, error)
 	DescribeStatus(ctx context.Context, plan MacPlan) (AWSStatus, error)
 	DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error)
+	DescribeHostByID(ctx context.Context, hostID string) (DedicatedHostStatus, error)
 	TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error
 	SubnetAvailabilityZoneID(ctx context.Context, subnetID string) (string, error)
 	AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error)
@@ -45,6 +46,7 @@ type DedicatedHostStatus struct {
 	State        string
 	InstanceType string
 	ZoneID       string
+	InstanceIDs  []string
 	Tags         []AWSTagConfig
 }
 
@@ -172,6 +174,17 @@ func (c RealAWSClient) DescribeAdoptionCandidates(ctx context.Context, plan MacP
 		Instances:      instances,
 		ElasticIP:      eip,
 	}, nil
+}
+
+func (c RealAWSClient) DescribeHostByID(ctx context.Context, hostID string) (DedicatedHostStatus, error) {
+	hosts, err := c.describeHostsByID(ctx, []string{hostID})
+	if err != nil {
+		return DedicatedHostStatus{}, err
+	}
+	if len(hosts) == 0 {
+		return DedicatedHostStatus{}, fmt.Errorf("dedicated host %s not found", hostID)
+	}
+	return hosts[0], nil
 }
 
 func (c RealAWSClient) TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error {
@@ -320,13 +333,7 @@ func (c RealAWSClient) describeManagedHosts(ctx context.Context, plan MacPlan) (
 	}
 	hosts := make([]DedicatedHostStatus, 0, len(out.Hosts))
 	for _, host := range out.Hosts {
-		hosts = append(hosts, DedicatedHostStatus{
-			HostID:       aws.ToString(host.HostId),
-			State:        string(host.State),
-			InstanceType: aws.ToString(host.HostProperties.InstanceType),
-			ZoneID:       aws.ToString(host.AvailabilityZoneId),
-			Tags:         fromEC2Tags(host.Tags),
-		})
+		hosts = append(hosts, dedicatedHostStatusFromEC2(host))
 	}
 	return hosts, nil
 }
@@ -340,13 +347,7 @@ func (c RealAWSClient) describeHostsByName(ctx context.Context, name string) ([]
 	}
 	hosts := make([]DedicatedHostStatus, 0, len(out.Hosts))
 	for _, host := range out.Hosts {
-		hosts = append(hosts, DedicatedHostStatus{
-			HostID:       aws.ToString(host.HostId),
-			State:        string(host.State),
-			InstanceType: aws.ToString(host.HostProperties.InstanceType),
-			ZoneID:       aws.ToString(host.AvailabilityZoneId),
-			Tags:         fromEC2Tags(host.Tags),
-		})
+		hosts = append(hosts, dedicatedHostStatusFromEC2(host))
 	}
 	return hosts, nil
 }
@@ -360,15 +361,26 @@ func (c RealAWSClient) describeHostsByID(ctx context.Context, hostIDs []string) 
 	}
 	hosts := make([]DedicatedHostStatus, 0, len(out.Hosts))
 	for _, host := range out.Hosts {
-		hosts = append(hosts, DedicatedHostStatus{
-			HostID:       aws.ToString(host.HostId),
-			State:        string(host.State),
-			InstanceType: aws.ToString(host.HostProperties.InstanceType),
-			ZoneID:       aws.ToString(host.AvailabilityZoneId),
-			Tags:         fromEC2Tags(host.Tags),
-		})
+		hosts = append(hosts, dedicatedHostStatusFromEC2(host))
 	}
 	return hosts, nil
+}
+
+func dedicatedHostStatusFromEC2(host ec2types.Host) DedicatedHostStatus {
+	instanceIDs := make([]string, 0, len(host.Instances))
+	for _, instance := range host.Instances {
+		if id := aws.ToString(instance.InstanceId); id != "" {
+			instanceIDs = append(instanceIDs, id)
+		}
+	}
+	return DedicatedHostStatus{
+		HostID:       aws.ToString(host.HostId),
+		State:        string(host.State),
+		InstanceType: aws.ToString(host.HostProperties.InstanceType),
+		ZoneID:       aws.ToString(host.AvailabilityZoneId),
+		InstanceIDs:  instanceIDs,
+		Tags:         fromEC2Tags(host.Tags),
+	}
 }
 
 func (c RealAWSClient) describeManagedInstances(ctx context.Context, plan MacPlan) ([]InstanceStatus, error) {

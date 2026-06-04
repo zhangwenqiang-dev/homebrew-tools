@@ -307,6 +307,37 @@ func TestAppAWSWaitReady(t *testing.T) {
 	}
 }
 
+func TestAppAWSAdoptHostPreview(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{host: DedicatedHostStatus{HostID: "h-empty", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1"}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "adopt-host", "xcode-vnc", "--host-id", "h-empty", "--config", config}); code != 0 {
+		t.Fatalf("aws adopt-host code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "AWS Mac adopt-host preview") || !strings.Contains(out.String(), "Preview only") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppAWSLaunchOnHostRequiresHostID(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"aws", "launch-on-host", "xcode-vnc", "--config", config}); code != 2 {
+		t.Fatalf("aws launch-on-host code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--host-id is required") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
 func TestAppUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())

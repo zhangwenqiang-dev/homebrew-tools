@@ -330,6 +330,54 @@ func TestAWSServiceAdoptTagsMatchedResources(t *testing.T) {
 	}
 }
 
+func TestAWSServiceAdoptHostTagsEmptyHost(t *testing.T) {
+	fake := &fakeAWSClient{
+		host: DedicatedHostStatus{HostID: "h-empty", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1"},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.AdoptHost(context.Background(), validAWSProfile(), "h-empty")
+	if err != nil {
+		t.Fatalf("AdoptHost returned error: %v", err)
+	}
+	if strings.Join(result.TaggedResources, ",") != "h-empty" {
+		t.Fatalf("tagged resources = %v", result.TaggedResources)
+	}
+	want := []string{"host:h-empty", "tag:h-empty"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+func TestAWSServiceAdoptHostRejectsNonEmptyHost(t *testing.T) {
+	fake := &fakeAWSClient{
+		host: DedicatedHostStatus{HostID: "h-used", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1", InstanceIDs: []string{"i-1"}},
+	}
+	service := testAWSService(fake)
+	_, _, err := service.AdoptHostPreview(context.Background(), validAWSProfile(), "h-used")
+	if err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("expected non-empty host error, got %v", err)
+	}
+}
+
+func TestAWSServiceLaunchOnHostRunsInstanceAndAssociatesEIP(t *testing.T) {
+	fake := &fakeAWSClient{
+		host: DedicatedHostStatus{HostID: "h-empty", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1"},
+		eip:  ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.LaunchOnHost(context.Background(), validAWSProfile(), "h-empty")
+	if err != nil {
+		t.Fatalf("LaunchOnHost returned error: %v", err)
+	}
+	if result.HostID != "h-empty" || result.InstanceID != "i-created" || result.SubnetID != "<subnet-id>" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	want := []string{"host:h-empty", "subnet:<subnet-id>", "verify-eip", "run:h-empty:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
 func testAWSService(fake *fakeAWSClient) AWSService {
 	return AWSService{
 		Now: func() time.Time {
@@ -353,6 +401,7 @@ type fakeAWSClient struct {
 	calls          []string
 	status         AWSStatus
 	statusSequence []AWSStatus
+	host           DedicatedHostStatus
 	eip            ElasticIP
 	subnetAZs      map[string]string
 }
@@ -374,6 +423,14 @@ func (c *fakeAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSSt
 func (c *fakeAWSClient) DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error) {
 	c.calls = append(c.calls, "adoption")
 	return c.status, nil
+}
+
+func (c *fakeAWSClient) DescribeHostByID(ctx context.Context, hostID string) (DedicatedHostStatus, error) {
+	c.calls = append(c.calls, "host:"+hostID)
+	if c.host.HostID != "" {
+		return c.host, nil
+	}
+	return DedicatedHostStatus{HostID: hostID, State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1"}, nil
 }
 
 func (c *fakeAWSClient) TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error {
