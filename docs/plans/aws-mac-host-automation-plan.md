@@ -357,6 +357,29 @@ The Robin Mac startup flow exposed gaps that should be addressed before the AWS 
 - The configured subnet was in a different AZ from the manually created host, so the remaining launch flow required manual subnet discovery.
 - The EC2 key pair and local PEM path had to be aligned after the instance was launched.
 
+### Current Status After 2026-06-04 Updates
+
+Completed:
+
+- `cm aws status` now reports EC2 system status, instance status, and attached EBS status.
+- `cm aws wait-ready <profile>` now waits for the managed instance to be `running`, the configured EIP to be bound to that instance, and all three AWS status checks to be `ok`.
+- `cm aws create <profile> --confirm` now waits for AWS readiness after EIP association.
+- `cm_aws_wait_ready` is available through MCP.
+- `cm aws status` can now recover the EC2 instance and Dedicated Host from the configured EIP binding when older or manually managed resources do not have the expected `cm-managed` tags.
+
+Current readiness decision:
+
+- `cm` must not run automatic SSH probes during AWS readiness checks.
+- AWS readiness is limited to EC2 state, EIP binding, system status, instance status, and attached EBS status.
+- SSH remains a user-triggered action through `cm ssh <profile>` after AWS readiness is complete.
+- This avoids touching a Mac EC2 instance before AWS reports all required checks as healthy.
+
+Recommended next implementation step:
+
+- Start with Priority 2, subnet selection by Host AZ.
+- Reason: it prevents failed or manual launch flows when a reusable or manually created host is in a different AZ than the configured `subnet_id`.
+- After Priority 2, implement Priority 1 using the same AZ-aware subnet selection for `adopt-host` and `launch-on-host`.
+
 ### Priority 1: Reuse or Adopt an Existing Empty Dedicated Host
 
 Add support for continuing from a manually created or previously available Dedicated Host.
@@ -453,14 +476,14 @@ Planned improvements:
 - Do not hard-fail on name mismatch because teams may name PEM files differently.
 - Keep hard failures for missing `identity_file`, PEM outside `~/.ssh`, or unsafe permissions.
 
-### Priority 6: Wait Until the Mac Is SSH-Ready
+### Priority 6: Wait Until the Mac Is AWS-Ready
 
-EC2 Mac can report `running` before SSH is ready. Add a readiness command for the post-create wait.
+EC2 Mac can report `running` before the platform is safe to use. Add a readiness command for the post-create wait that uses AWS status only.
 
 Proposed command:
 
 ```bash
-cm aws wait-ready <profile> [--timeout 20m]
+cm aws wait-ready <profile> [--timeout 45m]
 ```
 
 Behavior:
@@ -468,10 +491,19 @@ Behavior:
 - Poll `cm aws status`.
 - Wait for the managed instance to be `running`.
 - Wait for EIP association to point to the managed instance.
-- Optionally wait for EC2 status checks when available.
-- Probe SSH with `BatchMode=yes` and a short timeout.
-- Print progress every poll interval.
-- Exit successfully only after a lightweight remote command succeeds, such as `echo ok`.
+- Wait for EC2 system status to be `ok`.
+- Wait for EC2 instance status to be `ok`.
+- Wait for attached EBS status to be `ok`.
+- Treat missing, empty, `initializing`, `insufficient-data`, `impaired`, and `not-applicable` status values as not ready.
+- Do not probe SSH automatically.
+- Exit successfully only after all AWS readiness checks pass.
+
+Completed in `v0.1.11`:
+
+- The command exists and uses a default 45 minute timeout with 30 second polling.
+- `cm aws create <profile> --confirm` runs the AWS readiness wait after EIP association.
+- `cm aws status` prints `system_status`, `instance_status`, `ebs_status`, per-instance `ready`, and aggregate `Ready`.
+- `cm_aws_wait_ready` mirrors this behavior in MCP.
 
 ### Priority 7: Update MCP Tools
 
