@@ -79,6 +79,11 @@ profiles:
         mac_arm: ami-063755aadeb97329a
       key_name: example-key
       subnet_id: "<subnet-id>"
+      subnets_by_az:
+        usw2-az1: "<subnet-id-az1>"
+        usw2-az2: "<subnet-id-az2>"
+        usw2-az3: "<subnet-id-az3>"
+        usw2-az4: "<subnet-id-az4>"
       security_group_id: "<security-group-id>"
       elastic_ip_allocation_id: "<elastic-ip-allocation-id>"
       elastic_ip_public_ip: "<elastic-ip-public-ip>"
@@ -211,7 +216,7 @@ aws ec2 release-hosts \
 - Modify: `examples/config.yaml`
 
 - [ ] Add `AWSConfig` to profile config with fields matching the proposed YAML.
-- [ ] Add tests that parse `aws.profile`, `region`, `creator`, `account_email`, `aws.ami.mac_x86`, `aws.ami.mac_arm`, `key_name`, `subnet_id`, `security_group_id`, `elastic_ip_allocation_id`, `elastic_ip_owner_tag`, `availability_zone_ids`, `instance_type_priority`, and `allow_intel_fallback`.
+- [ ] Add tests that parse `aws.profile`, `region`, `creator`, `account_email`, `aws.ami.mac_x86`, `aws.ami.mac_arm`, `key_name`, `subnet_id`, `subnets_by_az`, `security_group_id`, `elastic_ip_allocation_id`, `elastic_ip_owner_tag`, `availability_zone_ids`, `instance_type_priority`, and `allow_intel_fallback`.
 - [ ] Ensure missing `aws` config does not break existing SSH, VNC, push, and pull commands.
 - [ ] Add sanitized example config only.
 - [ ] Run `go test ./...`.
@@ -222,7 +227,7 @@ aws ec2 release-hosts \
 - Modify: `internal/connectmac/validation.go`
 - Modify: `internal/connectmac/validation_test.go`
 
-- [ ] Validate that AWS commands require `region`, `account_email`, `key_name`, `subnet_id`, `security_group_id`, `elastic_ip_allocation_id`, at least one architecture-compatible AMI, and at least one availability zone ID.
+- [ ] Validate that AWS commands require `region`, `account_email`, `key_name`, `subnet_id` or `subnets_by_az`, `security_group_id`, `elastic_ip_allocation_id`, at least one architecture-compatible AMI, and at least one availability zone ID.
 - [ ] Validate availability zone IDs with pattern ending in `-az1`, `-az2`, `-az3`, or `-az4`.
 - [ ] Validate supported instance types.
 - [ ] Reject `mac1.metal` when `allow_intel_fallback` is false.
@@ -423,6 +428,13 @@ aws:
 
 - If `subnets_by_az` is present, automatically choose the subnet for the selected host AZ.
 - Optionally support auto-discovery: find a subnet in the same VPC and AZ as the configured base subnet.
+
+Implemented in progress:
+
+- `subnets_by_az` is supported as an optional profile AWS config map.
+- `cm aws create` resolves the subnet for each candidate AZ before allocating a Dedicated Host.
+- If a selected subnet belongs to a different AWS `AvailabilityZoneId`, that create candidate is skipped with a clear error if no candidate succeeds.
+- Existing `subnet_id` remains supported for old configs.
 
 ### Priority 3: Better Capacity Retry Matrix
 

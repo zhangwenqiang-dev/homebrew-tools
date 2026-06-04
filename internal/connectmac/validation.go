@@ -94,7 +94,6 @@ func (v Validator) ValidateAWSProfile(profile Profile) []error {
 		{"aws.region", profile.AWS.Region},
 		{"aws.account_email", profile.AWS.AccountEmail},
 		{"aws.key_name", profile.AWS.KeyName},
-		{"aws.subnet_id", profile.AWS.SubnetID},
 		{"aws.security_group_id", profile.AWS.SecurityGroupID},
 		{"aws.elastic_ip_allocation_id", profile.AWS.ElasticIPAllocationID},
 		{"aws.elastic_ip_owner_tag.key", profile.AWS.ElasticIPOwnerTag.Key},
@@ -108,9 +107,20 @@ func (v Validator) ValidateAWSProfile(profile Profile) []error {
 	if len(profile.AWS.AvailabilityZoneIDs) == 0 {
 		errs = append(errs, errors.New("aws.availability_zone_ids is required"))
 	}
+	if profile.AWS.SubnetID == "" && len(profile.AWS.SubnetsByAZ) == 0 {
+		errs = append(errs, errors.New("aws.subnet_id or aws.subnets_by_az is required"))
+	}
 	for _, zoneID := range profile.AWS.AvailabilityZoneIDs {
 		if !validAvailabilityZoneID(zoneID) {
 			errs = append(errs, fmt.Errorf("aws availability zone id %q must end with -az1, -az2, -az3, or -az4", zoneID))
+		}
+	}
+	for zoneID, subnetID := range profile.AWS.SubnetsByAZ {
+		if !validAvailabilityZoneID(zoneID) {
+			errs = append(errs, fmt.Errorf("aws subnets_by_az key %q must end with -az1, -az2, -az3, or -az4", zoneID))
+		}
+		if subnetID == "" {
+			errs = append(errs, fmt.Errorf("aws subnets_by_az %q subnet id is required", zoneID))
 		}
 	}
 	instanceTypes := profile.AWS.InstanceTypePriority

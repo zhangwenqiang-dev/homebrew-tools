@@ -42,6 +42,7 @@ type MacPlan struct {
 	SelectedAMI           string
 	KeyName               string
 	SubnetID              string
+	SubnetsByAZ           map[string]string
 	SecurityGroupID       string
 	ElasticIPAllocationID string
 	ElasticIPOwnerTag     AWSTagConfig
@@ -97,11 +98,19 @@ func BuildMacPlan(profile Profile, _ time.Time) (MacPlan, error) {
 		SelectedAMI:           selectedAMI,
 		KeyName:               profile.AWS.KeyName,
 		SubnetID:              profile.AWS.SubnetID,
+		SubnetsByAZ:           copyStringMap(profile.AWS.SubnetsByAZ),
 		SecurityGroupID:       profile.AWS.SecurityGroupID,
 		ElasticIPAllocationID: profile.AWS.ElasticIPAllocationID,
 		ElasticIPOwnerTag:     profile.AWS.ElasticIPOwnerTag,
 		Tags:                  tags,
 	}, nil
+}
+
+func (p MacPlan) SubnetForAZ(availabilityZoneID string) string {
+	if len(p.SubnetsByAZ) > 0 {
+		return p.SubnetsByAZ[availabilityZoneID]
+	}
+	return p.SubnetID
 }
 
 func MacResourceName(accountEmail string) string {
@@ -126,6 +135,17 @@ func withoutIntel(instanceTypes []string) []string {
 			continue
 		}
 		out = append(out, instanceType)
+	}
+	return out
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
 	}
 	return out
 }

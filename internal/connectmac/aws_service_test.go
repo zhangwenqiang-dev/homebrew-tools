@@ -48,6 +48,22 @@ func TestBuildMacPlanSelectsIntelAMIWhenAllowed(t *testing.T) {
 	}
 }
 
+func TestBuildMacPlanCopiesSubnetsByAZ(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.SubnetsByAZ = map[string]string{"usw2-az1": "<subnet-id-az1>"}
+	plan, err := BuildMacPlan(profile, time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("BuildMacPlan returned error: %v", err)
+	}
+	if plan.SubnetForAZ("usw2-az1") != "<subnet-id-az1>" {
+		t.Fatalf("subnet for az = %q", plan.SubnetForAZ("usw2-az1"))
+	}
+	profile.AWS.SubnetsByAZ["usw2-az1"] = "changed"
+	if plan.SubnetForAZ("usw2-az1") != "<subnet-id-az1>" {
+		t.Fatalf("plan should copy subnet map, got %q", plan.SubnetForAZ("usw2-az1"))
+	}
+}
+
 func TestFormatMacPlanIncludesSafetyDetails(t *testing.T) {
 	plan, err := BuildMacPlan(validAWSProfile(), time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC))
 	if err != nil {
@@ -193,9 +209,55 @@ func TestAWSServiceCreateAllocatesRunsAndAssociates(t *testing.T) {
 	if result.HostID != "h-created" || result.InstanceID != "i-created" || result.AssociationID != "eipassoc-created" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	want := []string{"verify-eip", "allocate:usw2-az1:mac2.metal", "run:h-created:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
+	if result.SubnetID != "<subnet-id>" {
+		t.Fatalf("subnet id = %q", result.SubnetID)
+	}
+	want := []string{"verify-eip", "subnet:<subnet-id>", "allocate:usw2-az1:mac2.metal", "run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+func TestAWSServiceCreateUsesSubnetByAZ(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.SubnetID = ""
+	profile.AWS.SubnetsByAZ = map[string]string{
+		"usw2-az1": "<subnet-id-az1>",
+		"usw2-az2": "<subnet-id-az2>",
+	}
+	fake := &fakeAWSClient{
+		eip: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		subnetAZs: map[string]string{
+			"<subnet-id-az1>": "usw2-az1",
+			"<subnet-id-az2>": "usw2-az2",
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Create(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.SubnetID != "<subnet-id-az1>" {
+		t.Fatalf("subnet id = %q", result.SubnetID)
+	}
+}
+
+func TestAWSServiceCreateSkipsMismatchedSubnetAZ(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.AvailabilityZoneIDs = []string{"usw2-az1", "usw2-az2"}
+	fake := &fakeAWSClient{
+		eip: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		subnetAZs: map[string]string{
+			"<subnet-id>": "usw2-az2",
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Create(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.AvailabilityZoneID != "usw2-az2" {
+		t.Fatalf("availability zone = %q", result.AvailabilityZoneID)
 	}
 }
 
@@ -292,6 +354,7 @@ type fakeAWSClient struct {
 	status         AWSStatus
 	statusSequence []AWSStatus
 	eip            ElasticIP
+	subnetAZs      map[string]string
 }
 
 func (c *fakeAWSClient) CallerIdentity(ctx context.Context) (CallerIdentity, error) {
@@ -318,13 +381,21 @@ func (c *fakeAWSClient) TagResources(ctx context.Context, resourceIDs []string, 
 	return nil
 }
 
+func (c *fakeAWSClient) SubnetAvailabilityZoneID(ctx context.Context, subnetID string) (string, error) {
+	c.calls = append(c.calls, "subnet:"+subnetID)
+	if zoneID := c.subnetAZs[subnetID]; zoneID != "" {
+		return zoneID, nil
+	}
+	return "usw2-az1", nil
+}
+
 func (c *fakeAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error) {
 	c.calls = append(c.calls, fmt.Sprintf("allocate:%s:%s", availabilityZoneID, instanceType))
 	return "h-created", nil
 }
 
 func (c *fakeAWSClient) RunInstance(ctx context.Context, plan MacPlan, hostID, instanceType, amiID string) (string, error) {
-	c.calls = append(c.calls, fmt.Sprintf("run:%s:%s:%s", hostID, instanceType, amiID))
+	c.calls = append(c.calls, fmt.Sprintf("run:%s:%s:%s:%s", hostID, plan.SubnetID, instanceType, amiID))
 	return "i-created", nil
 }
 

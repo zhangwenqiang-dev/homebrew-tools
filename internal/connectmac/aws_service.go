@@ -3,6 +3,7 @@ package connectmac
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -162,12 +163,19 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 			continue
 		}
 		for _, zoneID := range plan.AvailabilityZoneIDs {
-			hostID, err := client.AllocateHost(ctx, plan, zoneID, instanceType)
+			subnetID, err := subnetForLaunch(ctx, client, plan, zoneID)
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			instanceID, err := client.RunInstance(ctx, plan, hostID, instanceType, ami)
+			attemptPlan := plan
+			attemptPlan.SubnetID = subnetID
+			hostID, err := client.AllocateHost(ctx, attemptPlan, zoneID, instanceType)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			instanceID, err := client.RunInstance(ctx, attemptPlan, hostID, instanceType, ami)
 			if err != nil {
 				_ = client.ReleaseHost(ctx, hostID)
 				lastErr = err
@@ -187,6 +195,7 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 				AvailabilityZoneID:  zoneID,
 				InstanceType:        instanceType,
 				AMI:                 ami,
+				SubnetID:            subnetID,
 				ElasticIPAllocation: plan.ElasticIPAllocationID,
 			}, nil
 		}
@@ -195,6 +204,21 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 		return MacPlan{}, AWSCreateResult{}, lastErr
 	}
 	return MacPlan{}, AWSCreateResult{}, fmt.Errorf("no aws create candidate was attempted")
+}
+
+func subnetForLaunch(ctx context.Context, client AWSClient, plan MacPlan, availabilityZoneID string) (string, error) {
+	subnetID := plan.SubnetForAZ(availabilityZoneID)
+	if subnetID == "" {
+		return "", fmt.Errorf("no subnet configured for availability zone %s; set aws.subnets_by_az.%s or aws.subnet_id", availabilityZoneID, availabilityZoneID)
+	}
+	actualZoneID, err := client.SubnetAvailabilityZoneID(ctx, subnetID)
+	if err != nil {
+		return "", err
+	}
+	if actualZoneID != availabilityZoneID {
+		return "", fmt.Errorf("subnet %s is in %s, but selected host availability zone is %s", subnetID, actualZoneID, availabilityZoneID)
+	}
+	return subnetID, nil
 }
 
 func AWSStatusReady(status AWSStatus) bool {
@@ -296,6 +320,7 @@ type AWSCreateResult struct {
 	AvailabilityZoneID  string
 	InstanceType        string
 	AMI                 string
+	SubnetID            string
 	ElasticIPAllocation string
 }
 
@@ -320,7 +345,11 @@ func FormatMacPlan(plan MacPlan) string {
 	fmt.Fprintf(&b, "Selected instance type: %s\n", plan.SelectedInstanceType)
 	fmt.Fprintf(&b, "Selected AMI: %s\n", plan.SelectedAMI)
 	fmt.Fprintf(&b, "Key pair: %s\n", plan.KeyName)
-	fmt.Fprintf(&b, "Subnet: %s\n", plan.SubnetID)
+	if len(plan.SubnetsByAZ) > 0 {
+		fmt.Fprintf(&b, "Subnets by AZ: %s\n", formatStringMap(plan.SubnetsByAZ))
+	} else {
+		fmt.Fprintf(&b, "Subnet: %s\n", plan.SubnetID)
+	}
 	fmt.Fprintf(&b, "Security group: %s\n", plan.SecurityGroupID)
 	fmt.Fprintf(&b, "Elastic IP allocation: %s\n", plan.ElasticIPAllocationID)
 	fmt.Fprintf(&b, "Elastic IP owner tag: %s=%s\n", plan.ElasticIPOwnerTag.Key, plan.ElasticIPOwnerTag.Value)
@@ -423,6 +452,7 @@ func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {
 	fmt.Fprintf(&b, "Instance: %s\n", result.InstanceID)
 	fmt.Fprintf(&b, "EIP association: %s\n", result.AssociationID)
 	fmt.Fprintf(&b, "Selected: %s %s %s\n", result.AvailabilityZoneID, result.InstanceType, result.AMI)
+	fmt.Fprintf(&b, "Subnet: %s\n", result.SubnetID)
 	return b.String()
 }
 
@@ -439,6 +469,22 @@ func FormatAWSTags(tags []AWSTagConfig) string {
 	parts := make([]string, 0, len(tags))
 	for _, tag := range tags {
 		parts = append(parts, fmt.Sprintf("%s=%s", tag.Key, tag.Value))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatStringMap(values map[string]string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", key, values[key]))
 	}
 	return strings.Join(parts, ", ")
 }

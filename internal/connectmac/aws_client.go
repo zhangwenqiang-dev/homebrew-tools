@@ -17,6 +17,7 @@ type AWSClient interface {
 	DescribeStatus(ctx context.Context, plan MacPlan) (AWSStatus, error)
 	DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error)
 	TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error
+	SubnetAvailabilityZoneID(ctx context.Context, subnetID string) (string, error)
 	AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error)
 	RunInstance(ctx context.Context, plan MacPlan, hostID, instanceType, amiID string) (string, error)
 	VerifyElasticIPOwner(ctx context.Context, plan MacPlan) (ElasticIP, error)
@@ -185,6 +186,19 @@ func (c RealAWSClient) TagResources(ctx context.Context, resourceIDs []string, t
 		return fmt.Errorf("tag resources %v: %w", resourceIDs, err)
 	}
 	return nil
+}
+
+func (c RealAWSClient) SubnetAvailabilityZoneID(ctx context.Context, subnetID string) (string, error) {
+	out, err := c.ec2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		SubnetIds: []string{subnetID},
+	})
+	if err != nil {
+		return "", fmt.Errorf("describe subnet %s: %w", subnetID, err)
+	}
+	if len(out.Subnets) == 0 {
+		return "", fmt.Errorf("subnet %s not found", subnetID)
+	}
+	return aws.ToString(out.Subnets[0].AvailabilityZoneId), nil
 }
 
 func (c RealAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error) {

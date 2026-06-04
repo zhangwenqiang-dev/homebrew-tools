@@ -41,6 +41,9 @@ profiles:
         mac_arm: ami-063755aadeb97329a
       key_name: example-key
       subnet_id: "<subnet-id>"
+      subnets_by_az:
+        usw2-az1: "<subnet-id-az1>"
+        usw2-az2: "<subnet-id-az2>"
       security_group_id: "<security-group-id>"
       elastic_ip_allocation_id: "<elastic-ip-allocation-id>"
       elastic_ip_owner_tag:
@@ -100,6 +103,9 @@ func TestParseConfig(t *testing.T) {
 	}
 	if len(profile.AWS.AvailabilityZoneIDs) != 2 {
 		t.Fatalf("availability zone count = %d, want 2", len(profile.AWS.AvailabilityZoneIDs))
+	}
+	if profile.AWS.SubnetsByAZ["usw2-az1"] != "<subnet-id-az1>" || profile.AWS.SubnetsByAZ["usw2-az2"] != "<subnet-id-az2>" {
+		t.Fatalf("subnets_by_az = %+v", profile.AWS.SubnetsByAZ)
 	}
 	if len(profile.AWS.InstanceTypePriority) != 2 {
 		t.Fatalf("instance type priority count = %d, want 2", len(profile.AWS.InstanceTypePriority))

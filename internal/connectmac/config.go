@@ -55,6 +55,7 @@ type AWSConfig struct {
 	AMI                   AWSAMIConfig
 	KeyName               string
 	SubnetID              string
+	SubnetsByAZ           map[string]string
 	SecurityGroupID       string
 	ElasticIPAllocationID string
 	ElasticIPPublicIP     string
@@ -203,6 +204,7 @@ func ParseConfig(data string) (Config, error) {
 	inAWS := false
 	inAWSAMI := false
 	inAWSEIPOwnerTag := false
+	inAWSSubnetsByAZ := false
 	awsList := ""
 
 	scanner := bufio.NewScanner(strings.NewReader(data))
@@ -229,6 +231,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = false
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			continue
 		case indent == 0 && line == "profiles:":
@@ -252,6 +255,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = false
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			continue
 		}
@@ -289,6 +293,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = false
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			currentTunnel = nil
 			continue
@@ -307,6 +312,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = false
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
@@ -325,6 +331,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = false
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
@@ -343,6 +350,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = true
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
@@ -427,6 +435,7 @@ func ParseConfig(data string) (Config, error) {
 		if inAWS && indent == 6 && line == "ami:" {
 			inAWSAMI = true
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
@@ -435,7 +444,20 @@ func ParseConfig(data string) (Config, error) {
 		if inAWS && indent == 6 && line == "elastic_ip_owner_tag:" {
 			inAWSAMI = false
 			inAWSEIPOwnerTag = true
+			inAWSSubnetsByAZ = false
 			awsList = ""
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && indent == 6 && line == "subnets_by_az:" {
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = true
+			awsList = ""
+			if current.AWS.SubnetsByAZ == nil {
+				current.AWS.SubnetsByAZ = map[string]string{}
+			}
 			cfg.Profiles[current.Name] = *current
 			continue
 		}
@@ -443,6 +465,7 @@ func ParseConfig(data string) (Config, error) {
 		if inAWS && indent == 6 && (line == "availability_zone_ids:" || line == "instance_type_priority:") {
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = strings.TrimSuffix(line, ":")
 			cfg.Profiles[current.Name] = *current
 			continue
@@ -451,6 +474,7 @@ func ParseConfig(data string) (Config, error) {
 		if inAWS && indent == 6 {
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			if err := applyAWSField(current, line); err != nil {
 				return Config{}, err
@@ -469,6 +493,14 @@ func ParseConfig(data string) (Config, error) {
 
 		if inAWS && inAWSEIPOwnerTag && indent == 8 {
 			if err := applyAWSTagField(&current.AWS.ElasticIPOwnerTag, line); err != nil {
+				return Config{}, err
+			}
+			cfg.Profiles[current.Name] = *current
+			continue
+		}
+
+		if inAWS && inAWSSubnetsByAZ && indent == 8 {
+			if err := applyAWSSubnetByAZField(current, line); err != nil {
 				return Config{}, err
 			}
 			cfg.Profiles[current.Name] = *current
@@ -505,6 +537,7 @@ func ParseConfig(data string) (Config, error) {
 			inAWS = false
 			inAWSAMI = false
 			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
 			awsList = ""
 			if err := applyProfileField(current, line); err != nil {
 				return Config{}, err
@@ -718,6 +751,18 @@ func applyAWSTagField(tag *AWSTagConfig, line string) error {
 	default:
 		return fmt.Errorf("unsupported aws tag field %q", key)
 	}
+	return nil
+}
+
+func applyAWSSubnetByAZField(p *Profile, line string) error {
+	zoneID, subnetID, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	if p.AWS.SubnetsByAZ == nil {
+		p.AWS.SubnetsByAZ = map[string]string{}
+	}
+	p.AWS.SubnetsByAZ[zoneID] = subnetID
 	return nil
 }
 

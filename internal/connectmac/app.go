@@ -700,6 +700,11 @@ profiles:
         mac_arm: ami-063755aadeb97329a
       key_name: example-key
       subnet_id: "<subnet-id>"
+      subnets_by_az:
+        usw2-az1: "<subnet-id-az1>"
+        usw2-az2: "<subnet-id-az2>"
+        usw2-az3: "<subnet-id-az3>"
+        usw2-az4: "<subnet-id-az4>"
       security_group_id: "<security-group-id>"
       elastic_ip_allocation_id: "<elastic-ip-allocation-id>"
       elastic_ip_public_ip: "<elastic-ip-public-ip>"

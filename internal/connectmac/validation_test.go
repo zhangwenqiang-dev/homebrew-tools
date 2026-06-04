@@ -81,6 +81,26 @@ func TestValidateAWSProfileRejectsInvalidZoneID(t *testing.T) {
 	}
 }
 
+func TestValidateAWSProfileAllowsSubnetsByAZWithoutSubnetID(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.SubnetID = ""
+	profile.AWS.SubnetsByAZ = map[string]string{"usw2-az1": "<subnet-id-az1>"}
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateAWSProfileRejectsInvalidSubnetsByAZKey(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.SubnetID = ""
+	profile.AWS.SubnetsByAZ = map[string]string{"us-west-2a": "<subnet-id>"}
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if !containsError(errs, "subnets_by_az key") {
+		t.Fatalf("expected subnets_by_az key error, got %v", errs)
+	}
+}
+
 func TestValidateAWSProfileRejectsExplicitIntelWithoutFallback(t *testing.T) {
 	profile := validAWSProfile()
 	profile.AWS.InstanceTypePriority = []string{"mac1.metal"}
