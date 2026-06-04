@@ -429,7 +429,11 @@ func InstanceReady(instance InstanceStatus, eip ElasticIP) bool {
 		eip.InstanceID == instance.InstanceID &&
 		instance.SystemStatus == "ok" &&
 		instance.InstanceStatusCheck == "ok" &&
-		instance.EBSStatus == "ok"
+		optionalEBSReady(instance.EBSStatus)
+}
+
+func optionalEBSReady(status string) bool {
+	return status == "" || status == "ok"
 }
 
 func AWSReadinessSummary(status AWSStatus) string {

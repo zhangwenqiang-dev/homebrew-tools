@@ -26,7 +26,9 @@ type ProfileDefaults struct {
 }
 
 type AWSDefaults struct {
-	Creator string
+	Creator      string
+	AMI          AWSAMIConfig
+	AMIsByRegion map[string]AWSAMIConfig
 }
 
 type Profile struct {
@@ -175,7 +177,16 @@ func mergeDefaults(dst *ProfileDefaults, src ProfileDefaults, source string) err
 	if err := mergeDefaultString(&dst.IdentityFile, src.IdentityFile, "identity_file", source); err != nil {
 		return err
 	}
-	return mergeDefaultString(&dst.AWS.Creator, src.AWS.Creator, "aws.creator", source)
+	if err := mergeDefaultString(&dst.AWS.Creator, src.AWS.Creator, "aws.creator", source); err != nil {
+		return err
+	}
+	if err := mergeDefaultString(&dst.AWS.AMI.MacX86, src.AWS.AMI.MacX86, "aws.ami.mac_x86", source); err != nil {
+		return err
+	}
+	if err := mergeDefaultString(&dst.AWS.AMI.MacARM, src.AWS.AMI.MacARM, "aws.ami.mac_arm", source); err != nil {
+		return err
+	}
+	return mergeDefaultAMIsByRegion(&dst.AWS, src.AWS, source)
 }
 
 func mergeDefaultString(dst *string, src, name, source string) error {
@@ -189,12 +200,35 @@ func mergeDefaultString(dst *string, src, name, source string) error {
 	return nil
 }
 
+func mergeDefaultAMIsByRegion(dst *AWSDefaults, src AWSDefaults, source string) error {
+	if len(src.AMIsByRegion) == 0 {
+		return nil
+	}
+	if dst.AMIsByRegion == nil {
+		dst.AMIsByRegion = map[string]AWSAMIConfig{}
+	}
+	for region, srcAMI := range src.AMIsByRegion {
+		dstAMI := dst.AMIsByRegion[region]
+		if err := mergeDefaultString(&dstAMI.MacX86, srcAMI.MacX86, fmt.Sprintf("aws.amis_by_region.%s.mac_x86", region), source); err != nil {
+			return err
+		}
+		if err := mergeDefaultString(&dstAMI.MacARM, srcAMI.MacARM, fmt.Sprintf("aws.amis_by_region.%s.mac_arm", region), source); err != nil {
+			return err
+		}
+		dst.AMIsByRegion[region] = dstAMI
+	}
+	return nil
+}
+
 func ParseConfig(data string) (Config, error) {
 	cfg := Config{Profiles: map[string]Profile{}}
 	var current *Profile
 	var currentTunnel *Tunnel
 	inDefaults := false
 	inDefaultsAWS := false
+	inDefaultsAWSAMI := false
+	inDefaultsAWSAMIsByRegion := false
+	defaultsAWSAMIRegion := ""
 	inProfiles := false
 	inTunnels := false
 	inSync := false
@@ -223,6 +257,9 @@ func ParseConfig(data string) (Config, error) {
 			current = nil
 			currentTunnel = nil
 			inDefaultsAWS = false
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
@@ -237,6 +274,9 @@ func ParseConfig(data string) (Config, error) {
 		case indent == 0 && line == "profiles:":
 			inDefaults = false
 			inDefaultsAWS = false
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
 			inProfiles = true
 			continue
 		case indent == 0:
@@ -262,18 +302,74 @@ func ParseConfig(data string) (Config, error) {
 
 		if inDefaults && indent == 2 && line == "aws:" {
 			inDefaultsAWS = true
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
+			continue
+		}
+
+		if inDefaults && inDefaultsAWS && indent == 4 && line == "ami:" {
+			inDefaultsAWSAMI = true
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
+			continue
+		}
+
+		if inDefaults && inDefaultsAWS && indent == 4 && line == "amis_by_region:" {
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = true
+			defaultsAWSAMIRegion = ""
+			if cfg.Defaults.AWS.AMIsByRegion == nil {
+				cfg.Defaults.AWS.AMIsByRegion = map[string]AWSAMIConfig{}
+			}
 			continue
 		}
 
 		if inDefaults && inDefaultsAWS && indent == 4 {
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
 			if err := applyDefaultAWSField(&cfg.Defaults.AWS, line); err != nil {
 				return Config{}, err
 			}
 			continue
 		}
 
+		if inDefaults && inDefaultsAWS && inDefaultsAWSAMI && indent == 6 {
+			if err := applyDefaultAWSAMIField(&cfg.Defaults.AWS.AMI, line); err != nil {
+				return Config{}, err
+			}
+			continue
+		}
+
+		if inDefaults && inDefaultsAWS && inDefaultsAWSAMIsByRegion && indent == 6 && strings.HasSuffix(line, ":") {
+			defaultsAWSAMIRegion = strings.TrimSuffix(line, ":")
+			if cfg.Defaults.AWS.AMIsByRegion == nil {
+				cfg.Defaults.AWS.AMIsByRegion = map[string]AWSAMIConfig{}
+			}
+			if _, ok := cfg.Defaults.AWS.AMIsByRegion[defaultsAWSAMIRegion]; !ok {
+				cfg.Defaults.AWS.AMIsByRegion[defaultsAWSAMIRegion] = AWSAMIConfig{}
+			}
+			continue
+		}
+
+		if inDefaults && inDefaultsAWS && inDefaultsAWSAMIsByRegion && indent == 8 {
+			if defaultsAWSAMIRegion == "" {
+				return Config{}, fmt.Errorf("aws amis_by_region field before region: %q", line)
+			}
+			ami := cfg.Defaults.AWS.AMIsByRegion[defaultsAWSAMIRegion]
+			if err := applyDefaultAWSAMIField(&ami, line); err != nil {
+				return Config{}, err
+			}
+			cfg.Defaults.AWS.AMIsByRegion[defaultsAWSAMIRegion] = ami
+			continue
+		}
+
 		if inDefaults && indent == 2 {
 			inDefaultsAWS = false
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
 			if err := applyDefaultField(&cfg.Defaults, line); err != nil {
 				return Config{}, err
 			}
@@ -615,12 +711,31 @@ func (p *Profile) ApplyDefaults(defaults ProfileDefaults) {
 	if p.AWS.Creator == "" {
 		p.AWS.Creator = defaults.AWS.Creator
 	}
+	if p.AWS.AMI.MacX86 == "" {
+		p.AWS.AMI.MacX86 = defaultAMIForRegion(defaults.AWS, p.AWS.Region).MacX86
+	}
+	if p.AWS.AMI.MacARM == "" {
+		p.AWS.AMI.MacARM = defaultAMIForRegion(defaults.AWS, p.AWS.Region).MacARM
+	}
 	if p.User == "" && p.AWS.Profile != "" {
 		p.User = DefaultAWSUser
 	}
 	if p.Host == "" && p.AWS.Profile != "" {
 		p.Host = EC2HostFromPublicIPRegion(p.AWS.ElasticIPPublicIP, p.AWS.Region)
 	}
+}
+
+func defaultAMIForRegion(defaults AWSDefaults, region string) AWSAMIConfig {
+	ami := defaults.AMI
+	if regionAMI, ok := defaults.AMIsByRegion[region]; ok {
+		if regionAMI.MacX86 != "" {
+			ami.MacX86 = regionAMI.MacX86
+		}
+		if regionAMI.MacARM != "" {
+			ami.MacARM = regionAMI.MacARM
+		}
+	}
+	return ami
 }
 
 func EC2HostFromPublicIPRegion(publicIP, region string) string {
@@ -661,6 +776,22 @@ func applyDefaultAWSField(defaults *AWSDefaults, line string) error {
 		defaults.Creator = value
 	default:
 		return fmt.Errorf("unsupported defaults aws field %q", key)
+	}
+	return nil
+}
+
+func applyDefaultAWSAMIField(ami *AWSAMIConfig, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "mac_x86":
+		ami.MacX86 = value
+	case "mac_arm":
+		ami.MacARM = value
+	default:
+		return fmt.Errorf("unsupported defaults aws ami field %q", key)
 	}
 	return nil
 }

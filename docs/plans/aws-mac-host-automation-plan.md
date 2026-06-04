@@ -66,6 +66,16 @@ defaults:
   identity_file: ~/.ssh/example.pem
   aws:
     creator: "Xiao Chen"
+    amis_by_region:
+      us-east-1:
+        mac_x86: "<us-east-1-x86-mac-ami>"
+        mac_arm: "<us-east-1-arm-mac-ami>"
+      us-east-2:
+        mac_x86: "<us-east-2-x86-mac-ami>"
+        mac_arm: "<us-east-2-arm-mac-ami>"
+      us-west-2:
+        mac_x86: ami-0538568e5d3653bea
+        mac_arm: ami-063755aadeb97329a
 
 profiles:
   example:
@@ -76,9 +86,6 @@ profiles:
       profile: default
       region: us-west-2
       account_email: apple@example.com
-      ami:
-        mac_x86: ami-0538568e5d3653bea
-        mac_arm: ami-063755aadeb97329a
       key_name: example-key
       subnet_id: "<subnet-id>"
       subnets_by_az:
@@ -109,6 +116,8 @@ profiles:
         - mac1.metal
       allow_intel_fallback: false
 ```
+
+AMI defaults resolve in this order: profile-level `aws.ami`, region-specific `defaults.aws.amis_by_region[profile.aws.region]`, then legacy global `defaults.aws.ami`.
 
 ## Proposed Commands
 
@@ -369,7 +378,7 @@ The Robin Mac startup flow exposed gaps that should be addressed before the AWS 
 Completed:
 
 - `cm aws status` now reports EC2 system status, instance status, and attached EBS status.
-- `cm aws wait-ready <profile>` now waits for the managed instance to be `running`, the configured EIP to be bound to that instance, and all three AWS status checks to be `ok`.
+- `cm aws wait-ready <profile>` now waits for the managed instance to be `running`, the configured EIP to be bound to that instance, system status to be `ok`, instance status to be `ok`, and optional EBS status to be `ok` when AWS reports it.
 - `cm aws create <profile> --confirm` now waits for AWS readiness after EIP association.
 - `cm_aws_wait_ready` is available through MCP.
 - `cm aws status` can now recover the EC2 instance and Dedicated Host from the configured EIP binding when older or manually managed resources do not have the expected `cm-managed` tags.
@@ -534,8 +543,8 @@ Behavior:
 - Wait for EIP association to point to the managed instance.
 - Wait for EC2 system status to be `ok`.
 - Wait for EC2 instance status to be `ok`.
-- Wait for attached EBS status to be `ok`.
-- Treat missing, empty, `initializing`, `insufficient-data`, `impaired`, and `not-applicable` status values as not ready.
+- Wait for attached EBS status to be `ok` when AWS reports EBS status for the instance type.
+- Treat missing system/instance status and `initializing`, `insufficient-data`, `impaired`, and `not-applicable` status values as not ready. Treat missing EBS status as not applicable.
 - Do not probe SSH automatically.
 - Exit successfully only after all AWS readiness checks pass.
 
@@ -545,6 +554,10 @@ Completed in `v0.1.11`:
 - `cm aws create <profile> --confirm` runs the AWS readiness wait after EIP association.
 - `cm aws status` prints `system_status`, `instance_status`, `ebs_status`, per-instance `ready`, and aggregate `Ready`.
 - `cm_aws_wait_ready` mirrors this behavior in MCP.
+
+Completed in `v0.1.14`:
+
+- EBS status is optional for readiness. This supports Mac instance types such as `mac2.metal` that only report system and instance status checks.
 
 ### Priority 6.1: Destroy Resume and EIP Retention
 
@@ -557,6 +570,16 @@ Completed in `v0.1.13`:
 - Destroy skips terminal resources (`terminated` instances and `released` hosts), so rerunning the same command continues the remaining cleanup.
 - Partial destroy errors return the work completed so far and tell operators to rerun the same destroy command after AWS finishes pending transitions.
 - `cm aws status` hides terminal resources by default; `cm aws status <profile> --all` includes terminated instances and released hosts for troubleshooting.
+
+### Priority 6.2: Region-Specific AMI Defaults
+
+macOS AMI IDs are region-specific, so sharing one global AMI across `us-east-1`, `us-east-2`, and `us-west-2` can select an invalid AMI.
+
+Completed in `v0.1.14`:
+
+- `defaults.aws.amis_by_region` supports `mac_x86` and `mac_arm` per AWS region.
+- Profile-level `aws.ami` still overrides defaults.
+- Legacy `defaults.aws.ami` remains supported as a fallback.
 
 ### Priority 7: Update MCP Tools
 

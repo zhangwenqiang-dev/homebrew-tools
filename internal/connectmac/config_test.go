@@ -393,6 +393,91 @@ profiles:
 	}
 }
 
+func TestLoadConfigDefaultsAWSAMIsByRegion(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+defaults:
+  aws:
+    ami:
+      mac_x86: ami-global-x86
+      mac_arm: ami-global-arm
+    amis_by_region:
+      us-east-1:
+        mac_x86: ami-use1-x86
+        mac_arm: ami-use1-arm
+      us-east-2:
+        mac_x86: ami-use2-x86
+        mac_arm: ami-use2-arm
+profiles:
+  east1:
+    aws:
+      profile: website
+      region: us-east-1
+  east2:
+    aws:
+      profile: website
+      region: us-east-2
+      ami:
+        mac_arm: ami-profile-arm
+  west:
+    aws:
+      profile: website
+      region: us-west-2
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	east1, _ := cfg.Profile("east1")
+	if east1.AWS.AMI.MacX86 != "ami-use1-x86" || east1.AWS.AMI.MacARM != "ami-use1-arm" {
+		t.Fatalf("east1 ami = %+v", east1.AWS.AMI)
+	}
+	east2, _ := cfg.Profile("east2")
+	if east2.AWS.AMI.MacX86 != "ami-use2-x86" || east2.AWS.AMI.MacARM != "ami-profile-arm" {
+		t.Fatalf("east2 ami = %+v", east2.AWS.AMI)
+	}
+	west, _ := cfg.Profile("west")
+	if west.AWS.AMI.MacX86 != "ami-global-x86" || west.AWS.AMI.MacARM != "ami-global-arm" {
+		t.Fatalf("west ami = %+v", west.AWS.AMI)
+	}
+}
+
+func TestLoadConfigRejectsConflictingAWSAMIsByRegionDefaults(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+defaults:
+  aws:
+    amis_by_region:
+      us-east-1:
+        mac_arm: ami-main-arm
+profiles:
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profilesDir := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesDir, "defaults.yaml"), []byte(`
+defaults:
+  aws:
+    amis_by_region:
+      us-east-1:
+        mac_arm: ami-other-arm
+profiles:
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(config)
+	if err == nil || !strings.Contains(err.Error(), "aws.amis_by_region.us-east-1.mac_arm") {
+		t.Fatalf("expected conflicting aws amis_by_region default error, got %v", err)
+	}
+}
+
 func TestLoadConfigDefaultsAWSHostFromElasticIP(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")

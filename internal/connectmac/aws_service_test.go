@@ -164,8 +164,8 @@ func TestAWSStatusReadyRequiresAllChecksAndEIP(t *testing.T) {
 		t.Fatalf("expected ready: %s", AWSReadinessSummary(status))
 	}
 	status.Instances[0].EBSStatus = ""
-	if AWSStatusReady(status) {
-		t.Fatal("missing EBS status must not be ready")
+	if !AWSStatusReady(status) {
+		t.Fatal("missing EBS status should be treated as not applicable")
 	}
 	status.Instances[0].EBSStatus = "initializing"
 	if AWSStatusReady(status) {
@@ -198,7 +198,7 @@ func TestAWSServiceWaitReadyPollsUntilAllChecksPass(t *testing.T) {
 					InstanceID:          "i-1",
 					State:               "running",
 					SystemStatus:        "ok",
-					InstanceStatusCheck: "ok",
+					InstanceStatusCheck: "initializing",
 					EBSStatus:           "",
 				}},
 				ElasticIP: ElasticIP{InstanceID: "i-1"},

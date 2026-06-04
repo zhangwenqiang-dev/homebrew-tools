@@ -753,6 +753,16 @@ func DefaultConfigTemplate() string {
   identity_file: ~/.ssh/example.pem
   aws:
     creator: "Xiao Chen"
+    amis_by_region:
+      us-east-1:
+        mac_x86: "<us-east-1-x86-mac-ami>"
+        mac_arm: "<us-east-1-arm-mac-ami>"
+      us-east-2:
+        mac_x86: "<us-east-2-x86-mac-ami>"
+        mac_arm: "<us-east-2-arm-mac-ami>"
+      us-west-2:
+        mac_x86: ami-0538568e5d3653bea
+        mac_arm: ami-063755aadeb97329a
 
 profiles:
   xcode-vnc:
@@ -774,9 +784,6 @@ profiles:
       region: us-west-2
       resource_name: ""
       account_email: user@example.com
-      ami:
-        mac_x86: ami-0538568e5d3653bea
-        mac_arm: ami-063755aadeb97329a
       key_name: example-key
       subnet_id: "<subnet-id>"
       subnets_by_az:

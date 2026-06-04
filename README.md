@@ -35,7 +35,7 @@ For many profiles, keep shared or important entries in `config.yaml` and put add
 ```
 
 Each file uses the same `profiles:` structure. `cm` loads `config.yaml` first, then all `.yaml` and `.yml` files in `profiles/` by filename. Duplicate profile names are rejected.
-Shared `user`, `identity_file`, and `aws.creator` values can be placed in top-level `defaults:`. Profile values override defaults.
+Shared `user`, `identity_file`, `aws.creator`, and region-specific AMI values can be placed in top-level `defaults:`. Profile values override defaults.
 
 Example profile:
 
@@ -45,6 +45,16 @@ defaults:
   identity_file: ~/.ssh/example.pem
   aws:
     creator: "Xiao Chen"
+    amis_by_region:
+      us-east-1:
+        mac_x86: "<us-east-1-x86-mac-ami>"
+        mac_arm: "<us-east-1-arm-mac-ami>"
+      us-east-2:
+        mac_x86: "<us-east-2-x86-mac-ami>"
+        mac_arm: "<us-east-2-arm-mac-ami>"
+      us-west-2:
+        mac_x86: ami-0538568e5d3653bea
+        mac_arm: ami-063755aadeb97329a
 
 profiles:
   xcode-vnc:
@@ -66,9 +76,6 @@ profiles:
       region: us-west-2
       resource_name: ""
       account_email: user@example.com
-      ami:
-        mac_x86: ami-0538568e5d3653bea
-        mac_arm: ami-063755aadeb97329a
       key_name: example-key
       subnet_id: "<subnet-id>"
       subnets_by_az:
@@ -102,6 +109,8 @@ profiles:
         remote_host: localhost
         remote_port: 5900
 ```
+
+AMI defaults are resolved in this order: `profile.aws.ami`, then `defaults.aws.amis_by_region[profile.aws.region]`, then legacy `defaults.aws.ami`.
 
 ## Commands
 
@@ -199,7 +208,7 @@ cm aws create xcode-vnc
 cm aws destroy xcode-vnc
 ```
 
-`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and EBS status checks. Terminal resources such as terminated instances and released hosts are hidden by default; pass `--all` to include them for troubleshooting. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and all three status checks are `ok`. `cm aws adopt-host` tags an existing empty Dedicated Host as managed, and `cm aws launch-on-host` launches EC2 on a usable existing host. `cm aws create`, `cm aws adopt-host`, `cm aws launch-on-host`, and `cm aws destroy` preview by default; pass `--confirm` to execute AWS mutations. After a confirmed create or launch-on-host, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
+`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and optional EBS status checks. Terminal resources such as terminated instances and released hosts are hidden by default; pass `--all` to include them for troubleshooting. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and system/instance status checks are `ok`; EBS status must be `ok` only when AWS reports it for that instance type. `cm aws adopt-host` tags an existing empty Dedicated Host as managed, and `cm aws launch-on-host` launches EC2 on a usable existing host. `cm aws create`, `cm aws adopt-host`, `cm aws launch-on-host`, and `cm aws destroy` preview by default; pass `--confirm` to execute AWS mutations. After a confirmed create or launch-on-host, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
 
 `cm aws destroy` disassociates the configured Elastic IP from the managed instance but keeps the Elastic IP allocation. If AWS takes too long to move a Mac instance from `shutting-down` to `terminated`, rerun the same destroy command later; `cm` skips already terminated instances and already released hosts, then continues the remaining release steps.
 
