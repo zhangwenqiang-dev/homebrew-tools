@@ -143,7 +143,7 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|adopt|destroy> <profile> [--confirm]")
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|wait-ready|adopt|destroy> <profile> [--confirm]")
 		return 2
 	}
 	command := args[0]
@@ -192,6 +192,12 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
+		_, status, err := a.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
 	case "status":
 		_, status, err := a.AWSService.Status(ctx, profile)
@@ -200,6 +206,14 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSStatus(plan, status))
+		return 0
+	case "wait-ready":
+		_, status, err := a.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
 	case "adopt":
 		_, status, err := a.AWSService.AdoptionPreview(ctx, profile)
@@ -594,6 +608,7 @@ func (a App) printUsage() {
   cm aws plan <profile> [--config <path>]
   cm aws create <profile> [--confirm] [--config <path>]
   cm aws status <profile> [--config <path>]
+  cm aws wait-ready <profile> [--config <path>]
   cm aws adopt <profile> [--confirm] [--config <path>]
   cm aws destroy <profile> [--confirm] [--config <path>]
   cm mcp [--config <path>]

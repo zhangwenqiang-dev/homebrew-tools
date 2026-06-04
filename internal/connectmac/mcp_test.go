@@ -125,12 +125,67 @@ func TestMCPAWSPlan(t *testing.T) {
 	}
 }
 
+func TestMCPAWSWaitReady(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			CallerIdentity: CallerIdentity{Account: "123456789012", ARN: "arn:aws:iam::123456789012:user/cm"},
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-1",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-1"},
+		}}, nil
+	}
+	app.AWSService.ReadyPollInterval = time.Millisecond
+	app.AWSService.ReadyTimeout = time.Second
+	out := runMCPCall(t, app, config, "cm_aws_wait_ready", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "AWS Mac ready for profile xcode-vnc: true") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestMCPToolsIncludesAWSWaitReady(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out := runMCPToolsList(t, app, config)
+	if !strings.Contains(out, "cm_aws_wait_ready") {
+		t.Fatalf("tools output = %q", out)
+	}
+}
+
 func mcpTestApp(t *testing.T) (App, string, *fakeRunner) {
 	t.Helper()
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	return mcpTestAppWithPath(t, dir, config)
+}
+
+func runMCPToolsList(t *testing.T, app App, config string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/list",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var in bytes.Buffer
+	if err := writeMCPMessage(&in, json.RawMessage(body)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	server := MCPServer{App: app, ConfigPath: config}
+	if err := server.Serve(context.Background(), &in, &out); err != nil {
+		t.Fatal(err)
+	}
+	return string(out.Bytes())
 }
 
 func mcpTestAppWithConfig(t *testing.T, configData string) (App, string, *fakeRunner) {

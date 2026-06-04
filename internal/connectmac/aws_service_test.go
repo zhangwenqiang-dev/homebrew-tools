@@ -71,7 +71,14 @@ func TestAWSServiceStatusUsesClient(t *testing.T) {
 		status: AWSStatus{
 			CallerIdentity: CallerIdentity{Account: "123456789012", ARN: "arn:aws:iam::123456789012:user/cm"},
 			Hosts:          []DedicatedHostStatus{{HostID: "h-1", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1", Tags: managedTestTags()}},
-			ElasticIP:      ElasticIP{AllocationID: "<elastic-ip-allocation-id>", PublicIP: "203.0.113.10", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-1",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+			}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", PublicIP: "203.0.113.10", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
 		},
 	}
 	service := testAWSService(fake)
@@ -84,6 +91,81 @@ func TestAWSServiceStatusUsesClient(t *testing.T) {
 	}
 	if len(status.Hosts) != 1 || status.Hosts[0].HostID != "h-1" {
 		t.Fatalf("unexpected hosts: %+v", status.Hosts)
+	}
+	text := FormatAWSStatus(plan, status)
+	for _, want := range []string{"system_status=ok", "instance_status=ok", "ebs_status=ok", "Ready: false"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status text missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAWSStatusReadyRequiresAllChecksAndEIP(t *testing.T) {
+	status := AWSStatus{
+		Instances: []InstanceStatus{{
+			InstanceID:          "i-1",
+			State:               "running",
+			SystemStatus:        "ok",
+			InstanceStatusCheck: "ok",
+			EBSStatus:           "ok",
+		}},
+		ElasticIP: ElasticIP{InstanceID: "i-1"},
+	}
+	if !AWSStatusReady(status) {
+		t.Fatalf("expected ready: %s", AWSReadinessSummary(status))
+	}
+	status.Instances[0].EBSStatus = ""
+	if AWSStatusReady(status) {
+		t.Fatal("missing EBS status must not be ready")
+	}
+	status.Instances[0].EBSStatus = "initializing"
+	if AWSStatusReady(status) {
+		t.Fatal("initializing EBS status must not be ready")
+	}
+	status.Instances[0].EBSStatus = "ok"
+	status.ElasticIP.InstanceID = "i-other"
+	if AWSStatusReady(status) {
+		t.Fatal("wrong EIP binding must not be ready")
+	}
+}
+
+func TestAWSServiceWaitReadyPollsUntilAllChecksPass(t *testing.T) {
+	fake := &fakeAWSClient{
+		statusSequence: []AWSStatus{
+			{
+				Instances: []InstanceStatus{{
+					InstanceID:          "i-1",
+					State:               "running",
+					SystemStatus:        "ok",
+					InstanceStatusCheck: "ok",
+					EBSStatus:           "",
+				}},
+				ElasticIP: ElasticIP{InstanceID: "i-1"},
+			},
+			{
+				Instances: []InstanceStatus{{
+					InstanceID:          "i-1",
+					State:               "running",
+					SystemStatus:        "ok",
+					InstanceStatusCheck: "ok",
+					EBSStatus:           "ok",
+				}},
+				ElasticIP: ElasticIP{InstanceID: "i-1"},
+			},
+		},
+	}
+	service := testAWSService(fake)
+	service.ReadyPollInterval = time.Millisecond
+	service.ReadyTimeout = time.Second
+	_, status, err := service.WaitReady(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("WaitReady returned error: %v", err)
+	}
+	if !AWSStatusReady(status) {
+		t.Fatalf("status not ready: %+v", status)
+	}
+	if strings.Join(fake.calls, ",") != "status,status" {
+		t.Fatalf("calls = %v", fake.calls)
 	}
 }
 
@@ -194,9 +276,10 @@ func managedTestTags() []AWSTagConfig {
 }
 
 type fakeAWSClient struct {
-	calls  []string
-	status AWSStatus
-	eip    ElasticIP
+	calls          []string
+	status         AWSStatus
+	statusSequence []AWSStatus
+	eip            ElasticIP
 }
 
 func (c *fakeAWSClient) CallerIdentity(ctx context.Context) (CallerIdentity, error) {
@@ -205,6 +288,11 @@ func (c *fakeAWSClient) CallerIdentity(ctx context.Context) (CallerIdentity, err
 
 func (c *fakeAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSStatus, error) {
 	c.calls = append(c.calls, "status")
+	if len(c.statusSequence) > 0 {
+		status := c.statusSequence[0]
+		c.statusSequence = c.statusSequence[1:]
+		return status, nil
+	}
 	return c.status, nil
 }
 

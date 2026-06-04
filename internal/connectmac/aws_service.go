@@ -8,8 +8,10 @@ import (
 )
 
 type AWSService struct {
-	Now       func() time.Time
-	NewClient func(ctx context.Context, plan MacPlan) (AWSClient, error)
+	Now               func() time.Time
+	NewClient         func(ctx context.Context, plan MacPlan) (AWSClient, error)
+	ReadyPollInterval time.Duration
+	ReadyTimeout      time.Duration
 }
 
 func NewAWSService() AWSService {
@@ -44,6 +46,47 @@ func (s AWSService) Status(ctx context.Context, profile Profile) (MacPlan, AWSSt
 		return MacPlan{}, AWSStatus{}, err
 	}
 	return plan, status, nil
+}
+
+func (s AWSService) WaitReady(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSStatus{}, err
+	}
+	timeout := s.ReadyTimeout
+	if timeout == 0 {
+		timeout = 45 * time.Minute
+	}
+	interval := s.ReadyPollInterval
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var last AWSStatus
+	for {
+		status, err := client.DescribeStatus(ctx, plan)
+		if err != nil {
+			return MacPlan{}, AWSStatus{}, err
+		}
+		last = status
+		if AWSStatusReady(status) {
+			return plan, status, nil
+		}
+		if !time.Now().Before(deadline) {
+			return MacPlan{}, last, fmt.Errorf("timed out waiting for AWS Mac readiness: %s", AWSReadinessSummary(status))
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return MacPlan{}, last, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (s AWSService) AdoptionPreview(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
@@ -152,6 +195,50 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 		return MacPlan{}, AWSCreateResult{}, lastErr
 	}
 	return MacPlan{}, AWSCreateResult{}, fmt.Errorf("no aws create candidate was attempted")
+}
+
+func AWSStatusReady(status AWSStatus) bool {
+	for _, instance := range status.Instances {
+		if InstanceReady(instance, status.ElasticIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func InstanceReady(instance InstanceStatus, eip ElasticIP) bool {
+	return instance.State == "running" &&
+		instance.InstanceID != "" &&
+		eip.InstanceID == instance.InstanceID &&
+		instance.SystemStatus == "ok" &&
+		instance.InstanceStatusCheck == "ok" &&
+		instance.EBSStatus == "ok"
+}
+
+func AWSReadinessSummary(status AWSStatus) string {
+	if len(status.Instances) == 0 {
+		return "no managed instance found"
+	}
+	parts := make([]string, 0, len(status.Instances))
+	for _, instance := range status.Instances {
+		eipBound := status.ElasticIP.InstanceID == instance.InstanceID && instance.InstanceID != ""
+		parts = append(parts, fmt.Sprintf("instance=%s state=%s eip_bound=%t system_status=%s instance_status=%s ebs_status=%s",
+			instance.InstanceID,
+			emptyStatus(instance.State),
+			eipBound,
+			emptyStatus(instance.SystemStatus),
+			emptyStatus(instance.InstanceStatusCheck),
+			emptyStatus(instance.EBSStatus),
+		))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func emptyStatus(value string) string {
+	if value == "" {
+		return "pending"
+	}
+	return value
 }
 
 func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSDestroyResult, error) {
@@ -308,10 +395,25 @@ func FormatAWSStatus(plan MacPlan, status AWSStatus) string {
 	}
 	fmt.Fprintf(&b, "Instances: %d\n", len(status.Instances))
 	for _, instance := range status.Instances {
-		fmt.Fprintf(&b, "- instance=%s state=%s type=%s host=%s public_ip=%s\n", instance.InstanceID, instance.State, instance.InstanceType, instance.HostID, instance.PublicIP)
+		fmt.Fprintf(&b, "- instance=%s state=%s type=%s host=%s public_ip=%s system_status=%s instance_status=%s ebs_status=%s ready=%t\n",
+			instance.InstanceID,
+			instance.State,
+			instance.InstanceType,
+			instance.HostID,
+			instance.PublicIP,
+			emptyStatus(instance.SystemStatus),
+			emptyStatus(instance.InstanceStatusCheck),
+			emptyStatus(instance.EBSStatus),
+			InstanceReady(instance, status.ElasticIP),
+		)
 	}
 	fmt.Fprintf(&b, "Elastic IP: allocation=%s association=%s instance=%s public_ip=%s\n", status.ElasticIP.AllocationID, status.ElasticIP.AssociationID, status.ElasticIP.InstanceID, status.ElasticIP.PublicIP)
+	fmt.Fprintf(&b, "Ready: %t\n", AWSStatusReady(status))
 	return b.String()
+}
+
+func FormatAWSReadyStatus(plan MacPlan, status AWSStatus) string {
+	return fmt.Sprintf("AWS Mac ready for profile %s: %t\n%s\n", plan.ProfileName, AWSStatusReady(status), AWSReadinessSummary(status))
 }
 
 func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {

@@ -48,12 +48,15 @@ type DedicatedHostStatus struct {
 }
 
 type InstanceStatus struct {
-	InstanceID   string
-	State        string
-	InstanceType string
-	HostID       string
-	PublicIP     string
-	Tags         []AWSTagConfig
+	InstanceID          string
+	State               string
+	InstanceType        string
+	HostID              string
+	PublicIP            string
+	SystemStatus        string
+	InstanceStatusCheck string
+	EBSStatus           string
+	Tags                []AWSTagConfig
 }
 
 type ElasticIP struct {
@@ -111,6 +114,9 @@ func (c RealAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSSta
 	if err != nil {
 		return AWSStatus{}, err
 	}
+	if err := c.populateInstanceChecks(ctx, instances); err != nil {
+		return AWSStatus{}, err
+	}
 	eip, err := c.describeElasticIP(ctx, plan.ElasticIPAllocationID)
 	if err != nil {
 		return AWSStatus{}, err
@@ -134,6 +140,9 @@ func (c RealAWSClient) DescribeAdoptionCandidates(ctx context.Context, plan MacP
 	}
 	instances, err := c.describeInstancesByName(ctx, plan.ResourceName)
 	if err != nil {
+		return AWSStatus{}, err
+	}
+	if err := c.populateInstanceChecks(ctx, instances); err != nil {
 		return AWSStatus{}, err
 	}
 	eip, err := c.describeElasticIP(ctx, plan.ElasticIPAllocationID)
@@ -356,6 +365,56 @@ func (c RealAWSClient) describeInstancesByName(ctx context.Context, name string)
 		}
 	}
 	return instances, nil
+}
+
+func (c RealAWSClient) populateInstanceChecks(ctx context.Context, instances []InstanceStatus) error {
+	if len(instances) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(instances))
+	indexByID := make(map[string]int, len(instances))
+	for i, instance := range instances {
+		if instance.InstanceID == "" {
+			continue
+		}
+		ids = append(ids, instance.InstanceID)
+		indexByID[instance.InstanceID] = i
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	out, err := c.ec2.DescribeInstanceStatus(ctx, &ec2.DescribeInstanceStatusInput{
+		IncludeAllInstances: aws.Bool(true),
+		InstanceIds:         ids,
+	})
+	if err != nil {
+		return fmt.Errorf("describe instance status checks: %w", err)
+	}
+	for _, status := range out.InstanceStatuses {
+		id := aws.ToString(status.InstanceId)
+		i, ok := indexByID[id]
+		if !ok {
+			continue
+		}
+		instances[i].SystemStatus = summaryStatus(status.SystemStatus)
+		instances[i].InstanceStatusCheck = summaryStatus(status.InstanceStatus)
+		instances[i].EBSStatus = ebsStatus(status.AttachedEbsStatus)
+	}
+	return nil
+}
+
+func summaryStatus(status *ec2types.InstanceStatusSummary) string {
+	if status == nil {
+		return ""
+	}
+	return string(status.Status)
+}
+
+func ebsStatus(status *ec2types.EbsStatusSummary) string {
+	if status == nil {
+		return ""
+	}
+	return string(status.Status)
 }
 
 func (c RealAWSClient) describeElasticIP(ctx context.Context, allocationID string) (ElasticIP, error) {

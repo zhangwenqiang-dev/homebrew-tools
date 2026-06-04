@@ -185,12 +185,13 @@ Preview AWS Mac Dedicated Host automation:
 ```bash
 cm aws plan xcode-vnc
 cm aws status xcode-vnc
+cm aws wait-ready xcode-vnc
 cm aws adopt xcode-vnc
 cm aws create xcode-vnc
 cm aws destroy xcode-vnc
 ```
 
-`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, and Elastic IP association. `cm aws create` and `cm aws destroy` preview by default; pass `--confirm` to execute the AWS mutations.
+`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and EBS status checks. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and all three status checks are `ok`. `cm aws create` and `cm aws destroy` preview by default; pass `--confirm` to execute the AWS mutations. After a confirmed create, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
 
 Use `aws.creator` to tag who originally created the Mac. AWS already records resource creation and launch times, so `cm` does not write a separate creator-date tag. Use `aws.account_email` for the Apple account email. Leave `aws.resource_name` empty for new resources so `cm` generates `xcode-<account-email>`. Set `aws.resource_name` only when adopting resources that were created before `cm` managed them.
 

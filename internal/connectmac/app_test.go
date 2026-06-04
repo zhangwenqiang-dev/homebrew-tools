@@ -278,6 +278,35 @@ func TestAppAWSPlan(t *testing.T) {
 	}
 }
 
+func TestAppAWSWaitReady(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			CallerIdentity: CallerIdentity{Account: "123456789012", ARN: "arn:aws:iam::123456789012:user/cm"},
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-1",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-1"},
+		}}, nil
+	}
+	app.AWSService.ReadyPollInterval = time.Millisecond
+	app.AWSService.ReadyTimeout = time.Second
+	if code := app.Run(context.Background(), []string{"aws", "wait-ready", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("aws wait-ready code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "AWS Mac ready for profile xcode-vnc: true") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
 func TestAppUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())

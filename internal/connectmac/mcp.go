@@ -133,6 +133,8 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		return s.mcpAWSPlan(cfg, call.Arguments)
 	case "cm_aws_status":
 		return s.mcpAWSStatus(ctx, cfg, call.Arguments)
+	case "cm_aws_wait_ready":
+		return s.mcpAWSWaitReady(ctx, cfg, call.Arguments)
 	case "cm_aws_create_mac":
 		return s.mcpAWSCreateMac(ctx, cfg, call.Arguments)
 	case "cm_aws_adopt_mac":
@@ -259,6 +261,18 @@ func (s MCPServer) mcpAWSStatus(ctx context.Context, cfg Config, args map[string
 	return mcpText(FormatAWSStatus(plan, status)), nil
 }
 
+func (s MCPServer) mcpAWSWaitReady(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
+	if err != nil {
+		return nil, err
+	}
+	_, status, err := s.App.AWSService.WaitReady(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(FormatAWSReadyStatus(plan, status)), nil
+}
+
 func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
@@ -275,7 +289,11 @@ func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[str
 	if err != nil {
 		return nil, err
 	}
-	return mcpText(text + FormatAWSCreateResult(plan, result)), nil
+	_, status, err := s.App.AWSService.WaitReady(ctx, profile)
+	if err != nil {
+		return mcpText(text + FormatAWSCreateResult(plan, result) + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+	}
+	return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, status)), nil
 }
 
 func (s MCPServer) mcpAWSAdoptMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -507,7 +525,8 @@ func mcpTools() []map[string]interface{} {
 			"required": []string{"profile"},
 		}),
 		mcpTool("cm_aws_plan", "Preview AWS Mac Dedicated Host, EC2, and EIP operations for a profile.", profileSchema()),
-		mcpTool("cm_aws_status", "Describe managed AWS Mac Dedicated Hosts, EC2 instances, and Elastic IP association for a profile.", profileSchema()),
+		mcpTool("cm_aws_status", "Describe managed AWS Mac Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 status checks for a profile.", profileSchema()),
+		mcpTool("cm_aws_wait_ready", "Wait until the managed AWS Mac EC2 instance is running, EIP-bound, and system, instance, and EBS status checks are ok.", profileSchema()),
 		mcpTool("cm_aws_create_mac", "Preview or execute AWS Mac creation. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
