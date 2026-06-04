@@ -212,7 +212,7 @@ func TestAWSServiceCreateAllocatesRunsAndAssociates(t *testing.T) {
 	if result.SubnetID != "<subnet-id>" {
 		t.Fatalf("subnet id = %q", result.SubnetID)
 	}
-	want := []string{"verify-eip", "subnet:<subnet-id>", "allocate:usw2-az1:mac2.metal", "run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
+	want := []string{"verify-eip", "offerings:mac2.metal", "subnet:<subnet-id>", "allocate:usw2-az1:mac2.metal", "run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
@@ -258,6 +258,44 @@ func TestAWSServiceCreateSkipsMismatchedSubnetAZ(t *testing.T) {
 	}
 	if result.AvailabilityZoneID != "usw2-az2" {
 		t.Fatalf("availability zone = %q", result.AvailabilityZoneID)
+	}
+}
+
+func TestAWSServiceCreateSkipsUnsupportedAvailabilityZone(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.AvailabilityZoneIDs = []string{"usw2-az1", "usw2-az2"}
+	profile.AWS.SubnetID = ""
+	profile.AWS.SubnetsByAZ = map[string]string{
+		"usw2-az1": "<subnet-id-az1>",
+		"usw2-az2": "<subnet-id-az2>",
+	}
+	fake := &fakeAWSClient{
+		eip: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		offerings: map[string][]string{
+			"mac2.metal": {"usw2-az2"},
+		},
+		subnetAZs: map[string]string{
+			"<subnet-id-az2>": "usw2-az2",
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Create(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.AvailabilityZoneID != "usw2-az2" {
+		t.Fatalf("availability zone = %q", result.AvailabilityZoneID)
+	}
+	if len(result.Attempts) != 2 || result.Attempts[0].Status != "unsupported" || result.Attempts[1].Status != "created" {
+		t.Fatalf("unexpected attempts: %+v", result.Attempts)
+	}
+	plan, err := service.Plan(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := FormatAWSCreateResult(plan, result)
+	if !strings.Contains(text, "Create attempts:") || !strings.Contains(text, "unsupported") {
+		t.Fatalf("attempt table missing expected content:\n%s", text)
 	}
 }
 
@@ -403,6 +441,7 @@ type fakeAWSClient struct {
 	statusSequence []AWSStatus
 	host           DedicatedHostStatus
 	eip            ElasticIP
+	offerings      map[string][]string
 	subnetAZs      map[string]string
 }
 
@@ -444,6 +483,14 @@ func (c *fakeAWSClient) SubnetAvailabilityZoneID(ctx context.Context, subnetID s
 		return zoneID, nil
 	}
 	return "usw2-az1", nil
+}
+
+func (c *fakeAWSClient) InstanceTypeOfferings(ctx context.Context, instanceType string) ([]string, error) {
+	c.calls = append(c.calls, "offerings:"+instanceType)
+	if values := c.offerings[instanceType]; len(values) > 0 {
+		return values, nil
+	}
+	return []string{"usw2-az1", "usw2-az2", "usw2-az3", "use2-az1", "use2-az2", "use2-az3"}, nil
 }
 
 func (c *fakeAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error) {

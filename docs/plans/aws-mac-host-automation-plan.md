@@ -31,9 +31,9 @@ Creation flow:
    - macOS Sequoia Arm Mac AMI: `ami-036044172ee3c8c3c`, architecture `64-bit (Mac-Arm)`.
    - macOS Tahoe Arm Mac AMI: `ami-063755aadeb97329a`, architecture `64-bit (Mac-Arm)`.
 7. EC2 instance type must match the Dedicated Host instance type.
-8. Key pair name or ID comes from config.
+8. Key pair name or ID comes from config. `cm` must not create a key pair unless the user explicitly asks it to create that key pair. If `aws.key_name` does not exist during a preflight/create flow, stop and ask the user whether to create it.
 9. Disable auto-assigned public IP.
-10. Use configured security group ID.
+10. Use configured security group ID. `cm` must not silently open SSH on a security group. For a new AWS account where the default security group lacks SSH ingress, report the missing rule and require user confirmation before any command changes the security group.
 11. Placement must target the newly allocated Dedicated Host:
    `Tenancy=host`, `HostId=<host-id>`, `Affinity=host`.
 12. Bind a configured Elastic IP allocation ID to the new EC2 instance.
@@ -54,7 +54,8 @@ Safety requirements:
 2. MCP tools that create or destroy resources must require `confirm: true`.
 3. Created resources must include management tags:
    `cm-managed=true`, `cm-profile=<profile>`, `cm-account-email=<email>`.
-4. Published examples must not contain real hosts, PEM names, AWS account data, security group IDs, subnet IDs, EIP IDs, or emails.
+4. Confirmed create/adopt/launch mutations must require a non-empty `aws.creator` so `cm-creator` records who initiated the resource ownership.
+5. Published examples must not contain real hosts, PEM names, AWS account data, security group IDs, subnet IDs, EIP IDs, or emails.
 
 ## Proposed Config
 
@@ -451,8 +452,9 @@ When AWS returns `InsufficientHostCapacity`, operators need a clear attempt matr
 
 Planned improvements:
 
+- Query AWS instance type offerings for the configured region before allocation so unsupported AZ/type combinations are skipped before `AllocateHosts`.
 - Record every attempted `(availability_zone_id, instance_type)` pair.
-- Print a concise result table:
+- Print a concise result table with AZ, instance type, subnet, result, and detail:
 
 ```text
 usw2-az1 mac2-m2.metal      insufficient capacity
@@ -468,6 +470,12 @@ cm aws create <profile> --az usw2-az3 --instance-type mac2-m2.metal --confirm
 ```
 
 - Keep cleanup behavior strict: if instance launch or EIP association fails after host allocation, cleanup the resources created by that attempt unless the user explicitly asks to keep them.
+
+Completed in `v0.1.13`:
+
+- `cm aws create` describes instance type offerings and skips unsupported AZ/type candidates before allocating a Dedicated Host.
+- Create success and failure output includes a candidate attempt table.
+- Failed create no longer hides earlier attempts behind only the last AWS error.
 
 ### Priority 4: Resource Name and Account Email Matching
 
@@ -496,6 +504,17 @@ Planned improvements:
   - the matching local PEM does not exist under `~/.ssh`
 - Do not hard-fail on name mismatch because teams may name PEM files differently.
 - Keep hard failures for missing `identity_file`, PEM outside `~/.ssh`, or unsafe permissions.
+- Do not create missing AWS key pairs automatically. If a future `ensure-key` command is added, it must be an explicit user action or an explicit confirmation prompt.
+
+### Priority 5.1: Security Group Preflight Without Silent Mutation
+
+New AWS accounts often have a default security group that does not allow SSH from the current operator.
+
+Planned improvements:
+
+- Add a preflight check that reports whether the configured security group allows TCP 22 from the current operator IP or an approved CIDR.
+- Do not authorize ingress automatically during create.
+- If a helper command is added later, require explicit confirmation before adding or removing security group rules.
 
 ### Priority 6: Wait Until the Mac Is AWS-Ready
 

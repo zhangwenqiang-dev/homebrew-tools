@@ -173,7 +173,12 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		return 2
 	}
 	if (command == "create" || command == "adopt" || command == "adopt-host" || command == "launch-on-host") && confirm {
-		profile = a.promptMissingAWSCreator(profile)
+		var creatorOK bool
+		profile, creatorOK = a.promptMissingAWSCreator(profile)
+		if !creatorOK {
+			fmt.Fprintln(a.Err, "aws.creator is required for confirmed AWS mutations; set aws.creator in config or enter it when prompted")
+			return 1
+		}
 	}
 	errs := a.Validator.ValidateAWSProfile(profile)
 	if len(errs) > 0 {
@@ -618,16 +623,16 @@ func (a App) promptMissingIdentityFile(profile Profile) Profile {
 	return profile
 }
 
-func (a App) promptMissingAWSCreator(profile Profile) Profile {
+func (a App) promptMissingAWSCreator(profile Profile) (Profile, bool) {
 	if profile.AWS.Creator != "" {
-		return profile
+		return profile, true
 	}
 	value := a.promptLine(fmt.Sprintf("aws.creator for %s: ", profile.Name))
 	if value == "" {
-		return profile
+		return profile, false
 	}
 	profile.AWS.Creator = value
-	return profile
+	return profile, true
 }
 
 func (a App) promptLine(prompt string) string {

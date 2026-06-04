@@ -202,6 +202,8 @@ cm aws destroy xcode-vnc
 
 Use `aws.creator` to tag who originally created the Mac. AWS already records resource creation and launch times, so `cm` does not write a separate creator-date tag. Use `aws.account_email` for the Apple account email. Leave `aws.resource_name` empty for new resources so `cm` generates `xcode-<account-email>`. Set `aws.resource_name` only when adopting resources that were created before `cm` managed them.
 
+Confirmed AWS create/adopt/launch commands require `aws.creator`; if it is missing, the CLI prompts and stops when no value is entered. `cm` does not create missing key pairs or change security group ingress automatically; those actions require explicit user confirmation in separate AWS setup steps.
+
 AWS credentials are read through the normal AWS SDK credential chain. Keep access keys in `~/.aws/credentials`, AWS SSO, environment variables, or IAM roles. Do not put AWS secret keys in `~/.connectmac/config.yaml`.
 
 ## Safety Checks

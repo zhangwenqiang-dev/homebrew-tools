@@ -183,27 +183,60 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 		return MacPlan{}, AWSCreateResult{}, err
 	}
 	var lastErr error
+	var attempts []AWSCreateAttempt
 	for _, instanceType := range plan.InstanceTypePriority {
 		ami := amiForInstanceType(AWSConfig{AMI: AWSAMIConfig{MacX86: profile.AWS.AMI.MacX86, MacARM: profile.AWS.AMI.MacARM}}, instanceType)
 		if ami == "" {
 			continue
 		}
+		offerings, err := client.InstanceTypeOfferings(ctx, instanceType)
+		if err != nil {
+			attempts = append(attempts, AWSCreateAttempt{
+				InstanceType: instanceType,
+				Status:       "failed",
+				Detail:       err.Error(),
+			})
+			lastErr = err
+			continue
+		}
+		supportedZones := stringSet(offerings)
 		for _, zoneID := range plan.AvailabilityZoneIDs {
+			attempt := AWSCreateAttempt{
+				AvailabilityZoneID: zoneID,
+				InstanceType:       instanceType,
+			}
+			if !supportedZones[zoneID] {
+				attempt.Status = "unsupported"
+				attempt.Detail = fmt.Sprintf("%s is not offered in %s", instanceType, zoneID)
+				attempts = append(attempts, attempt)
+				lastErr = fmt.Errorf("%s", attempt.Detail)
+				continue
+			}
 			subnetID, err := subnetForLaunch(ctx, client, plan, zoneID)
 			if err != nil {
+				attempt.Status = "failed"
+				attempt.Detail = err.Error()
+				attempts = append(attempts, attempt)
 				lastErr = err
 				continue
 			}
+			attempt.SubnetID = subnetID
 			attemptPlan := plan
 			attemptPlan.SubnetID = subnetID
 			hostID, err := client.AllocateHost(ctx, attemptPlan, zoneID, instanceType)
 			if err != nil {
+				attempt.Status = "failed"
+				attempt.Detail = err.Error()
+				attempts = append(attempts, attempt)
 				lastErr = err
 				continue
 			}
 			instanceID, err := client.RunInstance(ctx, attemptPlan, hostID, instanceType, ami)
 			if err != nil {
 				_ = client.ReleaseHost(ctx, hostID)
+				attempt.Status = "failed"
+				attempt.Detail = err.Error()
+				attempts = append(attempts, attempt)
 				lastErr = err
 				continue
 			}
@@ -211,9 +244,15 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 			if err != nil {
 				_ = client.TerminateInstance(ctx, instanceID)
 				_ = client.ReleaseHost(ctx, hostID)
+				attempt.Status = "failed"
+				attempt.Detail = err.Error()
+				attempts = append(attempts, attempt)
 				lastErr = err
 				continue
 			}
+			attempt.Status = "created"
+			attempt.Detail = fmt.Sprintf("host=%s instance=%s", hostID, instanceID)
+			attempts = append(attempts, attempt)
 			return plan, AWSCreateResult{
 				HostID:              hostID,
 				InstanceID:          instanceID,
@@ -223,13 +262,14 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 				AMI:                 ami,
 				SubnetID:            subnetID,
 				ElasticIPAllocation: plan.ElasticIPAllocationID,
+				Attempts:            attempts,
 			}, nil
 		}
 	}
 	if lastErr != nil {
-		return MacPlan{}, AWSCreateResult{}, lastErr
+		return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: lastErr}
 	}
-	return MacPlan{}, AWSCreateResult{}, fmt.Errorf("no aws create candidate was attempted")
+	return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("no aws create candidate was attempted")}
 }
 
 func (s AWSService) LaunchOnHostPreview(ctx context.Context, profile Profile, hostID string) (MacPlan, AWSLaunchOnHostPreview, error) {
@@ -357,6 +397,16 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func stringSet(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value != "" {
+			out[value] = true
+		}
+	}
+	return out
+}
+
 func AWSStatusReady(status AWSStatus) bool {
 	for _, instance := range status.Instances {
 		if InstanceReady(instance, status.ElasticIP) {
@@ -458,6 +508,31 @@ type AWSCreateResult struct {
 	AMI                 string
 	SubnetID            string
 	ElasticIPAllocation string
+	Attempts            []AWSCreateAttempt
+}
+
+type AWSCreateAttempt struct {
+	AvailabilityZoneID string
+	InstanceType       string
+	SubnetID           string
+	Status             string
+	Detail             string
+}
+
+type AWSCreateAttemptsError struct {
+	Attempts []AWSCreateAttempt
+	Cause    error
+}
+
+func (e AWSCreateAttemptsError) Error() string {
+	var b strings.Builder
+	if e.Cause != nil {
+		fmt.Fprintf(&b, "%v\n", e.Cause)
+	}
+	if len(e.Attempts) > 0 {
+		fmt.Fprint(&b, FormatAWSCreateAttempts(e.Attempts))
+	}
+	return strings.TrimSpace(b.String())
 }
 
 type AWSDestroyResult struct {
@@ -618,7 +693,64 @@ func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {
 	fmt.Fprintf(&b, "EIP association: %s\n", result.AssociationID)
 	fmt.Fprintf(&b, "Selected: %s %s %s\n", result.AvailabilityZoneID, result.InstanceType, result.AMI)
 	fmt.Fprintf(&b, "Subnet: %s\n", result.SubnetID)
+	fmt.Fprintf(&b, "Elastic IP allocation: %s\n", result.ElasticIPAllocation)
+	if len(result.Attempts) > 0 {
+		fmt.Fprint(&b, FormatAWSCreateAttempts(result.Attempts))
+	}
 	return b.String()
+}
+
+func FormatAWSCreateAttempts(attempts []AWSCreateAttempt) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	rows := make([][]string, 0, len(attempts)+1)
+	rows = append(rows, []string{"AZ", "INSTANCE TYPE", "SUBNET", "RESULT", "DETAIL"})
+	for _, attempt := range attempts {
+		rows = append(rows, []string{
+			emptyTableValue(attempt.AvailabilityZoneID),
+			emptyTableValue(attempt.InstanceType),
+			emptyTableValue(attempt.SubnetID),
+			emptyTableValue(attempt.Status),
+			emptyTableValue(attempt.Detail),
+		})
+	}
+	widths := make([]int, len(rows[0]))
+	for _, row := range rows {
+		for i, value := range row {
+			if len(value) > widths[i] {
+				widths[i] = len(value)
+			}
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "Create attempts:")
+	for rowIndex, row := range rows {
+		for i, value := range row {
+			if i > 0 {
+				fmt.Fprint(&b, "  ")
+			}
+			fmt.Fprintf(&b, "%-*s", widths[i], value)
+		}
+		fmt.Fprintln(&b)
+		if rowIndex == 0 {
+			for i, width := range widths {
+				if i > 0 {
+					fmt.Fprint(&b, "  ")
+				}
+				fmt.Fprint(&b, strings.Repeat("-", width))
+			}
+			fmt.Fprintln(&b)
+		}
+	}
+	return b.String()
+}
+
+func emptyTableValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func FormatAWSDestroyResult(plan MacPlan, result AWSDestroyResult) string {

@@ -18,6 +18,7 @@ type AWSClient interface {
 	DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error)
 	DescribeHostByID(ctx context.Context, hostID string) (DedicatedHostStatus, error)
 	TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error
+	InstanceTypeOfferings(ctx context.Context, instanceType string) ([]string, error)
 	SubnetAvailabilityZoneID(ctx context.Context, subnetID string) (string, error)
 	AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error)
 	RunInstance(ctx context.Context, plan MacPlan, hostID, instanceType, amiID string) (string, error)
@@ -212,6 +213,26 @@ func (c RealAWSClient) SubnetAvailabilityZoneID(ctx context.Context, subnetID st
 		return "", fmt.Errorf("subnet %s not found", subnetID)
 	}
 	return aws.ToString(out.Subnets[0].AvailabilityZoneId), nil
+}
+
+func (c RealAWSClient) InstanceTypeOfferings(ctx context.Context, instanceType string) ([]string, error) {
+	out, err := c.ec2.DescribeInstanceTypeOfferings(ctx, &ec2.DescribeInstanceTypeOfferingsInput{
+		LocationType: ec2types.LocationTypeAvailabilityZoneId,
+		Filters: []ec2types.Filter{{
+			Name:   aws.String("instance-type"),
+			Values: []string{instanceType},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe instance type offerings for %s: %w", instanceType, err)
+	}
+	locations := make([]string, 0, len(out.InstanceTypeOfferings))
+	for _, offering := range out.InstanceTypeOfferings {
+		if location := aws.ToString(offering.Location); location != "" {
+			locations = append(locations, location)
+		}
+	}
+	return locations, nil
 }
 
 func (c RealAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabilityZoneID, instanceType string) (string, error) {
