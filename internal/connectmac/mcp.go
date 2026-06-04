@@ -392,6 +392,10 @@ func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[st
 	}
 	_, result, err := s.App.AWSService.Destroy(ctx, profile)
 	if err != nil {
+		var partial AWSDestroyPartialError
+		if errors.As(err, &partial) {
+			return mcpText(text + FormatAWSDestroyResult(plan, partial.Result) + fmt.Sprintf("AWS destroy partially completed: %v\n", err)), nil
+		}
 		return nil, err
 	}
 	return mcpText(text + FormatAWSDestroyResult(plan, result)), nil

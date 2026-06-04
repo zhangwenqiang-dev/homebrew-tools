@@ -34,6 +34,10 @@ func (s AWSService) Plan(profile Profile) (MacPlan, error) {
 }
 
 func (s AWSService) Status(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
+	return s.StatusWithOptions(ctx, profile, AWSStatusOptions{})
+}
+
+func (s AWSService) StatusWithOptions(ctx context.Context, profile Profile, options AWSStatusOptions) (MacPlan, AWSStatus, error) {
 	plan, err := s.Plan(profile)
 	if err != nil {
 		return MacPlan{}, AWSStatus{}, err
@@ -45,6 +49,9 @@ func (s AWSService) Status(ctx context.Context, profile Profile) (MacPlan, AWSSt
 	status, err := client.DescribeStatus(ctx, plan)
 	if err != nil {
 		return MacPlan{}, AWSStatus{}, err
+	}
+	if !options.IncludeTerminal {
+		status = filterTerminalAWSStatus(status)
 	}
 	return plan, status, nil
 }
@@ -464,32 +471,65 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 	if err != nil {
 		return MacPlan{}, AWSDestroyResult{}, err
 	}
-	result := AWSDestroyResult{}
+	result := AWSDestroyResult{RetainedElasticIP: status.ElasticIP}
 	for _, instance := range status.Instances {
+		if isTerminalInstanceState(instance.State) {
+			result.SkippedInstances = append(result.SkippedInstances, fmt.Sprintf("%s:%s", instance.InstanceID, instance.State))
+			continue
+		}
 		if !managedTagsMatch(instance.Tags, plan) {
 			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to terminate instance %s because required safety tags do not match", instance.InstanceID)
 		}
 		if status.ElasticIP.AssociationID != "" && status.ElasticIP.InstanceID == instance.InstanceID {
 			if err := client.DisassociateElasticIP(ctx, status.ElasticIP.AssociationID); err != nil {
-				return MacPlan{}, AWSDestroyResult{}, err
+				return MacPlan{}, result, err
 			}
 			result.DisassociatedElasticIP = true
 		}
 		if err := client.TerminateInstance(ctx, instance.InstanceID); err != nil {
-			return MacPlan{}, AWSDestroyResult{}, err
+			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
 		}
 		result.TerminatedInstances = append(result.TerminatedInstances, instance.InstanceID)
 	}
 	for _, host := range status.Hosts {
+		if isTerminalHostState(host.State) {
+			result.SkippedHosts = append(result.SkippedHosts, fmt.Sprintf("%s:%s", host.HostID, host.State))
+			continue
+		}
 		if !managedTagsMatch(host.Tags, plan) {
 			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match", host.HostID)
 		}
 		if err := client.ReleaseHost(ctx, host.HostID); err != nil {
-			return MacPlan{}, AWSDestroyResult{}, err
+			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
 		}
 		result.ReleasedHosts = append(result.ReleasedHosts, host.HostID)
 	}
 	return plan, result, nil
+}
+
+func filterTerminalAWSStatus(status AWSStatus) AWSStatus {
+	filtered := status
+	filtered.Hosts = nil
+	for _, host := range status.Hosts {
+		if !isTerminalHostState(host.State) {
+			filtered.Hosts = append(filtered.Hosts, host)
+		}
+	}
+	filtered.Instances = nil
+	for _, instance := range status.Instances {
+		if !isTerminalInstanceState(instance.State) {
+			filtered.Instances = append(filtered.Instances, instance)
+		}
+	}
+	return filtered
+}
+
+func isTerminalInstanceState(state string) bool {
+	return state == "terminated"
+}
+
+func isTerminalHostState(state string) bool {
+	return state == "released" || state == "released-permanent-failure"
 }
 
 func (s AWSService) client(ctx context.Context, plan MacPlan) (AWSClient, error) {
@@ -539,6 +579,21 @@ type AWSDestroyResult struct {
 	DisassociatedElasticIP bool
 	TerminatedInstances    []string
 	ReleasedHosts          []string
+	SkippedInstances       []string
+	SkippedHosts           []string
+	RetainedElasticIP      ElasticIP
+}
+
+type AWSDestroyPartialError struct {
+	Result AWSDestroyResult
+	Cause  error
+}
+
+func (e AWSDestroyPartialError) Error() string {
+	if e.Cause == nil {
+		return "aws destroy partially completed"
+	}
+	return fmt.Sprintf("%v; partial destroy state recorded; run the same destroy command again after AWS finishes the pending transition", e.Cause)
 }
 
 type AWSAdoptResult struct {
@@ -552,6 +607,10 @@ type AWSLaunchOnHostPreview struct {
 	InstanceType       string
 	AMI                string
 	SubnetID           string
+}
+
+type AWSStatusOptions struct {
+	IncludeTerminal bool
 }
 
 func FormatMacPlan(plan MacPlan) string {
@@ -589,7 +648,7 @@ func FormatMacDestroyPreview(plan MacPlan) string {
 	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
 	fmt.Fprintf(&b, "Safety tags required before any mutation: %s\n", FormatAWSTags(plan.Tags[1:]))
 	fmt.Fprintln(&b, "Operations:")
-	fmt.Fprintln(&b, "- Disassociate Elastic IP only if attached to the managed instance")
+	fmt.Fprintln(&b, "- Disassociate Elastic IP only if attached to the managed instance; retain the Elastic IP allocation")
 	fmt.Fprintln(&b, "- Terminate the managed EC2 instance")
 	fmt.Fprintln(&b, "- Release the managed Dedicated Host when AWS allows release")
 	return b.String()
@@ -757,8 +816,11 @@ func FormatAWSDestroyResult(plan MacPlan, result AWSDestroyResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac destroy executed for profile %s\n", plan.ProfileName)
 	fmt.Fprintf(&b, "Disassociated Elastic IP: %t\n", result.DisassociatedElasticIP)
+	fmt.Fprintf(&b, "Retained Elastic IP: %s public_ip=%s\n", emptyTableValue(result.RetainedElasticIP.AllocationID), emptyTableValue(result.RetainedElasticIP.PublicIP))
 	fmt.Fprintf(&b, "Terminated instances: %s\n", strings.Join(result.TerminatedInstances, ", "))
+	fmt.Fprintf(&b, "Skipped instances: %s\n", strings.Join(result.SkippedInstances, ", "))
 	fmt.Fprintf(&b, "Released hosts: %s\n", strings.Join(result.ReleasedHosts, ", "))
+	fmt.Fprintf(&b, "Skipped hosts: %s\n", strings.Join(result.SkippedHosts, ", "))
 	return b.String()
 }
 

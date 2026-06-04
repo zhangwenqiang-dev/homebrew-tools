@@ -190,6 +190,7 @@ Preview AWS Mac Dedicated Host automation:
 ```bash
 cm aws plan xcode-vnc
 cm aws status xcode-vnc
+cm aws status xcode-vnc --all
 cm aws wait-ready xcode-vnc
 cm aws adopt xcode-vnc
 cm aws adopt-host xcode-vnc --host-id h-example
@@ -198,7 +199,9 @@ cm aws create xcode-vnc
 cm aws destroy xcode-vnc
 ```
 
-`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and EBS status checks. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and all three status checks are `ok`. `cm aws adopt-host` tags an existing empty Dedicated Host as managed, and `cm aws launch-on-host` launches EC2 on a usable existing host. `cm aws create`, `cm aws adopt-host`, `cm aws launch-on-host`, and `cm aws destroy` preview by default; pass `--confirm` to execute AWS mutations. After a confirmed create or launch-on-host, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
+`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and EBS status checks. Terminal resources such as terminated instances and released hosts are hidden by default; pass `--all` to include them for troubleshooting. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and all three status checks are `ok`. `cm aws adopt-host` tags an existing empty Dedicated Host as managed, and `cm aws launch-on-host` launches EC2 on a usable existing host. `cm aws create`, `cm aws adopt-host`, `cm aws launch-on-host`, and `cm aws destroy` preview by default; pass `--confirm` to execute AWS mutations. After a confirmed create or launch-on-host, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
+
+`cm aws destroy` disassociates the configured Elastic IP from the managed instance but keeps the Elastic IP allocation. If AWS takes too long to move a Mac instance from `shutting-down` to `terminated`, rerun the same destroy command later; `cm` skips already terminated instances and already released hosts, then continues the remaining release steps.
 
 Use `aws.creator` to tag who originally created the Mac. AWS already records resource creation and launch times, so `cm` does not write a separate creator-date tag. Use `aws.account_email` for the Apple account email. Leave `aws.resource_name` empty for new resources so `cm` generates `xcode-<account-email>`. Set `aws.resource_name` only when adopting resources that were created before `cm` managed them.
 

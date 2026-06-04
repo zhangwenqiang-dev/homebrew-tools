@@ -116,6 +116,39 @@ func TestAWSServiceStatusUsesClient(t *testing.T) {
 	}
 }
 
+func TestAWSServiceStatusHidesTerminalResourcesByDefault(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts: []DedicatedHostStatus{
+				{HostID: "h-active", State: "available", Tags: managedTestTags()},
+				{HostID: "h-released", State: "released", Tags: managedTestTags()},
+			},
+			Instances: []InstanceStatus{
+				{InstanceID: "i-active", State: "running", Tags: managedTestTags()},
+				{InstanceID: "i-terminated", State: "terminated", Tags: managedTestTags()},
+			},
+		},
+	}
+	service := testAWSService(fake)
+	_, status, err := service.Status(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if len(status.Hosts) != 1 || status.Hosts[0].HostID != "h-active" {
+		t.Fatalf("hosts = %+v", status.Hosts)
+	}
+	if len(status.Instances) != 1 || status.Instances[0].InstanceID != "i-active" {
+		t.Fatalf("instances = %+v", status.Instances)
+	}
+	_, all, err := service.StatusWithOptions(context.Background(), validAWSProfile(), AWSStatusOptions{IncludeTerminal: true})
+	if err != nil {
+		t.Fatalf("StatusWithOptions returned error: %v", err)
+	}
+	if len(all.Hosts) != 2 || len(all.Instances) != 2 {
+		t.Fatalf("all status = %+v", all)
+	}
+}
+
 func TestAWSStatusReadyRequiresAllChecksAndEIP(t *testing.T) {
 	status := AWSStatus{
 		Instances: []InstanceStatus{{
@@ -344,6 +377,43 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	if len(result.TerminatedInstances) != 1 || len(result.ReleasedHosts) != 1 {
 		t.Fatalf("unexpected result: %+v", result)
 	}
+	text := FormatAWSDestroyResult(validPlan(t), result)
+	if !strings.Contains(text, "Retained Elastic IP") {
+		t.Fatalf("destroy result should mention retained EIP:\n%s", text)
+	}
+}
+
+func TestAWSServiceDestroySkipsTerminalResourcesForResume(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts: []DedicatedHostStatus{
+				{HostID: "h-released", State: "released", Tags: managedTestTags()},
+				{HostID: "h-active", State: "available", Tags: managedTestTags()},
+			},
+			Instances: []InstanceStatus{
+				{InstanceID: "i-terminated", State: "terminated", Tags: managedTestTags()},
+			},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", PublicIP: "203.0.113.10"},
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Destroy(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	want := []string{"status", "release:h-active"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if strings.Join(result.SkippedInstances, ",") != "i-terminated:terminated" {
+		t.Fatalf("skipped instances = %v", result.SkippedInstances)
+	}
+	if strings.Join(result.SkippedHosts, ",") != "h-released:released" {
+		t.Fatalf("skipped hosts = %v", result.SkippedHosts)
+	}
+	if result.RetainedElasticIP.AllocationID != "<elastic-ip-allocation-id>" {
+		t.Fatalf("retained eip = %+v", result.RetainedElasticIP)
+	}
 }
 
 func TestAWSServiceAdoptTagsMatchedResources(t *testing.T) {
@@ -425,6 +495,15 @@ func testAWSService(fake *fakeAWSClient) AWSService {
 			return fake, nil
 		},
 	}
+}
+
+func validPlan(t *testing.T) MacPlan {
+	t.Helper()
+	plan, err := BuildMacPlan(validAWSProfile(), time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
 }
 
 func managedTestTags() []AWSTagConfig {

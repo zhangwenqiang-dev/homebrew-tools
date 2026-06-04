@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -143,18 +144,21 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile> [--confirm] [--host-id <id>]")
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile> [--confirm] [--all] [--host-id <id>]")
 		return 2
 	}
 	command := args[0]
 	profileName := args[1]
 	confirm := false
 	hostID := ""
+	includeTerminal := false
 	for i := 2; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
 		case "--confirm":
 			confirm = true
+		case "--all":
+			includeTerminal = true
 		case "--host-id":
 			i++
 			if i >= len(args) || args[i] == "" {
@@ -214,12 +218,15 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
 	case "status":
-		_, status, err := a.AWSService.Status(ctx, profile)
+		_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: includeTerminal})
 		if err != nil {
 			fmt.Fprintf(a.Err, "aws status failed: %v\n", err)
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSStatus(plan, status))
+		if !includeTerminal {
+			fmt.Fprintln(a.Out, "Terminal resources are hidden. Use --all to include terminated instances and released hosts.")
+		}
 		return 0
 	case "wait-ready":
 		_, status, err := a.AWSService.WaitReady(ctx, profile)
@@ -305,6 +312,12 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		}
 		_, result, err := a.AWSService.Destroy(ctx, profile)
 		if err != nil {
+			var partial AWSDestroyPartialError
+			if errors.As(err, &partial) {
+				fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, partial.Result))
+				fmt.Fprintf(a.Err, "aws destroy partially completed: %v\n", err)
+				return 1
+			}
 			fmt.Fprintf(a.Err, "aws destroy failed: %v\n", err)
 			return 1
 		}

@@ -307,6 +307,44 @@ func TestAppAWSWaitReady(t *testing.T) {
 	}
 }
 
+func TestAppAWSStatusAllIncludesTerminalResources(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			CallerIdentity: CallerIdentity{Account: "123456789012", ARN: "arn:aws:iam::123456789012:user/cm"},
+			Hosts: []DedicatedHostStatus{
+				{HostID: "h-active", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1", Tags: managedTestTags()},
+				{HostID: "h-released", State: "released", InstanceType: "mac2.metal", ZoneID: "usw2-az1", Tags: managedTestTags()},
+			},
+			Instances: []InstanceStatus{
+				{InstanceID: "i-active", State: "running", Tags: managedTestTags()},
+				{InstanceID: "i-terminated", State: "terminated", Tags: managedTestTags()},
+			},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "status", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("aws status code = %d, err = %s", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "h-released") || strings.Contains(out.String(), "i-terminated") {
+		t.Fatalf("default status should hide terminal resources:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Use --all") {
+		t.Fatalf("default status should mention --all:\n%s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"aws", "status", "xcode-vnc", "--all", "--config", config}); code != 0 {
+		t.Fatalf("aws status --all code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "h-released") || !strings.Contains(out.String(), "i-terminated") {
+		t.Fatalf("status --all should include terminal resources:\n%s", out.String())
+	}
+}
+
 func TestAppAWSAdoptHostPreview(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

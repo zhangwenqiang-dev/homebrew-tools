@@ -42,11 +42,12 @@ Creation flow:
 Destruction flow:
 
 1. Only destroy resources that match the profile and safety tags.
-2. Disassociate Elastic IP if currently associated with the managed instance.
+2. Disassociate Elastic IP if currently associated with the managed instance, but never release the Elastic IP allocation.
 3. Terminate the managed instance.
 4. Wait until instance termination is visible.
 5. Release the managed Dedicated Host when AWS allows release.
 6. Never terminate unrelated EC2 instances or release unrelated Dedicated Hosts.
+7. Support rerunning the same destroy command after a partial timeout by skipping already terminated instances and already released hosts.
 
 Safety requirements:
 
@@ -544,6 +545,18 @@ Completed in `v0.1.11`:
 - `cm aws create <profile> --confirm` runs the AWS readiness wait after EIP association.
 - `cm aws status` prints `system_status`, `instance_status`, `ebs_status`, per-instance `ready`, and aggregate `Ready`.
 - `cm_aws_wait_ready` mirrors this behavior in MCP.
+
+### Priority 6.1: Destroy Resume and EIP Retention
+
+EC2 Mac termination can stay in `shutting-down` longer than the waiter timeout. Operators also need clear assurance that Elastic IP allocations are retained.
+
+Completed in `v0.1.13`:
+
+- `cm aws destroy` preview now says the Elastic IP is only disassociated and the allocation is retained.
+- Destroy results print the retained Elastic IP allocation and public IP.
+- Destroy skips terminal resources (`terminated` instances and `released` hosts), so rerunning the same command continues the remaining cleanup.
+- Partial destroy errors return the work completed so far and tell operators to rerun the same destroy command after AWS finishes pending transitions.
+- `cm aws status` hides terminal resources by default; `cm aws status <profile> --all` includes terminated instances and released hosts for troubleshooting.
 
 ### Priority 7: Update MCP Tools
 
