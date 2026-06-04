@@ -129,6 +129,18 @@ func TestAWSStatusReadyRequiresAllChecksAndEIP(t *testing.T) {
 	}
 }
 
+func TestHostIDsFromInstancesDedupesEmptyValues(t *testing.T) {
+	got := hostIDsFromInstances([]InstanceStatus{
+		{InstanceID: "i-1", HostID: "h-1"},
+		{InstanceID: "i-2", HostID: ""},
+		{InstanceID: "i-3", HostID: "h-1"},
+		{InstanceID: "i-4", HostID: "h-2"},
+	})
+	if strings.Join(got, ",") != "h-1,h-2" {
+		t.Fatalf("host ids = %v", got)
+	}
+}
+
 func TestAWSServiceWaitReadyPollsUntilAllChecksPass(t *testing.T) {
 	fake := &fakeAWSClient{
 		statusSequence: []AWSStatus{

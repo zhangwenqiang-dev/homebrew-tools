@@ -106,6 +106,10 @@ func (c RealAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSSta
 	if err != nil {
 		return AWSStatus{}, err
 	}
+	eip, err := c.describeElasticIP(ctx, plan.ElasticIPAllocationID)
+	if err != nil {
+		return AWSStatus{}, err
+	}
 	hosts, err := c.describeManagedHosts(ctx, plan)
 	if err != nil {
 		return AWSStatus{}, err
@@ -114,11 +118,23 @@ func (c RealAWSClient) DescribeStatus(ctx context.Context, plan MacPlan) (AWSSta
 	if err != nil {
 		return AWSStatus{}, err
 	}
-	if err := c.populateInstanceChecks(ctx, instances); err != nil {
-		return AWSStatus{}, err
+	if len(instances) == 0 && eip.InstanceID != "" {
+		instance, err := c.describeInstanceByID(ctx, eip.InstanceID)
+		if err != nil {
+			return AWSStatus{}, err
+		}
+		instances = append(instances, instance)
 	}
-	eip, err := c.describeElasticIP(ctx, plan.ElasticIPAllocationID)
-	if err != nil {
+	if len(hosts) == 0 {
+		hostIDs := hostIDsFromInstances(instances)
+		if len(hostIDs) > 0 {
+			hosts, err = c.describeHostsByID(ctx, hostIDs)
+			if err != nil {
+				return AWSStatus{}, err
+			}
+		}
+	}
+	if err := c.populateInstanceChecks(ctx, instances); err != nil {
 		return AWSStatus{}, err
 	}
 	return AWSStatus{
@@ -321,6 +337,26 @@ func (c RealAWSClient) describeHostsByName(ctx context.Context, name string) ([]
 	return hosts, nil
 }
 
+func (c RealAWSClient) describeHostsByID(ctx context.Context, hostIDs []string) ([]DedicatedHostStatus, error) {
+	out, err := c.ec2.DescribeHosts(ctx, &ec2.DescribeHostsInput{
+		HostIds: hostIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describe hosts by id: %w", err)
+	}
+	hosts := make([]DedicatedHostStatus, 0, len(out.Hosts))
+	for _, host := range out.Hosts {
+		hosts = append(hosts, DedicatedHostStatus{
+			HostID:       aws.ToString(host.HostId),
+			State:        string(host.State),
+			InstanceType: aws.ToString(host.HostProperties.InstanceType),
+			ZoneID:       aws.ToString(host.AvailabilityZoneId),
+			Tags:         fromEC2Tags(host.Tags),
+		})
+	}
+	return hosts, nil
+}
+
 func (c RealAWSClient) describeManagedInstances(ctx context.Context, plan MacPlan) ([]InstanceStatus, error) {
 	out, err := c.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		Filters: managedFilters(plan),
@@ -342,6 +378,28 @@ func (c RealAWSClient) describeManagedInstances(ctx context.Context, plan MacPla
 		}
 	}
 	return instances, nil
+}
+
+func (c RealAWSClient) describeInstanceByID(ctx context.Context, instanceID string) (InstanceStatus, error) {
+	out, err := c.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	})
+	if err != nil {
+		return InstanceStatus{}, fmt.Errorf("describe instance %s: %w", instanceID, err)
+	}
+	for _, reservation := range out.Reservations {
+		for _, instance := range reservation.Instances {
+			return InstanceStatus{
+				InstanceID:   aws.ToString(instance.InstanceId),
+				State:        string(instance.State.Name),
+				InstanceType: string(instance.InstanceType),
+				HostID:       aws.ToString(instance.Placement.HostId),
+				PublicIP:     aws.ToString(instance.PublicIpAddress),
+				Tags:         fromEC2Tags(instance.Tags),
+			}, nil
+		}
+	}
+	return InstanceStatus{}, fmt.Errorf("instance %s not found", instanceID)
 }
 
 func (c RealAWSClient) describeInstancesByName(ctx context.Context, name string) ([]InstanceStatus, error) {
@@ -415,6 +473,19 @@ func ebsStatus(status *ec2types.EbsStatusSummary) string {
 		return ""
 	}
 	return string(status.Status)
+}
+
+func hostIDsFromInstances(instances []InstanceStatus) []string {
+	seen := map[string]bool{}
+	var hostIDs []string
+	for _, instance := range instances {
+		if instance.HostID == "" || seen[instance.HostID] {
+			continue
+		}
+		seen[instance.HostID] = true
+		hostIDs = append(hostIDs, instance.HostID)
+	}
+	return hostIDs
 }
 
 func (c RealAWSClient) describeElasticIP(ctx context.Context, allocationID string) (ElasticIP, error) {
