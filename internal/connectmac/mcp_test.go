@@ -156,6 +156,25 @@ func TestMCPAWSOpenMacByEmailPreview(t *testing.T) {
 	}
 }
 
+func TestMCPAWSCreateFailureReportsReasonAndStops(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{
+			eip:    ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+			runErr: errString("RunInstances rejected selected host"),
+		}, nil
+	}
+	out := runMCPCall(t, app, config, "cm_aws_create_mac", map[string]interface{}{
+		"profile": "xcode-vnc",
+		"confirm": true,
+	})
+	for _, want := range []string{"AWS create failed", "RunInstances rejected selected host", "Stopped", "wait for explicit instructions"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestMCPAWSWaitReady(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {

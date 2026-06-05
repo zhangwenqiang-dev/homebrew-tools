@@ -14,10 +14,11 @@ Follow these rules:
 5. After a Dedicated Host is allocated, any EC2 launch/start failure must stop the create loop. Do not try another instance type or allocate another Dedicated Host.
 6. Never terminate EC2 during open/create/launch-on-host recovery. Investigate or recover the EC2 launch/start failure on the existing Dedicated Host. Terminate EC2 only in an explicit destroy/release workflow after user confirmation.
 7. If a Dedicated Host exists, reuse that host and launch/recover EC2 on it instead of creating another Dedicated Host.
-8. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
-9. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
-10. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
-11. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
+8. When AWS create/open/launch-on-host fails, report the exact error reason, stop the current action, and wait for explicit user instructions before continuing.
+9. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
+10. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
+11. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
+12. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
 
 Preferred MCP tools:
 

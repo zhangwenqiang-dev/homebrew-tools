@@ -77,7 +77,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.21",
+				"version": "0.1.22",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -309,7 +309,7 @@ func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[str
 	}
 	_, result, err := s.App.AWSService.Create(ctx, profile)
 	if err != nil {
-		return nil, err
+		return mcpText(text + awsStoppedMessage("AWS create", err)), nil
 	}
 	_, status, err := s.App.AWSService.WaitReady(ctx, profile)
 	if err != nil {
@@ -352,7 +352,7 @@ func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args ma
 	case "launch-on-host":
 		_, result, err := s.App.AWSService.LaunchOnHost(ctx, profile, action.HostID)
 		if err != nil {
-			return nil, err
+			return mcpText(text + awsStoppedMessage("AWS launch-on-host", err)), nil
 		}
 		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
 		if err != nil {
@@ -362,7 +362,7 @@ func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args ma
 	case "create":
 		_, result, err := s.App.AWSService.Create(ctx, profile)
 		if err != nil {
-			return nil, err
+			return mcpText(text + awsStoppedMessage("AWS create", err)), nil
 		}
 		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
 		if err != nil {
@@ -446,7 +446,7 @@ func (s MCPServer) mcpAWSLaunchOnHost(ctx context.Context, cfg Config, args map[
 	}
 	_, result, err := s.App.AWSService.LaunchOnHost(ctx, profile, hostID)
 	if err != nil {
-		return nil, err
+		return mcpText(text + awsStoppedMessage("AWS launch-on-host", err)), nil
 	}
 	_, status, err := s.App.AWSService.WaitReady(ctx, profile)
 	if err != nil {

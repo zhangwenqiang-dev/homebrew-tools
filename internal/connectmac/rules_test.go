@@ -156,6 +156,7 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 	for _, want := range []string{
 		"After a Dedicated Host is allocated, any EC2 launch/start failure must stop the create loop",
 		"Never terminate EC2 during open/create/launch-on-host recovery",
+		"When AWS create/open/launch-on-host fails, report the exact error reason",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("out missing %q = %q", want, out.String())
@@ -172,6 +173,7 @@ func TestDefaultSkillTemplateIncludesTerminateSafetyRule(t *testing.T) {
 		"After a Dedicated Host is allocated, any EC2 launch/start failure must stop the create loop",
 		"Never terminate EC2 during open/create/launch-on-host recovery",
 		"If a Dedicated Host exists, reuse that host",
+		"When AWS create/open/launch-on-host fails, report the exact error reason",
 	} {
 		if !strings.Contains(skill, want) {
 			t.Fatalf("skill template missing %q", want)

@@ -219,7 +219,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		}
 		_, result, err := a.AWSService.Create(ctx, profile)
 		if err != nil {
-			fmt.Fprintf(a.Err, "aws create failed: %v\n", err)
+			fmt.Fprint(a.Err, awsStoppedMessage("aws create", err))
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
@@ -306,7 +306,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		}
 		_, result, err := a.AWSService.LaunchOnHost(ctx, profile, hostID)
 		if err != nil {
-			fmt.Fprintf(a.Err, "aws launch-on-host failed: %v\n", err)
+			fmt.Fprint(a.Err, awsStoppedMessage("aws launch-on-host", err))
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
@@ -490,7 +490,7 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 	case "launch-on-host":
 		_, result, err := a.AWSService.LaunchOnHost(ctx, profile, action.HostID)
 		if err != nil {
-			fmt.Fprintf(a.Err, "aws launch-on-host failed: %v\n", err)
+			fmt.Fprint(a.Err, awsStoppedMessage("aws launch-on-host", err))
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
@@ -504,7 +504,7 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 	case "create":
 		_, result, err := a.AWSService.Create(ctx, profile)
 		if err != nil {
-			fmt.Fprintf(a.Err, "aws create failed: %v\n", err)
+			fmt.Fprint(a.Err, awsStoppedMessage("aws create", err))
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
@@ -529,6 +529,10 @@ func resolveProfileRef(cfg Config, ref string) (Profile, error) {
 		return cfg.ProfileByAppleEmail(ref)
 	}
 	return Profile{}, unknownProfileError(cfg, ref)
+}
+
+func awsStoppedMessage(operation string, err error) string {
+	return fmt.Sprintf("%s failed: %v\nStopped. Report this reason to the user and wait for explicit instructions before continuing.\n", operation, err)
 }
 
 func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {

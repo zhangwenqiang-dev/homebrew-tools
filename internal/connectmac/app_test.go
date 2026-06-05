@@ -321,6 +321,28 @@ func TestAppAWSWaitReady(t *testing.T) {
 	}
 }
 
+func TestAppAWSCreateFailureReportsReasonAndStops(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{
+			eip:    ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+			runErr: errString("RunInstances rejected selected host"),
+		}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "create", "xcode-vnc", "--confirm", "--config", config}); code != 1 {
+		t.Fatalf("aws create code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	for _, want := range []string{"aws create failed", "RunInstances rejected selected host", "Stopped", "wait for explicit instructions"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("err missing %q:\n%s", want, errOut.String())
+		}
+	}
+}
+
 func TestAppAWSDestroyResolvesAppleEmail(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
