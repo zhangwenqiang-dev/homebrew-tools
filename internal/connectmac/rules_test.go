@@ -157,7 +157,7 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 		"After a Dedicated Host is allocated, any EC2 launch/start failure must stop the create loop",
 		"Never terminate EC2 during open/create/launch-on-host recovery",
 		"When AWS create/open/launch-on-host fails, report the exact error reason",
-		"previously associated EC2 instance has terminated",
+		"Launch EC2 on a Dedicated Host only when the host state is available",
 		"Run GUI/VNC setup only after AWS readiness checks pass",
 		"cm_aws_setup_gui",
 	} {
@@ -177,7 +177,7 @@ func TestDefaultSkillTemplateIncludesTerminateSafetyRule(t *testing.T) {
 		"Never terminate EC2 during open/create/launch-on-host recovery",
 		"If a Dedicated Host exists, reuse that host",
 		"When AWS create/open/launch-on-host fails, report the exact error reason",
-		"previously associated EC2 instance has terminated",
+		"Launch EC2 on a Dedicated Host only when the host state is available",
 		"Run GUI/VNC setup only after AWS readiness checks pass",
 		"cm_aws_setup_gui",
 	} {

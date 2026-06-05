@@ -15,7 +15,7 @@ Follow these rules:
 6. Never terminate EC2 during open/create/launch-on-host recovery. Investigate or recover the EC2 launch/start failure on the existing Dedicated Host. Terminate EC2 only in an explicit destroy/release workflow after user confirmation.
 7. If a Dedicated Host exists, reuse that host and launch/recover EC2 on it instead of creating another Dedicated Host.
 8. When AWS create/open/launch-on-host fails, report the exact error reason, stop the current action, and wait for explicit user instructions before continuing.
-9. A pending but empty Dedicated Host may be previewed and attempted with explicit confirmation only after the previously associated EC2 instance has terminated and no longer appears on that host, usually after about 1 hour. If AWS rejects RunInstances, report that exact reason and stop.
+9. Launch EC2 on a Dedicated Host only when the host state is available. If the host is pending, stop and wait instead of attempting instance creation.
 10. Run GUI/VNC setup only after AWS readiness checks pass. Ask the user for the ec2-user password, never invent it, never write it to config/logs/output, and use it only for that setup operation.
 11. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
 12. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
