@@ -145,15 +145,11 @@ func normalizeAgentName(agent string) string {
 
 func connectMacSkillPath(skillsDir string) (string, error) {
 	if skillsDir == "" {
-		if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
-			skillsDir = filepath.Join(codexHome, "skills")
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("find home directory: %w", err)
-			}
-			skillsDir = filepath.Join(home, ".codex", "skills")
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("find home directory: %w", err)
 		}
+		skillsDir = filepath.Join(home, ".agents", "skills")
 	}
 	skillsDir, err := ExpandPath(skillsDir)
 	if err != nil {

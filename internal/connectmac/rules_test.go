@@ -33,17 +33,15 @@ func TestBuildRulesInstallAgentPaths(t *testing.T) {
 	}
 }
 
-func TestBuildRulesInstallUsesCodexHomeForSkill(t *testing.T) {
+func TestBuildRulesInstallUsesAgentsSkillsByDefault(t *testing.T) {
 	home := t.TempDir()
-	codexHome := t.TempDir()
 	project := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("CODEX_HOME", codexHome)
 	install, err := BuildRulesInstall("codex", project)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(codexHome, "skills", "connectmac-aws")
+	want := filepath.Join(home, ".agents", "skills", "connectmac-aws")
 	if install.SkillPath != want {
 		t.Fatalf("skill path = %q, want %q", install.SkillPath, want)
 	}
