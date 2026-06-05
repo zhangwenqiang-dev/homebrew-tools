@@ -175,6 +175,43 @@ func TestMCPAWSCreateFailureReportsReasonAndStops(t *testing.T) {
 	}
 }
 
+func TestMCPAWSSetupGUIRunsSSHScript(t *testing.T) {
+	app, config, runner := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-1",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-1"},
+		}}, nil
+	}
+	out := runMCPCall(t, app, config, "cm_aws_setup_gui", map[string]interface{}{
+		"apple_email":           "user@example.com",
+		"confirm":               true,
+		"password":              "secret-pass",
+		"password_confirmation": "secret-pass",
+	})
+	if !strings.Contains(out, "AWS Mac GUI setup completed") {
+		t.Fatalf("output = %q", out)
+	}
+	if strings.Contains(out, "secret-pass") {
+		t.Fatalf("password must not appear in mcp output: %q", out)
+	}
+	if len(runner.sshScript) == 0 {
+		t.Fatal("expected setup-gui to run SSH script")
+	}
+	if strings.Contains(strings.Join(runner.sshScript, " "), "secret-pass") {
+		t.Fatalf("password must not appear in ssh args: %v", runner.sshScript)
+	}
+	if !strings.Contains(runner.sshInput, "secret-pass") || !strings.Contains(runner.sshInput, "com.apple.screensharing") {
+		t.Fatalf("ssh input = %q", runner.sshInput)
+	}
+}
+
 func TestMCPAWSWaitReady(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
@@ -203,7 +240,7 @@ func TestMCPAWSWaitReady(t *testing.T) {
 func TestMCPToolsIncludesAWSHostWorkflow(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	out := runMCPToolsList(t, app, config)
-	for _, want := range []string{"cm_find_profile_by_apple", "cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
+	for _, want := range []string{"cm_find_profile_by_apple", "cm_aws_wait_ready", "cm_aws_setup_gui", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("tools output missing %q: %q", want, out)
 		}

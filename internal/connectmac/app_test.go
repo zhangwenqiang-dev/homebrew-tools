@@ -12,6 +12,8 @@ import (
 
 type fakeRunner struct {
 	foreground []string
+	sshScript  []string
+	sshInput   string
 	background []string
 	rsync      []string
 	forgotHost string
@@ -21,6 +23,12 @@ type fakeRunner struct {
 
 func (r *fakeRunner) RunForeground(ctx context.Context, args []string) error {
 	r.foreground = args
+	return nil
+}
+
+func (r *fakeRunner) RunSSHScript(ctx context.Context, args []string, input string) error {
+	r.sshScript = args
+	r.sshInput = input
 	return nil
 }
 
@@ -340,6 +348,66 @@ func TestAppAWSCreateFailureReportsReasonAndStops(t *testing.T) {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("err missing %q:\n%s", want, errOut.String())
 		}
+	}
+}
+
+func TestAppAWSSetupGUIRequiresReady(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "pending"}},
+			ElasticIP: ElasticIP{InstanceID: "i-1"},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "setup-gui", "xcode-vnc", "--confirm", "--config", config}); code != 1 {
+		t.Fatalf("aws setup-gui code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "AWS Mac is not ready") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppAWSSetupGUIRunsSSHScriptAfterConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	runner := &fakeRunner{}
+	app.Runner = runner
+	app.In = strings.NewReader("y\nsecret-pass\nsecret-pass\n")
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-1",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-1"},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "setup-gui", "xcode-vnc", "--confirm", "--config", config}); code != 0 {
+		t.Fatalf("aws setup-gui code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if len(runner.sshScript) == 0 {
+		t.Fatal("expected setup-gui to run SSH script")
+	}
+	if strings.Contains(strings.Join(runner.sshScript, " "), "secret-pass") {
+		t.Fatalf("password must not appear in ssh args: %v", runner.sshScript)
+	}
+	for _, want := range []string{"secret-pass", "dscl . -passwd /Users/ec2-user", "com.apple.screensharing"} {
+		if !strings.Contains(runner.sshInput, want) {
+			t.Fatalf("ssh input missing %q:\n%s", want, runner.sshInput)
+		}
+	}
+	if !strings.Contains(out.String(), "AWS Mac GUI setup completed") {
+		t.Fatalf("out = %q", out.String())
 	}
 }
 
