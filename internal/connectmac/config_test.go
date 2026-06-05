@@ -127,6 +127,24 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+func TestProfileByAppleEmail(t *testing.T) {
+	cfg, err := ParseConfig(sampleConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := cfg.ProfileByAppleEmail("USER@example.com")
+	if err != nil {
+		t.Fatalf("ProfileByAppleEmail returned error: %v", err)
+	}
+	if profile.Name != "xcode-vnc" {
+		t.Fatalf("profile = %q", profile.Name)
+	}
+	choices := FormatAppleAccountChoices(cfg)
+	if !strings.Contains(choices, "xcode-vnc: user@example.com") {
+		t.Fatalf("choices = %q", choices)
+	}
+}
+
 func TestExpandPath(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

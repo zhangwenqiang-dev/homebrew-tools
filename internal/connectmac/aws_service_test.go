@@ -178,6 +178,21 @@ func TestAWSStatusReadyRequiresAllChecksAndEIP(t *testing.T) {
 	}
 }
 
+func TestAWSOpenAction(t *testing.T) {
+	action := AWSOpenAction(AWSStatus{
+		Hosts: []DedicatedHostStatus{{HostID: "h-empty", State: "available"}},
+	})
+	if action.Kind != "launch-on-host" || action.HostID != "h-empty" {
+		t.Fatalf("action = %+v", action)
+	}
+	action = AWSOpenAction(AWSStatus{
+		ElasticIP: ElasticIP{InstanceID: "i-other"},
+	})
+	if action.Kind != "blocked" {
+		t.Fatalf("action = %+v", action)
+	}
+}
+
 func TestHostIDsFromInstancesDedupesEmptyValues(t *testing.T) {
 	got := hostIDsFromInstances([]InstanceStatus{
 		{InstanceID: "i-1", HostID: "h-1"},

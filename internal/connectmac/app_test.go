@@ -278,6 +278,20 @@ func TestAppAWSPlan(t *testing.T) {
 	}
 }
 
+func TestAppProfileFindByAppleEmail(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"profile", "find", "user@example.com", "--config", config}); code != 0 {
+		t.Fatalf("profile find code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Profile: xcode-vnc") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
 func TestAppAWSWaitReady(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -304,6 +318,23 @@ func TestAppAWSWaitReady(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "AWS Mac ready for profile xcode-vnc: true") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppAWSDestroyResolvesAppleEmail(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"aws", "destroy", "user@example.com", "--config", config}); code != 0 {
+		t.Fatalf("aws destroy by email code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"Resolved Apple account user@example.com -> profile xcode-vnc", "AWS Mac destroy preview", "retain the Elastic IP allocation"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy by email output missing %q:\n%s", want, text)
+		}
 	}
 }
 

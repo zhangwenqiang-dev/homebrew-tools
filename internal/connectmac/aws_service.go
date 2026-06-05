@@ -617,6 +617,35 @@ type AWSStatusOptions struct {
 	IncludeTerminal bool
 }
 
+type AWSOpenDecision struct {
+	Kind   string
+	HostID string
+	Detail string
+}
+
+func AWSOpenAction(status AWSStatus) AWSOpenDecision {
+	if AWSStatusReady(status) {
+		return AWSOpenDecision{Kind: "ready", Detail: "managed instance is already ready"}
+	}
+	for _, instance := range status.Instances {
+		if !isTerminalInstanceState(instance.State) {
+			return AWSOpenDecision{Kind: "wait-ready", Detail: fmt.Sprintf("managed instance %s is %s", instance.InstanceID, emptyStatus(instance.State))}
+		}
+	}
+	for _, host := range status.Hosts {
+		if host.State == "available" && len(host.InstanceIDs) == 0 {
+			return AWSOpenDecision{Kind: "launch-on-host", HostID: host.HostID, Detail: fmt.Sprintf("launch on available host %s", host.HostID)}
+		}
+		if !isTerminalHostState(host.State) {
+			return AWSOpenDecision{Kind: "blocked", Detail: fmt.Sprintf("host %s is %s", host.HostID, emptyStatus(host.State))}
+		}
+	}
+	if status.ElasticIP.InstanceID != "" {
+		return AWSOpenDecision{Kind: "blocked", Detail: fmt.Sprintf("elastic ip is associated with unmanaged instance %s", status.ElasticIP.InstanceID)}
+	}
+	return AWSOpenDecision{Kind: "create", Detail: "no active managed host or instance found"}
+}
+
 func FormatMacPlan(plan MacPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac plan for profile %s\n", plan.ProfileName)
@@ -642,6 +671,26 @@ func FormatMacPlan(plan MacPlan) string {
 	fmt.Fprintln(&b, "- Disable auto-assigned public IP")
 	fmt.Fprintln(&b, "- Verify Elastic IP owner tag before association")
 	fmt.Fprintln(&b, "- Associate Elastic IP to the new instance")
+	return b.String()
+}
+
+func FormatAWSOpenPreview(plan MacPlan, status AWSStatus) string {
+	action := AWSOpenAction(status)
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac open preview for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Apple account: %s\n", plan.AccountEmail)
+	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
+	fmt.Fprintf(&b, "Dedicated hosts: %d\n", len(status.Hosts))
+	fmt.Fprintf(&b, "Instances: %d\n", len(status.Instances))
+	fmt.Fprintf(&b, "Elastic IP: allocation=%s association=%s instance=%s public_ip=%s\n", status.ElasticIP.AllocationID, status.ElasticIP.AssociationID, status.ElasticIP.InstanceID, status.ElasticIP.PublicIP)
+	fmt.Fprintf(&b, "Decision: %s", action.Kind)
+	if action.HostID != "" {
+		fmt.Fprintf(&b, " host=%s", action.HostID)
+	}
+	if action.Detail != "" {
+		fmt.Fprintf(&b, " (%s)", action.Detail)
+	}
+	fmt.Fprintln(&b)
 	return b.String()
 }
 

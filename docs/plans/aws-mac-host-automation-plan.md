@@ -581,13 +581,30 @@ Completed in `v0.1.14`:
 - Profile-level `aws.ami` still overrides defaults.
 - Legacy `defaults.aws.ami` remains supported as a fallback.
 
+### Priority 6.3: Apple Account Lookup and Open Flow
+
+Operators think in Apple accounts, while `cm` stores implementation details in profiles. AWS EIP `Apple` tags are the unique AWS-side identity for each Apple account, so create/open/destroy workflows should be addressable by email.
+
+Implemented:
+
+- `cm profile accounts` lists configured profiles and Apple account emails.
+- `cm profile find <apple-email>` resolves an Apple account to the owning profile.
+- `cm aws <plan|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email>` accepts either a profile name or an Apple email.
+- `cm aws open <profile-or-apple-email>` inspects AWS state and chooses the safe next action: ready, wait-ready, launch-on-host, create, or block with a reason.
+- `cm aws destroy <apple-email>` resolves the profile by email and still only releases managed compute resources; Elastic IP allocations are retained.
+- MCP now exposes `cm_find_profile_by_apple`, `cm_aws_open_mac_by_email`, and `cm_aws_destroy_mac_by_email`.
+- MCP email tools require an explicit `apple_email`; when missing, they return the configured account list so the AI asks the user instead of inferring from context.
+
 ### Priority 7: Update MCP Tools
 
 Mirror the new CLI workflow in MCP so AI can safely continue after partial manual work.
 
-Proposed tools:
+Implemented tools:
 
 ```text
+cm_find_profile_by_apple
+cm_aws_open_mac_by_email
+cm_aws_destroy_mac_by_email
 cm_aws_adopt_host
 cm_aws_launch_on_host
 cm_aws_wait_ready

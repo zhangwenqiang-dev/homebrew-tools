@@ -197,7 +197,10 @@ cm mcp
 Preview AWS Mac Dedicated Host automation:
 
 ```bash
+cm profile accounts
+cm profile find user@example.com
 cm aws plan xcode-vnc
+cm aws open user@example.com
 cm aws status xcode-vnc
 cm aws status xcode-vnc --all
 cm aws wait-ready xcode-vnc
@@ -205,10 +208,12 @@ cm aws adopt xcode-vnc
 cm aws adopt-host xcode-vnc --host-id h-example
 cm aws launch-on-host xcode-vnc --host-id h-example
 cm aws create xcode-vnc
-cm aws destroy xcode-vnc
+cm aws destroy user@example.com
 ```
 
-`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and optional EBS status checks. Terminal resources such as terminated instances and released hosts are hidden by default; pass `--all` to include them for troubleshooting. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and system/instance status checks are `ok`; EBS status must be `ok` only when AWS reports it for that instance type. `cm aws adopt-host` tags an existing empty Dedicated Host as managed, and `cm aws launch-on-host` launches EC2 on a usable existing host. `cm aws create`, `cm aws adopt-host`, `cm aws launch-on-host`, and `cm aws destroy` preview by default; pass `--confirm` to execute AWS mutations. After a confirmed create or launch-on-host, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
+`cm profile accounts` lists configured Apple accounts, and `cm profile find <apple-email>` shows which profile owns an Apple account. AWS commands accept either a profile name or an Apple account email. Email lookup uses `aws.account_email` and the Elastic IP `Apple` owner tag, so Apple account remains the unique operator-facing identity for AWS Mac work.
+
+`cm aws plan` is local-only and does not call AWS APIs. `cm aws status` uses the configured AWS profile and region to describe managed Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 system, instance, and optional EBS status checks. Terminal resources such as terminated instances and released hosts are hidden by default; pass `--all` to include them for troubleshooting. `cm aws open` inspects current AWS state and then chooses the safe next action: report ready, wait for readiness, launch EC2 on an available managed host, or create a new host and instance. `cm aws wait-ready` waits until the managed EC2 instance is running, the Elastic IP is bound to that instance, and system/instance status checks are `ok`; EBS status must be `ok` only when AWS reports it for that instance type. `cm aws adopt-host` tags an existing empty Dedicated Host as managed, and `cm aws launch-on-host` launches EC2 on a usable existing host. `cm aws open`, `cm aws create`, `cm aws adopt-host`, `cm aws launch-on-host`, and `cm aws destroy` preview by default; pass `--confirm` to execute AWS mutations. After a confirmed open/create/launch-on-host, `cm` waits for AWS readiness checks before reporting the Mac ready; it does not run SSH probes during this wait.
 
 `cm aws destroy` disassociates the configured Elastic IP from the managed instance but keeps the Elastic IP allocation. If AWS takes too long to move a Mac instance from `shutting-down` to `terminated`, rerun the same destroy command later; `cm` skips already terminated instances and already released hosts, then continues the remaining release steps.
 

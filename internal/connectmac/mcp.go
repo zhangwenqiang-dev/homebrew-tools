@@ -77,7 +77,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.6",
+				"version": "0.1.15",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -110,6 +110,8 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	switch call.Name {
 	case "cm_list_profiles":
 		return mcpText(listProfilesText(cfg)), nil
+	case "cm_find_profile_by_apple":
+		return s.mcpFindProfileByApple(cfg, call.Arguments)
 	case "cm_check_profile":
 		profile, err := requireMCPProfile(cfg, call.Arguments)
 		if err != nil {
@@ -137,6 +139,8 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		return s.mcpAWSWaitReady(ctx, cfg, call.Arguments)
 	case "cm_aws_create_mac":
 		return s.mcpAWSCreateMac(ctx, cfg, call.Arguments)
+	case "cm_aws_open_mac_by_email":
+		return s.mcpAWSOpenMacByEmail(ctx, cfg, call.Arguments)
 	case "cm_aws_adopt_mac":
 		return s.mcpAWSAdoptMac(ctx, cfg, call.Arguments)
 	case "cm_aws_adopt_host":
@@ -145,9 +149,23 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		return s.mcpAWSLaunchOnHost(ctx, cfg, call.Arguments)
 	case "cm_aws_destroy_mac":
 		return s.mcpAWSDestroyMac(ctx, cfg, call.Arguments)
+	case "cm_aws_destroy_mac_by_email":
+		return s.mcpAWSDestroyMacByEmail(ctx, cfg, call.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", call.Name)
 	}
+}
+
+func (s MCPServer) mcpFindProfileByApple(cfg Config, args map[string]interface{}) (interface{}, error) {
+	email, err := requiredString(args, "apple_email")
+	if err != nil {
+		return mcpText("Apple account email is required. Ask the user to choose one.\n" + FormatAppleAccountChoices(cfg)), nil
+	}
+	profile, err := cfg.ProfileByAppleEmail(email)
+	if err != nil {
+		return mcpText(err.Error()), nil
+	}
+	return mcpText(fmt.Sprintf("Apple account: %s\nProfile: %s\nDescription: %s\n", email, profile.Name, profile.Description)), nil
 }
 
 func (s MCPServer) mcpPush(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -300,6 +318,62 @@ func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[str
 	return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, status)), nil
 }
 
+func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	email, _ := args["apple_email"].(string)
+	profile, err := requireMCPAppleProfile(cfg, args)
+	if err != nil {
+		return mcpText(err.Error()), nil
+	}
+	plan, err := s.App.AWSService.Plan(profile)
+	if err != nil {
+		return nil, err
+	}
+	if text := missingMCPInputText(profile, true); text != "" {
+		return mcpText(text), nil
+	}
+	_, status, err := s.App.AWSService.Status(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	text := fmt.Sprintf("Resolved Apple account %s -> profile %s\n", email, profile.Name) + FormatAWSOpenPreview(plan, status)
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true to open or wait for this Mac."), nil
+	}
+	action := AWSOpenAction(status)
+	switch action.Kind {
+	case "ready":
+		return mcpText(text + FormatAWSReadyStatus(plan, status)), nil
+	case "wait-ready":
+		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			return mcpText(text + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+		}
+		return mcpText(text + FormatAWSReadyStatus(plan, readyStatus)), nil
+	case "launch-on-host":
+		_, result, err := s.App.AWSService.LaunchOnHost(ctx, profile, action.HostID)
+		if err != nil {
+			return nil, err
+		}
+		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			return mcpText(text + FormatAWSCreateResult(plan, result) + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+		}
+		return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, readyStatus)), nil
+	case "create":
+		_, result, err := s.App.AWSService.Create(ctx, profile)
+		if err != nil {
+			return nil, err
+		}
+		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			return mcpText(text + FormatAWSCreateResult(plan, result) + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+		}
+		return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, readyStatus)), nil
+	default:
+		return mcpText(text + fmt.Sprintf("Cannot continue automatically: %s\n", action.Detail)), nil
+	}
+}
+
 func (s MCPServer) mcpAWSAdoptMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
@@ -399,6 +473,16 @@ func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[st
 		return nil, err
 	}
 	return mcpText(text + FormatAWSDestroyResult(plan, result)), nil
+}
+
+func (s MCPServer) mcpAWSDestroyMacByEmail(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, err := requireMCPAppleProfile(cfg, args)
+	if err != nil {
+		return mcpText(err.Error()), nil
+	}
+	args = cloneArgs(args)
+	args["profile"] = profile.Name
+	return s.mcpAWSDestroyMac(ctx, cfg, args)
 }
 
 func (s MCPServer) mcpMacPlan(cfg Config, args map[string]interface{}) (MacPlan, error) {
@@ -533,6 +617,22 @@ func requireMCPProfile(cfg Config, args map[string]interface{}) (Profile, error)
 	return profile, nil
 }
 
+func requireMCPAppleProfile(cfg Config, args map[string]interface{}) (Profile, error) {
+	email, err := requiredString(args, "apple_email")
+	if err != nil {
+		return Profile{}, fmt.Errorf("Apple account email is required. Ask the user to choose one.\n%s", FormatAppleAccountChoices(cfg))
+	}
+	return cfg.ProfileByAppleEmail(email)
+}
+
+func cloneArgs(args map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(args))
+	for key, value := range args {
+		out[key] = value
+	}
+	return out
+}
+
 func requiredString(args map[string]interface{}, name string) (string, error) {
 	value, ok := args[name]
 	if !ok {
@@ -561,6 +661,7 @@ func boolArg(args map[string]interface{}, name string) bool {
 func mcpTools() []map[string]interface{} {
 	return []map[string]interface{}{
 		mcpTool("cm_list_profiles", "List configured cm profiles.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
+		mcpTool("cm_find_profile_by_apple", "Find the cm profile for an explicit Apple account email. If the user did not provide an email, ask them to choose from configured accounts.", appleEmailSchema()),
 		mcpTool("cm_check_profile", "Validate a profile without connecting.", profileSchema()),
 		mcpTool("cm_push", "Preview or execute rsync upload. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
@@ -601,6 +702,14 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
+		mcpTool("cm_aws_open_mac_by_email", "Preview or open an AWS Mac for an explicit Apple account email. Never infer the email from context; ask the user if missing. Requires confirm=true to mutate AWS.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"apple_email": stringSchema(),
+				"confirm":     map[string]string{"type": "boolean"},
+			},
+			"required": []string{"apple_email"},
+		}),
 		mcpTool("cm_aws_adopt_mac", "Preview or tag existing AWS Mac resources as cm-managed. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -635,6 +744,14 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
+		mcpTool("cm_aws_destroy_mac_by_email", "Preview or release AWS Mac compute resources for an explicit Apple account email. This never releases Elastic IP allocations. Requires confirm=true to execute.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"apple_email": stringSchema(),
+				"confirm":     map[string]string{"type": "boolean"},
+			},
+			"required": []string{"apple_email"},
+		}),
 	}
 }
 
@@ -647,6 +764,14 @@ func profileSchema() map[string]interface{} {
 		"type":       "object",
 		"properties": map[string]interface{}{"profile": stringSchema()},
 		"required":   []string{"profile"},
+	}
+}
+
+func appleEmailSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{"apple_email": stringSchema()},
+		"required":   []string{"apple_email"},
 	}
 }
 

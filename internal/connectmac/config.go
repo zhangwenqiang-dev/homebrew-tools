@@ -694,6 +694,81 @@ func (c Config) Profile(name string) (Profile, bool) {
 	return p, ok
 }
 
+func (c Config) ProfilesByAppleEmail(email string) []Profile {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil
+	}
+	names := make([]string, 0, len(c.Profiles))
+	for name := range c.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var matches []Profile
+	for _, name := range names {
+		profile, _ := c.Profile(name)
+		for _, candidate := range profileAppleEmails(profile) {
+			if strings.ToLower(candidate) == email {
+				matches = append(matches, profile)
+				break
+			}
+		}
+	}
+	return matches
+}
+
+func (c Config) ProfileByAppleEmail(email string) (Profile, error) {
+	matches := c.ProfilesByAppleEmail(email)
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) == 0 {
+		return Profile{}, fmt.Errorf("no profile found for Apple account %q\n%s", email, FormatAppleAccountChoices(c))
+	}
+	names := make([]string, 0, len(matches))
+	for _, profile := range matches {
+		names = append(names, profile.Name)
+	}
+	return Profile{}, fmt.Errorf("multiple profiles found for Apple account %q: %s", email, strings.Join(names, ", "))
+}
+
+func FormatAppleAccountChoices(cfg Config) string {
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	fmt.Fprintln(&b, "Configured Apple accounts:")
+	for _, name := range names {
+		profile, _ := cfg.Profile(name)
+		email := profile.AWS.AccountEmail
+		if email == "" {
+			email = profile.AWS.ElasticIPOwnerTag.Value
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", name, emptyChoiceValue(email))
+	}
+	return b.String()
+}
+
+func profileAppleEmails(profile Profile) []string {
+	var emails []string
+	if profile.AWS.AccountEmail != "" {
+		emails = append(emails, profile.AWS.AccountEmail)
+	}
+	if strings.EqualFold(profile.AWS.ElasticIPOwnerTag.Key, "Apple") && profile.AWS.ElasticIPOwnerTag.Value != "" {
+		emails = append(emails, profile.AWS.ElasticIPOwnerTag.Value)
+	}
+	return emails
+}
+
+func emptyChoiceValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
 func (c *Config) ApplyDefaults() {
 	for name, profile := range c.Profiles {
 		profile.ApplyDefaults(c.Defaults)

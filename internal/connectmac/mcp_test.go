@@ -125,6 +125,37 @@ func TestMCPAWSPlan(t *testing.T) {
 	}
 }
 
+func TestMCPFindProfileByAppleEmail(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{
+		"apple_email": "user@example.com",
+	})
+	if !strings.Contains(out, "Profile: xcode-vnc") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestMCPFindProfileByAppleEmailAsksWhenMissing(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{})
+	if !strings.Contains(out, "Apple account email is required") || !strings.Contains(out, "xcode-vnc: user@example.com") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestMCPAWSOpenMacByEmailPreview(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	out := runMCPCall(t, app, config, "cm_aws_open_mac_by_email", map[string]interface{}{
+		"apple_email": "user@example.com",
+	})
+	if !strings.Contains(out, "Resolved Apple account user@example.com -> profile xcode-vnc") || !strings.Contains(out, "AWS Mac open preview") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
 func TestMCPAWSWaitReady(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
@@ -153,7 +184,7 @@ func TestMCPAWSWaitReady(t *testing.T) {
 func TestMCPToolsIncludesAWSHostWorkflow(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	out := runMCPToolsList(t, app, config)
-	for _, want := range []string{"cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host"} {
+	for _, want := range []string{"cm_find_profile_by_apple", "cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("tools output missing %q: %q", want, out)
 		}

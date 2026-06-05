@@ -66,6 +66,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 			return code
 		}
 		return a.runList(cfg)
+	case "profile":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runProfile(cfg, args[1:])
 	case "check":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -144,11 +150,11 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(a.Err, "usage: cm aws <plan|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile> [--confirm] [--all] [--host-id <id>]")
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email> [--confirm] [--all] [--host-id <id>]")
 		return 2
 	}
 	command := args[0]
-	profileName := args[1]
+	profileRef := args[1]
 	confirm := false
 	hostID := ""
 	includeTerminal := false
@@ -171,12 +177,15 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 			return 2
 		}
 	}
-	profile, ok := cfg.Profile(profileName)
-	if !ok {
-		fmt.Fprintln(a.Err, unknownProfileError(cfg, profileName))
+	profile, err := resolveProfileRef(cfg, profileRef)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 2
 	}
-	if (command == "create" || command == "adopt" || command == "adopt-host" || command == "launch-on-host") && confirm {
+	if profile.Name != profileRef {
+		fmt.Fprintf(a.Out, "Resolved Apple account %s -> profile %s\n", profileRef, profile.Name)
+	}
+	if (command == "open" || command == "create" || command == "adopt" || command == "adopt-host" || command == "launch-on-host") && confirm {
 		var creatorOK bool
 		profile, creatorOK = a.promptMissingAWSCreator(profile)
 		if !creatorOK {
@@ -198,6 +207,8 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	case "plan":
 		fmt.Fprint(a.Out, FormatMacPlan(plan))
 		return 0
+	case "open":
+		return a.runAWSOpen(ctx, profile, plan, confirm)
 	case "create":
 		fmt.Fprint(a.Out, FormatMacPlan(plan))
 		if !confirm {
@@ -356,6 +367,33 @@ func (a App) runList(cfg Config) int {
 	return 0
 }
 
+func (a App) runProfile(cfg Config, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(a.Err, "usage: cm profile <find|accounts> [apple-email]")
+		return 2
+	}
+	switch args[0] {
+	case "accounts":
+		fmt.Fprint(a.Out, FormatAppleAccountChoices(cfg))
+		return 0
+	case "find":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile find <apple-email>")
+			return 2
+		}
+		profile, err := cfg.ProfileByAppleEmail(args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		fmt.Fprintf(a.Out, "Apple account: %s\nProfile: %s\nDescription: %s\n", args[1], profile.Name, profile.Description)
+		return 0
+	default:
+		fmt.Fprintf(a.Err, "unknown profile command %q\n", args[0])
+		return 2
+	}
+}
+
 func (a App) runCheck(cfg Config, args []string) int {
 	profile, ok := requireProfileArg(a.Err, cfg, args)
 	if !ok {
@@ -370,6 +408,74 @@ func (a App) runCheck(cfg Config, args []string) int {
 	printSummary(a.Out, profile)
 	fmt.Fprintln(a.Out, "check passed")
 	return 0
+}
+
+func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, confirm bool) int {
+	_, status, err := a.AWSService.Status(ctx, profile)
+	if err != nil {
+		fmt.Fprintf(a.Err, "aws open failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(a.Out, FormatAWSOpenPreview(plan, status))
+	action := AWSOpenAction(status)
+	if !confirm {
+		fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to open or wait for this Mac.")
+		return 0
+	}
+	switch action.Kind {
+	case "ready":
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
+		return 0
+	case "wait-ready":
+		_, readyStatus, err := a.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, readyStatus))
+		return 0
+	case "launch-on-host":
+		_, result, err := a.AWSService.LaunchOnHost(ctx, profile, action.HostID)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws launch-on-host failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
+		_, readyStatus, err := a.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, readyStatus))
+		return 0
+	case "create":
+		_, result, err := a.AWSService.Create(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws create failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
+		_, readyStatus, err := a.AWSService.WaitReady(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, readyStatus))
+		return 0
+	default:
+		fmt.Fprintf(a.Err, "aws open cannot continue automatically: %s\n", action.Detail)
+		return 1
+	}
+}
+
+func resolveProfileRef(cfg Config, ref string) (Profile, error) {
+	if profile, ok := cfg.Profile(ref); ok {
+		return profile, nil
+	}
+	if strings.Contains(ref, "@") {
+		return cfg.ProfileByAppleEmail(ref)
+	}
+	return Profile{}, unknownProfileError(cfg, ref)
 }
 
 func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {
@@ -682,14 +788,17 @@ func (a App) printUsage() {
   cm push <profile> <local-path> <remote-dir> [--config <path>]
   cm forget-host <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
-  cm aws plan <profile> [--config <path>]
-  cm aws create <profile> [--confirm] [--config <path>]
-  cm aws status <profile> [--config <path>]
-  cm aws wait-ready <profile> [--config <path>]
-  cm aws adopt <profile> [--confirm] [--config <path>]
-  cm aws adopt-host <profile> --host-id <id> [--confirm] [--config <path>]
-  cm aws launch-on-host <profile> --host-id <id> [--confirm] [--config <path>]
-  cm aws destroy <profile> [--confirm] [--config <path>]
+  cm profile accounts [--config <path>]
+  cm profile find <apple-email> [--config <path>]
+  cm aws plan <profile-or-apple-email> [--config <path>]
+  cm aws open <profile-or-apple-email> [--confirm] [--config <path>]
+  cm aws create <profile-or-apple-email> [--confirm] [--config <path>]
+  cm aws status <profile-or-apple-email> [--config <path>]
+  cm aws wait-ready <profile-or-apple-email> [--config <path>]
+  cm aws adopt <profile-or-apple-email> [--confirm] [--config <path>]
+  cm aws adopt-host <profile-or-apple-email> --host-id <id> [--confirm] [--config <path>]
+  cm aws launch-on-host <profile-or-apple-email> --host-id <id> [--confirm] [--config <path>]
+  cm aws destroy <profile-or-apple-email> [--confirm] [--config <path>]
   cm mcp [--config <path>]
   cm stop <profile>
   cm status
