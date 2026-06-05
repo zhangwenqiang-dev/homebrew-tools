@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 type Runner interface {
@@ -572,7 +573,7 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 	}
 	pid, err := a.Runner.StartBackground(ctx, sshArgs)
 	if err != nil {
-		fmt.Fprintf(a.Err, "start ssh: %v\n", err)
+		fmt.Fprintf(a.Err, "start ssh tunnel failed: %v\n", err)
 		return 1
 	}
 	if err := a.StateManager.Save(NewState(profile, pid)); err != nil {
@@ -899,7 +900,21 @@ func (ExecRunner) StartBackground(ctx context.Context, args []string) (int, erro
 		return 0, err
 	}
 	pid := cmd.Process.Pid
-	return pid, cmd.Process.Release()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("ssh tunnel exited before it became healthy")
+	case <-timer.C:
+		return pid, cmd.Process.Release()
+	}
 }
 
 func (ExecRunner) Stop(pid int) error {

@@ -854,7 +854,11 @@ func FormatAWSStatus(plan MacPlan, status AWSStatus) string {
 }
 
 func FormatAWSReadyStatus(plan MacPlan, status AWSStatus) string {
-	return fmt.Sprintf("AWS Mac ready for profile %s: %t\n%s\n", plan.ProfileName, AWSStatusReady(status), AWSReadinessSummary(status))
+	return fmt.Sprintf("AWS Mac ready for profile %s: %t\n%s\n%s", plan.ProfileName, AWSStatusReady(status), AWSReadinessSummary(status), FormatAWSManualSetupGuide(plan))
+}
+
+func FormatAWSManualSetupGuide(plan MacPlan) string {
+	return fmt.Sprintf("Manual GUI setup:\n  cm ssh %s\n  sudo passwd ec2-user\n  sudo launchctl enable system/com.apple.screensharing\n  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  cm start %s\n  cm open-vnc %s\n", plan.ProfileName, plan.ProfileName, plan.ProfileName)
 }
 
 func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {

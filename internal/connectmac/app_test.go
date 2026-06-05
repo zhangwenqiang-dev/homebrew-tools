@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 type fakeRunner struct {
 	foreground []string
 	background []string
+	startErr   error
 	rsync      []string
 	forgotHost string
 	openedURL  string
@@ -26,6 +28,9 @@ func (r *fakeRunner) RunForeground(ctx context.Context, args []string) error {
 
 func (r *fakeRunner) StartBackground(ctx context.Context, args []string) (int, error) {
 	r.background = args
+	if r.startErr != nil {
+		return 0, r.startErr
+	}
 	return 55, nil
 }
 
@@ -182,6 +187,51 @@ func TestAppSSHUsesRunner(t *testing.T) {
 	}
 }
 
+func TestAppStartSavesStateAfterHealthyTunnel(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, err = %s", code, errOut.String())
+	}
+	if len(runner.background) == 0 {
+		t.Fatal("expected background runner to be called")
+	}
+	if !strings.Contains(out.String(), "started xcode-vnc with pid 55") {
+		t.Fatalf("out = %q", out.String())
+	}
+	state, ok, err := app.StateManager.Load("xcode-vnc")
+	if err != nil || !ok || state.PID != 55 {
+		t.Fatalf("state = %+v ok=%t err=%v", state, ok, err)
+	}
+}
+
+func TestAppStartDoesNotSaveStateWhenTunnelFailsHealthCheck(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{startErr: errors.New("Permission denied (publickey)")}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if strings.Contains(out.String(), "started") {
+		t.Fatalf("should not report started on failed health check: %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "Permission denied") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || ok {
+		t.Fatalf("state should not be saved, ok=%t err=%v", ok, err)
+	}
+}
+
 func TestAppPullUsesRsyncRunner(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -318,6 +368,9 @@ func TestAppAWSWaitReady(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "AWS Mac ready for profile xcode-vnc: true") {
 		t.Fatalf("out = %q", out.String())
+	}
+	if !strings.Contains(out.String(), "Manual GUI setup:") || !strings.Contains(out.String(), "sudo passwd ec2-user") {
+		t.Fatalf("ready output missing manual setup guide:\n%s", out.String())
 	}
 }
 
