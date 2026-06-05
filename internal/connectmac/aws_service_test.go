@@ -562,7 +562,7 @@ func TestAWSServiceLaunchOnHostPreviewAllowsPendingHost(t *testing.T) {
 		t.Fatalf("unexpected preview: %+v", preview)
 	}
 	text := FormatAWSLaunchOnHostPreview(plan, preview)
-	if !strings.Contains(text, "Host state: pending") || !strings.Contains(text, "Warning: host is pending") {
+	if !strings.Contains(text, "Host state: pending") || !strings.Contains(text, "previously associated EC2 instance has terminated") {
 		t.Fatalf("preview text missing pending warning:\n%s", text)
 	}
 }

@@ -795,7 +795,7 @@ func FormatAWSLaunchOnHostPreview(plan MacPlan, preview AWSLaunchOnHostPreview) 
 	fmt.Fprintf(&b, "Host: %s\n", preview.HostID)
 	fmt.Fprintf(&b, "Host state: %s\n", emptyStatus(preview.HostState))
 	if preview.HostState == "pending" {
-		fmt.Fprintln(&b, "Warning: host is pending; cm will allow a confirmed launch-on-host attempt, but AWS may still reject RunInstances.")
+		fmt.Fprintln(&b, "Warning: host is pending; attempt only after the previously associated EC2 instance has terminated and no longer appears on this host, usually after about 1 hour. AWS may still reject RunInstances.")
 	}
 	fmt.Fprintf(&b, "Selected: %s %s %s\n", preview.AvailabilityZoneID, preview.InstanceType, preview.AMI)
 	fmt.Fprintf(&b, "Subnet: %s\n", preview.SubnetID)
