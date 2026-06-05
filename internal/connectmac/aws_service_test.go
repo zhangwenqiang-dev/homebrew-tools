@@ -260,7 +260,7 @@ func TestAWSServiceCreateAllocatesRunsAndAssociates(t *testing.T) {
 	if result.SubnetID != "<subnet-id>" {
 		t.Fatalf("subnet id = %q", result.SubnetID)
 	}
-	want := []string{"verify-eip", "offerings:mac2.metal", "subnet:<subnet-id>", "allocate:usw2-az1:mac2.metal", "run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
+	want := []string{"verify-eip", "offerings:mac2.metal", "subnet:<subnet-id>", "allocate:usw2-az1:mac2.metal", "run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "status", "associate:<elastic-ip-allocation-id>:i-created"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
@@ -355,6 +355,30 @@ func TestAWSServiceCreateRejectsWrongEIPOwner(t *testing.T) {
 	_, _, err := service.Create(context.Background(), validAWSProfile())
 	if err == nil || !strings.Contains(err.Error(), "missing required owner tag") {
 		t.Fatalf("expected owner tag error, got %v", err)
+	}
+}
+
+func TestAWSServiceCreateStopsAfterHostAllocatedWhenEIPAssociationFails(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.InstanceTypePriority = []string{"mac2.metal", "mac2-m2.metal"}
+	fake := &fakeAWSClient{
+		eip:          ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		associateErr: fmt.Errorf("instance pending"),
+	}
+	service := testAWSService(fake)
+	_, _, err := service.Create(context.Background(), profile)
+	if err == nil || !strings.Contains(err.Error(), "stop retrying") {
+		t.Fatalf("expected stop retrying error, got %v", err)
+	}
+	calls := strings.Join(fake.calls, ",")
+	if strings.Count(calls, "allocate:") != 1 {
+		t.Fatalf("expected exactly one host allocation, calls = %v", fake.calls)
+	}
+	if strings.Contains(calls, "mac2-m2.metal") {
+		t.Fatalf("must not try next instance type after host allocation, calls = %v", fake.calls)
+	}
+	if strings.Contains(calls, "terminate:") || strings.Contains(calls, "release:") {
+		t.Fatalf("must not auto-terminate/release after association failure, calls = %v", fake.calls)
 	}
 }
 
@@ -495,7 +519,7 @@ func TestAWSServiceLaunchOnHostRunsInstanceAndAssociatesEIP(t *testing.T) {
 	if result.HostID != "h-empty" || result.InstanceID != "i-created" || result.SubnetID != "<subnet-id>" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	want := []string{"host:h-empty", "subnet:<subnet-id>", "verify-eip", "run:h-empty:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "associate:<elastic-ip-allocation-id>:i-created"}
+	want := []string{"host:h-empty", "subnet:<subnet-id>", "verify-eip", "run:h-empty:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "status", "associate:<elastic-ip-allocation-id>:i-created"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
@@ -537,6 +561,7 @@ type fakeAWSClient struct {
 	eip            ElasticIP
 	offerings      map[string][]string
 	subnetAZs      map[string]string
+	associateErr   error
 }
 
 func (c *fakeAWSClient) CallerIdentity(ctx context.Context) (CallerIdentity, error) {
@@ -594,6 +619,9 @@ func (c *fakeAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabi
 
 func (c *fakeAWSClient) RunInstance(ctx context.Context, plan MacPlan, hostID, instanceType, amiID string) (string, error) {
 	c.calls = append(c.calls, fmt.Sprintf("run:%s:%s:%s:%s", hostID, plan.SubnetID, instanceType, amiID))
+	if len(c.statusSequence) == 0 && len(c.status.Instances) == 0 {
+		c.status.Instances = []InstanceStatus{{InstanceID: "i-created", State: "running", InstanceType: instanceType, HostID: hostID, Tags: managedTestTags()}}
+	}
 	return "i-created", nil
 }
 
@@ -607,6 +635,9 @@ func (c *fakeAWSClient) VerifyElasticIPOwner(ctx context.Context, plan MacPlan) 
 
 func (c *fakeAWSClient) AssociateElasticIP(ctx context.Context, allocationID, instanceID string) (string, error) {
 	c.calls = append(c.calls, fmt.Sprintf("associate:%s:%s", allocationID, instanceID))
+	if c.associateErr != nil {
+		return "", c.associateErr
+	}
 	return "eipassoc-created", nil
 }
 

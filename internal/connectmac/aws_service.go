@@ -238,24 +238,26 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 				lastErr = err
 				continue
 			}
+			attempt.Detail = fmt.Sprintf("host=%s", hostID)
 			instanceID, err := client.RunInstance(ctx, attemptPlan, hostID, instanceType, ami)
 			if err != nil {
-				_ = client.ReleaseHost(ctx, hostID)
 				attempt.Status = "failed"
-				attempt.Detail = err.Error()
+				attempt.Detail = fmt.Sprintf("host=%s; %s", hostID, err.Error())
 				attempts = append(attempts, attempt)
-				lastErr = err
-				continue
+				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("dedicated host %s was allocated; stop retrying and fix instance launch: %w", hostID, err)}
+			}
+			if err := s.waitInstanceRunning(ctx, client, plan, instanceID); err != nil {
+				attempt.Status = "failed"
+				attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
+				attempts = append(attempts, attempt)
+				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and wait or clean up: %w", hostID, instanceID, err)}
 			}
 			associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
 			if err != nil {
-				_ = client.TerminateInstance(ctx, instanceID)
-				_ = client.ReleaseHost(ctx, hostID)
 				attempt.Status = "failed"
-				attempt.Detail = err.Error()
+				attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
 				attempts = append(attempts, attempt)
-				lastErr = err
-				continue
+				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and fix elastic ip association: %w", hostID, instanceID, err)}
 			}
 			attempt.Status = "created"
 			attempt.Detail = fmt.Sprintf("host=%s instance=%s", hostID, instanceID)
@@ -324,9 +326,11 @@ func (s AWSService) LaunchOnHost(ctx context.Context, profile Profile, hostID st
 	if err != nil {
 		return MacPlan{}, AWSCreateResult{}, err
 	}
+	if err := s.waitInstanceRunning(ctx, client, plan, instanceID); err != nil {
+		return MacPlan{}, AWSCreateResult{}, err
+	}
 	associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
 	if err != nil {
-		_ = client.TerminateInstance(ctx, instanceID)
 		return MacPlan{}, AWSCreateResult{}, err
 	}
 	return plan, AWSCreateResult{
@@ -434,6 +438,45 @@ func InstanceReady(instance InstanceStatus, eip ElasticIP) bool {
 
 func optionalEBSReady(status string) bool {
 	return status == "" || status == "ok"
+}
+
+func (s AWSService) waitInstanceRunning(ctx context.Context, client AWSClient, plan MacPlan, instanceID string) error {
+	timeout := s.ReadyTimeout
+	if timeout == 0 {
+		timeout = 45 * time.Minute
+	}
+	interval := s.ReadyPollInterval
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		status, err := client.DescribeStatus(ctx, plan)
+		if err != nil {
+			return err
+		}
+		for _, instance := range status.Instances {
+			if instance.InstanceID != instanceID {
+				continue
+			}
+			switch instance.State {
+			case "running":
+				return nil
+			case "shutting-down", "terminated", "stopping", "stopped":
+				return fmt.Errorf("instance %s entered %s before elastic ip association", instanceID, instance.State)
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for instance %s to become running", instanceID)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func AWSReadinessSummary(status AWSStatus) string {
