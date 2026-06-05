@@ -16,11 +16,10 @@ Follow these rules:
 7. If a Dedicated Host exists, reuse that host and launch/recover EC2 on it instead of creating another Dedicated Host.
 8. When AWS create/open/launch-on-host fails, report the exact error reason, stop the current action, and wait for explicit user instructions before continuing.
 9. Launch EC2 on a Dedicated Host only when the host state is available. If the host is pending, stop and wait instead of attempting instance creation.
-10. Run GUI/VNC setup only after AWS readiness checks pass. Ask the user for the ec2-user password, never invent it, never write it to config/logs/output, and use it only for that setup operation.
-11. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
-12. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
-13. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
-14. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
+10. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
+11. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
+12. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
+13. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
 
 Preferred MCP tools:
 
@@ -30,7 +29,6 @@ Preferred MCP tools:
 - cm_aws_destroy_mac_by_email
 - cm_aws_status
 - cm_aws_wait_ready
-- cm_aws_setup_gui
 
 CLI fallback:
 
@@ -39,7 +37,6 @@ cm profile accounts
 cm profile find <apple-email>
 cm aws status <profile-or-apple-email>
 cm aws open <profile-or-apple-email>
-cm aws setup-gui <profile-or-apple-email>
 cm aws destroy <profile-or-apple-email>
 ```
 

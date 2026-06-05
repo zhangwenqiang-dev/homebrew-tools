@@ -10,13 +10,10 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-
-	"golang.org/x/term"
 )
 
 type Runner interface {
 	RunForeground(ctx context.Context, args []string) error
-	RunSSHScript(ctx context.Context, args []string, input string) error
 	StartBackground(ctx context.Context, args []string) (int, error)
 	Stop(pid int) error
 	RunRsync(ctx context.Context, args []string) error
@@ -155,7 +152,7 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(a.Err, "usage: cm aws <plan|open|create|status|wait-ready|setup-gui|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email> [--confirm] [--all] [--host-id <id>]")
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email> [--confirm] [--all] [--host-id <id>]")
 		return 2
 	}
 	command := args[0]
@@ -252,8 +249,6 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		}
 		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
-	case "setup-gui":
-		return a.runAWSSetupGUI(ctx, profile, plan, confirm)
 	case "adopt":
 		_, status, err := a.AWSService.AdoptionPreview(ctx, profile)
 		if err != nil {
@@ -828,26 +823,6 @@ func (a App) promptLine(prompt string) string {
 	return strings.TrimSpace(line)
 }
 
-func (a App) promptSecret(prompt string) (string, error) {
-	if a.In == nil {
-		return "", nil
-	}
-	fmt.Fprint(a.Err, prompt)
-	if file, ok := a.In.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-		value, err := term.ReadPassword(int(file.Fd()))
-		fmt.Fprintln(a.Err)
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimRight(string(value), "\r\n"), nil
-	}
-	line, err := readInputLine(a.In)
-	if err != nil && len(line) == 0 {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
 func readInputLine(r io.Reader) (string, error) {
 	if byteReader, ok := r.(interface {
 		ReadByte() (byte, error)
@@ -898,7 +873,6 @@ func (a App) printUsage() {
   cm aws create <profile-or-apple-email> [--confirm] [--config <path>]
   cm aws status <profile-or-apple-email> [--config <path>]
   cm aws wait-ready <profile-or-apple-email> [--config <path>]
-  cm aws setup-gui <profile-or-apple-email> [--confirm] [--config <path>]
   cm aws adopt <profile-or-apple-email> [--confirm] [--config <path>]
   cm aws adopt-host <profile-or-apple-email> --host-id <id> [--confirm] [--config <path>]
   cm aws launch-on-host <profile-or-apple-email> --host-id <id> [--confirm] [--config <path>]
@@ -912,14 +886,6 @@ func (a App) printUsage() {
 func (ExecRunner) RunForeground(ctx context.Context, args []string) error {
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func (ExecRunner) RunSSHScript(ctx context.Context, args []string, input string) error {
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	cmd.Stdin = strings.NewReader(input)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

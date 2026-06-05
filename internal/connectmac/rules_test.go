@@ -158,8 +158,6 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 		"Never terminate EC2 during open/create/launch-on-host recovery",
 		"When AWS create/open/launch-on-host fails, report the exact error reason",
 		"Launch EC2 on a Dedicated Host only when the host state is available",
-		"Run GUI/VNC setup only after AWS readiness checks pass",
-		"cm_aws_setup_gui",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("out missing %q = %q", want, out.String())
@@ -178,8 +176,6 @@ func TestDefaultSkillTemplateIncludesTerminateSafetyRule(t *testing.T) {
 		"If a Dedicated Host exists, reuse that host",
 		"When AWS create/open/launch-on-host fails, report the exact error reason",
 		"Launch EC2 on a Dedicated Host only when the host state is available",
-		"Run GUI/VNC setup only after AWS readiness checks pass",
-		"cm_aws_setup_gui",
 	} {
 		if !strings.Contains(skill, want) {
 			t.Fatalf("skill template missing %q", want)

@@ -57,24 +57,3 @@ func TestInteractiveSSHArgs(t *testing.T) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
-
-func TestSSHScriptArgs(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	profile := validProfile("~/.ssh/example.pem")
-	got, err := SSHScriptArgs(profile)
-	if err != nil {
-		t.Fatalf("SSHScriptArgs returned error: %v", err)
-	}
-	wantKey := filepath.Join(home, ".ssh", "example.pem")
-	want := []string{
-		"-i", wantKey,
-		"-o", "ServerAliveInterval=30",
-		"-o", "ServerAliveCountMax=3",
-		"user@mac-host.example.com",
-		"/bin/bash", "-s",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("args = %#v, want %#v", got, want)
-	}
-}

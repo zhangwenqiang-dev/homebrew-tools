@@ -77,7 +77,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.26",
+				"version": "0.1.27",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -137,8 +137,6 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 		return s.mcpAWSStatus(ctx, cfg, call.Arguments)
 	case "cm_aws_wait_ready":
 		return s.mcpAWSWaitReady(ctx, cfg, call.Arguments)
-	case "cm_aws_setup_gui":
-		return s.mcpAWSSetupGUI(ctx, cfg, call.Arguments)
 	case "cm_aws_create_mac":
 		return s.mcpAWSCreateMac(ctx, cfg, call.Arguments)
 	case "cm_aws_open_mac_by_email":
@@ -318,45 +316,6 @@ func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[str
 		return mcpText(text + FormatAWSCreateResult(plan, result) + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
 	}
 	return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, status)), nil
-}
-
-func (s MCPServer) mcpAWSSetupGUI(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
-	profile, plan, err := s.mcpAppleOrProfilePlan(cfg, args)
-	if err != nil {
-		return mcpText(err.Error()), nil
-	}
-	if text := missingMCPInputText(profile, true); text != "" {
-		return mcpText(text), nil
-	}
-	_, status, err := s.App.AWSService.Status(ctx, profile)
-	if err != nil {
-		return nil, err
-	}
-	text := FormatAWSSetupGUIPreview(plan, profile, status)
-	if !boolArg(args, "confirm") {
-		return mcpText(text + "Preview only. Call again with confirm=true, password, and password_confirmation to set the ec2-user password and enable macOS Screen Sharing."), nil
-	}
-	if !AWSStatusReady(status) {
-		return mcpText(text + fmt.Sprintf("Cannot continue: AWS Mac is not ready: %s\n", AWSReadinessSummary(status))), nil
-	}
-	password, err := requiredString(args, "password")
-	if err != nil {
-		return mcpText(text + "missing required input: password\n"), nil
-	}
-	confirmation, err := requiredString(args, "password_confirmation")
-	if err != nil {
-		return mcpText(text + "missing required input: password_confirmation\n"), nil
-	}
-	if password != confirmation {
-		return mcpText(text + "passwords do not match\n"), nil
-	}
-	if err := validateSetupGUIPassword(password); err != nil {
-		return mcpText(text + err.Error() + "\n"), nil
-	}
-	if err := s.App.executeSetupGUI(ctx, profile, password); err != nil {
-		return mcpText(text + awsStoppedMessage("AWS setup-gui", err)), nil
-	}
-	return mcpText(text + "AWS Mac GUI setup completed."), nil
 }
 
 func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -542,22 +501,6 @@ func (s MCPServer) mcpMacProfilePlan(cfg Config, args map[string]interface{}) (P
 	}
 	plan, err := s.App.AWSService.Plan(profile)
 	return profile, plan, err
-}
-
-func (s MCPServer) mcpAppleOrProfilePlan(cfg Config, args map[string]interface{}) (Profile, MacPlan, error) {
-	if email, _ := args["apple_email"].(string); strings.TrimSpace(email) != "" {
-		profile, err := requireMCPAppleProfile(cfg, args)
-		if err != nil {
-			return Profile{}, MacPlan{}, err
-		}
-		errs := s.App.Validator.ValidateAWSProfile(profile)
-		if len(errs) > 0 {
-			return Profile{}, MacPlan{}, errors.New(strings.TrimSpace(formatErrors(errs)))
-		}
-		plan, err := s.App.AWSService.Plan(profile)
-		return profile, plan, err
-	}
-	return s.mcpMacProfilePlan(cfg, args)
 }
 
 func readMCPMessage(reader *bufio.Reader) ([]byte, error) {
@@ -751,17 +694,6 @@ func mcpTools() []map[string]interface{} {
 		mcpTool("cm_aws_plan", "Preview AWS Mac Dedicated Host, EC2, and EIP operations for a profile.", profileSchema()),
 		mcpTool("cm_aws_status", "Describe managed AWS Mac Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 status checks for a profile.", profileSchema()),
 		mcpTool("cm_aws_wait_ready", "Wait until the managed AWS Mac EC2 instance is running, EIP-bound, and system, instance, and EBS status checks are ok.", profileSchema()),
-		mcpTool("cm_aws_setup_gui", "Preview or configure AWS Mac GUI access after the instance is ready. Requires confirm=true, password, and password_confirmation to set ec2-user password and enable macOS Screen Sharing.", map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"profile":               stringSchema(),
-				"apple_email":           stringSchema(),
-				"confirm":               map[string]string{"type": "boolean"},
-				"password":              stringSchema(),
-				"password_confirmation": stringSchema(),
-			},
-			"additionalProperties": false,
-		}),
 		mcpTool("cm_aws_create_mac", "Preview or execute AWS Mac creation. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
