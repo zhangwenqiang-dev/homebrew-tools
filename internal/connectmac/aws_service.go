@@ -301,6 +301,7 @@ func (s AWSService) LaunchOnHostPreview(ctx context.Context, profile Profile, ho
 	}
 	return plan, AWSLaunchOnHostPreview{
 		HostID:             host.HostID,
+		HostState:          host.State,
 		AvailabilityZoneID: host.ZoneID,
 		InstanceType:       instanceType,
 		AMI:                ami,
@@ -378,8 +379,8 @@ func validateHostForProfile(plan MacPlan, host DedicatedHostStatus) error {
 	if host.HostID == "" {
 		return fmt.Errorf("dedicated host id is empty")
 	}
-	if host.State != "available" {
-		return fmt.Errorf("dedicated host %s state is %s, want available", host.HostID, emptyStatus(host.State))
+	if host.State != "available" && host.State != "pending" {
+		return fmt.Errorf("dedicated host %s state is %s, want available or pending", host.HostID, emptyStatus(host.State))
 	}
 	if len(host.InstanceIDs) > 0 {
 		return fmt.Errorf("dedicated host %s is not empty; running instances: %s", host.HostID, strings.Join(host.InstanceIDs, ", "))
@@ -650,6 +651,7 @@ type AWSAdoptResult struct {
 
 type AWSLaunchOnHostPreview struct {
 	HostID             string
+	HostState          string
 	AvailabilityZoneID string
 	InstanceType       string
 	AMI                string
@@ -791,6 +793,10 @@ func FormatAWSLaunchOnHostPreview(plan MacPlan, preview AWSLaunchOnHostPreview) 
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac launch-on-host preview for profile %s\n", plan.ProfileName)
 	fmt.Fprintf(&b, "Host: %s\n", preview.HostID)
+	fmt.Fprintf(&b, "Host state: %s\n", emptyStatus(preview.HostState))
+	if preview.HostState == "pending" {
+		fmt.Fprintln(&b, "Warning: host is pending; cm will allow a confirmed launch-on-host attempt, but AWS may still reject RunInstances.")
+	}
 	fmt.Fprintf(&b, "Selected: %s %s %s\n", preview.AvailabilityZoneID, preview.InstanceType, preview.AMI)
 	fmt.Fprintf(&b, "Subnet: %s\n", preview.SubnetID)
 	fmt.Fprintf(&b, "Elastic IP allocation: %s\n", plan.ElasticIPAllocationID)

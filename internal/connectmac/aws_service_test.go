@@ -549,6 +549,24 @@ func TestAWSServiceLaunchOnHostRunsInstanceAndAssociatesEIP(t *testing.T) {
 	}
 }
 
+func TestAWSServiceLaunchOnHostPreviewAllowsPendingHost(t *testing.T) {
+	fake := &fakeAWSClient{
+		host: DedicatedHostStatus{HostID: "h-pending", State: "pending", InstanceType: "mac2-m2.metal", ZoneID: "usw2-az1"},
+	}
+	service := testAWSService(fake)
+	plan, preview, err := service.LaunchOnHostPreview(context.Background(), validAWSProfile(), "h-pending")
+	if err != nil {
+		t.Fatalf("LaunchOnHostPreview returned error: %v", err)
+	}
+	if preview.HostState != "pending" || preview.HostID != "h-pending" {
+		t.Fatalf("unexpected preview: %+v", preview)
+	}
+	text := FormatAWSLaunchOnHostPreview(plan, preview)
+	if !strings.Contains(text, "Host state: pending") || !strings.Contains(text, "Warning: host is pending") {
+		t.Fatalf("preview text missing pending warning:\n%s", text)
+	}
+}
+
 func testAWSService(fake *fakeAWSClient) AWSService {
 	return AWSService{
 		Now: func() time.Time {
