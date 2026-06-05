@@ -59,7 +59,9 @@ func (a App) Run(ctx context.Context, args []string) int {
 	command := args[0]
 	switch command {
 	case "init":
-		return a.runInit(configPath)
+		return a.runInit(configPath, args[1:])
+	case "init-rules":
+		return a.runInitRules(args[1:])
 	case "list":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -340,7 +342,11 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	}
 }
 
-func (a App) runInit(configPath string) int {
+func (a App) runInit(configPath string, args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintf(a.Err, "unknown init option %q\n", args[0])
+		return 2
+	}
 	path, err := ExpandPath(configPath)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -359,6 +365,38 @@ func (a App) runInit(configPath string) int {
 		return 1
 	}
 	fmt.Fprintf(a.Out, "created config: %s\n", path)
+	if strings.EqualFold(a.promptLine("Initialize AI rules now? [y/N]: "), "y") {
+		return a.runInitRules(nil)
+	}
+	return 0
+}
+
+func (a App) runInitRules(args []string) int {
+	options, err := parseInitRulesOptions(args)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 2
+	}
+	agent := options.Agent
+	if agent == "" {
+		agent = strings.ToLower(a.promptLine("Agent for AI rules (Codex/Claude/Trae/Cursor): "))
+	}
+	options.Agent = agent
+	install, err := BuildRulesInstallWithOptions(options)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	result, err := InstallRules(install)
+	if err != nil {
+		fmt.Fprintf(a.Err, "init rules failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "created rules source: %s\n", result.SourcePath)
+	fmt.Fprintf(a.Out, "installed %s rules: %s\n", result.Agent, result.AgentPath)
+	fmt.Fprintf(a.Out, "installed connectmac-aws skill: %s\n", result.SkillPath)
+	fmt.Fprintln(a.Out, "Rule content source: ~/.connectmac/rules.md")
+	fmt.Fprintln(a.Out, "Ask your AI agent to remember the rule content exactly and keep it as long-term memory.")
 	return 0
 }
 
@@ -779,6 +817,7 @@ func (a App) loadConfig(path string) (Config, int) {
 func (a App) printUsage() {
 	fmt.Fprint(a.Out, `Usage:
   cm init [--config <path>]
+  cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>]
   cm list [--config <path>]
   cm check <profile> [--config <path>]
   cm connect <profile> [--config <path>]

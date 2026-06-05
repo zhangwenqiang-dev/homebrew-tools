@@ -188,6 +188,18 @@ Use a custom config path:
 cm list --config ./examples/config.yaml
 ```
 
+Initialize AI safety rules for supported agents:
+
+```bash
+cm init-rules --agent codex --project .
+cm init-rules --agent claude --project .
+cm init-rules --agent cursor --project .
+cm init-rules --agent trae --project .
+cm init-rules --agent codex --project . --skills-dir ~/.codex/skills
+```
+
+`cm init-rules` writes the source rule file to `~/.connectmac/rules.md`, syncs the same rule block into the selected agent location, and installs the `connectmac-aws` skill. Codex/Trae rules go to `AGENTS.md`, Claude rules go to `CLAUDE.md`, and Cursor rules go to `.cursor/rules/connectmac.mdc`. The skill is installed to `$CODEX_HOME/skills/connectmac-aws` when `CODEX_HOME` is set, otherwise `~/.codex/skills/connectmac-aws`; pass `--skills-dir` to choose another skills directory. When `cm init` creates a new config, it also asks whether to initialize AI rules. After installation, tell your AI agent to remember the content of `~/.connectmac/rules.md` exactly as long-term memory.
+
 Start the MCP server for AI clients:
 
 ```bash
