@@ -370,6 +370,9 @@ func TestAWSServiceCreateStopsAfterHostAllocatedWhenEIPAssociationFails(t *testi
 	if err == nil || !strings.Contains(err.Error(), "stop retrying") {
 		t.Fatalf("expected stop retrying error, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "Failed stage: associate-elastic-ip") || !strings.Contains(err.Error(), "Created resources: host=") {
+		t.Fatalf("expected stage and resource guidance, got %v", err)
+	}
 	calls := strings.Join(fake.calls, ",")
 	if strings.Count(calls, "allocate:") != 1 {
 		t.Fatalf("expected exactly one host allocation, calls = %v", fake.calls)
@@ -393,6 +396,9 @@ func TestAWSServiceCreateStopsAfterHostAllocatedWhenRunInstanceFails(t *testing.
 	_, _, err := service.Create(context.Background(), profile)
 	if err == nil || !strings.Contains(err.Error(), "stop retrying") {
 		t.Fatalf("expected stop retrying error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Failed stage: run-instance") || !strings.Contains(err.Error(), "Created resources: host=") {
+		t.Fatalf("expected stage and resource guidance, got %v", err)
 	}
 	calls := strings.Join(fake.calls, ",")
 	if strings.Count(calls, "allocate:") != 1 {
@@ -433,16 +439,38 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Destroy returned error: %v", err)
 	}
-	want := []string{"status", "disassociate:eipassoc-1", "terminate:i-1", "release:h-1"}
+	want := []string{"status", "disassociate:eipassoc-1", "terminate:i-1"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
-	if len(result.TerminatedInstances) != 1 || len(result.ReleasedHosts) != 1 {
+	if len(result.TerminatedInstances) != 1 || len(result.ReleasedHosts) != 0 || len(result.DeferredHosts) != 1 {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	text := FormatAWSDestroyResult(validPlan(t), result)
-	if !strings.Contains(text, "Retained Elastic IP") {
-		t.Fatalf("destroy result should mention retained EIP:\n%s", text)
+	if !strings.Contains(text, "Retained Elastic IP") || !strings.Contains(text, "Deferred hosts") || !strings.Contains(text, "run the same destroy command again") {
+		t.Fatalf("destroy result missing recovery guidance:\n%s", text)
+	}
+}
+
+func TestAWSServiceDestroyReleaseHostOnSecondRun(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Destroy(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	want := []string{"status", "release:h-1"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if strings.Join(result.SkippedInstances, ",") != "i-1:terminated" || strings.Join(result.ReleasedHosts, ",") != "h-1" {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 

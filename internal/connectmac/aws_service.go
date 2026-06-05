@@ -244,20 +244,20 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 				attempt.Status = "failed"
 				attempt.Detail = fmt.Sprintf("host=%s; %s", hostID, err.Error())
 				attempts = append(attempts, attempt)
-				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("dedicated host %s was allocated; stop retrying and fix instance launch: %w", hostID, err)}
+				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "run-instance", HostID: hostID, Cause: fmt.Errorf("dedicated host %s was allocated; stop retrying and fix instance launch: %w", hostID, err)}
 			}
 			if err := s.waitInstanceRunning(ctx, client, plan, instanceID); err != nil {
 				attempt.Status = "failed"
 				attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
 				attempts = append(attempts, attempt)
-				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and wait or clean up: %w", hostID, instanceID, err)}
+				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "wait-instance-running", HostID: hostID, InstanceID: instanceID, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and wait or clean up: %w", hostID, instanceID, err)}
 			}
 			associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
 			if err != nil {
 				attempt.Status = "failed"
 				attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
 				attempts = append(attempts, attempt)
-				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and fix elastic ip association: %w", hostID, instanceID, err)}
+				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "associate-elastic-ip", HostID: hostID, InstanceID: instanceID, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and fix elastic ip association: %w", hostID, instanceID, err)}
 			}
 			attempt.Status = "created"
 			attempt.Detail = fmt.Sprintf("host=%s instance=%s", hostID, instanceID)
@@ -546,6 +546,10 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 		if !managedTagsMatch(host.Tags, plan) {
 			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match", host.HostID)
 		}
+		if len(result.TerminatedInstances) > 0 {
+			result.DeferredHosts = append(result.DeferredHosts, fmt.Sprintf("%s:%s", host.HostID, emptyStatus(host.State)))
+			continue
+		}
 		if err := client.ReleaseHost(ctx, host.HostID); err != nil {
 			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
 		}
@@ -607,8 +611,11 @@ type AWSCreateAttempt struct {
 }
 
 type AWSCreateAttemptsError struct {
-	Attempts []AWSCreateAttempt
-	Cause    error
+	Attempts   []AWSCreateAttempt
+	Stage      string
+	HostID     string
+	InstanceID string
+	Cause      error
 }
 
 func (e AWSCreateAttemptsError) Error() string {
@@ -616,8 +623,17 @@ func (e AWSCreateAttemptsError) Error() string {
 	if e.Cause != nil {
 		fmt.Fprintf(&b, "%v\n", e.Cause)
 	}
+	if e.Stage != "" {
+		fmt.Fprintf(&b, "Failed stage: %s\n", e.Stage)
+	}
+	if e.HostID != "" || e.InstanceID != "" {
+		fmt.Fprintf(&b, "Created resources: host=%s instance=%s\n", emptyTableValue(e.HostID), emptyTableValue(e.InstanceID))
+	}
 	if len(e.Attempts) > 0 {
 		fmt.Fprint(&b, FormatAWSCreateAttempts(e.Attempts))
+	}
+	if e.Stage != "" {
+		fmt.Fprintln(&b, "Next action: inspect the created resources with cm aws status --all; do not retry another instance type or terminate EC2 unless the user explicitly requests destroy.")
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -628,6 +644,7 @@ type AWSDestroyResult struct {
 	ReleasedHosts          []string
 	SkippedInstances       []string
 	SkippedHosts           []string
+	DeferredHosts          []string
 	RetainedElasticIP      ElasticIP
 }
 
@@ -640,7 +657,7 @@ func (e AWSDestroyPartialError) Error() string {
 	if e.Cause == nil {
 		return "aws destroy partially completed"
 	}
-	return fmt.Sprintf("%v; partial destroy state recorded; run the same destroy command again after AWS finishes the pending transition", e.Cause)
+	return fmt.Sprintf("%v; partial destroy state recorded; do not release Elastic IP; run the same destroy command again after AWS finishes the pending transition", e.Cause)
 }
 
 type AWSAdoptResult struct {
@@ -916,8 +933,20 @@ func FormatAWSDestroyResult(plan MacPlan, result AWSDestroyResult) string {
 	fmt.Fprintf(&b, "Terminated instances: %s\n", strings.Join(result.TerminatedInstances, ", "))
 	fmt.Fprintf(&b, "Skipped instances: %s\n", strings.Join(result.SkippedInstances, ", "))
 	fmt.Fprintf(&b, "Released hosts: %s\n", strings.Join(result.ReleasedHosts, ", "))
+	fmt.Fprintf(&b, "Deferred hosts: %s\n", strings.Join(result.DeferredHosts, ", "))
 	fmt.Fprintf(&b, "Skipped hosts: %s\n", strings.Join(result.SkippedHosts, ", "))
+	fmt.Fprintf(&b, "Next action: %s\n", AWSDestroyNextAction(result))
 	return b.String()
+}
+
+func AWSDestroyNextAction(result AWSDestroyResult) string {
+	if len(result.DeferredHosts) > 0 {
+		return "wait for AWS Mac host transition, then run the same destroy command again; Elastic IP is retained"
+	}
+	if len(result.ReleasedHosts) > 0 || len(result.TerminatedInstances) > 0 || result.DisassociatedElasticIP {
+		return "verify status with cm aws status --all; Elastic IP is retained"
+	}
+	return "nothing active was destroyed; Elastic IP is retained"
 }
 
 func FormatAWSTags(tags []AWSTagConfig) string {
