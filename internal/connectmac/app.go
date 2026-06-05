@@ -377,6 +377,10 @@ func (a App) runInitRules(args []string) int {
 		fmt.Fprintln(a.Err, err)
 		return 2
 	}
+	if options.PrintRules {
+		fmt.Fprint(a.Out, DefaultRulesTemplate())
+		return 0
+	}
 	agent := options.Agent
 	if agent == "" {
 		agent = strings.ToLower(a.promptLine("Agent for AI rules (Codex/Claude/Trae/Cursor): "))
@@ -387,6 +391,14 @@ func (a App) runInitRules(args []string) int {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
+	if options.DryRun {
+		fmt.Fprintln(a.Out, "AI rules install dry run")
+		fmt.Fprintf(a.Out, "Rules source: %s\n", install.SourcePath)
+		fmt.Fprintf(a.Out, "%s rules: %s\n", install.Agent, install.AgentPath)
+		fmt.Fprintf(a.Out, "connectmac-aws skill: %s\n", install.SkillPath)
+		fmt.Fprintln(a.Out, "No files were written.")
+		return 0
+	}
 	result, err := InstallRules(install)
 	if err != nil {
 		fmt.Fprintf(a.Err, "init rules failed: %v\n", err)
@@ -395,6 +407,9 @@ func (a App) runInitRules(args []string) int {
 	fmt.Fprintf(a.Out, "created rules source: %s\n", result.SourcePath)
 	fmt.Fprintf(a.Out, "installed %s rules: %s\n", result.Agent, result.AgentPath)
 	fmt.Fprintf(a.Out, "installed connectmac-aws skill: %s\n", result.SkillPath)
+	if result.Validated {
+		fmt.Fprintln(a.Out, "validation passed")
+	}
 	fmt.Fprintln(a.Out, "Rule content source: ~/.connectmac/rules.md")
 	fmt.Fprintln(a.Out, "Ask your AI agent to remember the rule content exactly and keep it as long-term memory.")
 	return 0
@@ -817,7 +832,8 @@ func (a App) loadConfig(path string) (Config, int) {
 func (a App) printUsage() {
 	fmt.Fprint(a.Out, `Usage:
   cm init [--config <path>]
-  cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>]
+  cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
+  cm init-rules --print-rules
   cm list [--config <path>]
   cm check <profile> [--config <path>]
   cm connect <profile> [--config <path>]

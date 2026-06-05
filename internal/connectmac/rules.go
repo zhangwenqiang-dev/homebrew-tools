@@ -18,6 +18,8 @@ type InitRulesOptions struct {
 	Agent      string
 	ProjectDir string
 	SkillsDir  string
+	DryRun     bool
+	PrintRules bool
 }
 
 type RulesInstall struct {
@@ -33,6 +35,7 @@ type RulesInstallResult struct {
 	SourcePath string
 	AgentPath  string
 	SkillPath  string
+	Validated  bool
 }
 
 func parseInitRulesOptions(args []string) (InitRulesOptions, error) {
@@ -57,6 +60,10 @@ func parseInitRulesOptions(args []string) (InitRulesOptions, error) {
 				return options, fmt.Errorf("--skills-dir requires a value")
 			}
 			options.SkillsDir = args[i]
+		case "--dry-run":
+			options.DryRun = true
+		case "--print-rules":
+			options.PrintRules = true
 		default:
 			return options, fmt.Errorf("unknown init-rules option %q", args[i])
 		}
@@ -131,7 +138,41 @@ func InstallRules(install RulesInstall) (RulesInstallResult, error) {
 	if err := InstallSkill(install.SkillPath); err != nil {
 		return RulesInstallResult{}, err
 	}
-	return RulesInstallResult{Agent: install.Agent, SourcePath: install.SourcePath, AgentPath: install.AgentPath, SkillPath: install.SkillPath}, nil
+	result := RulesInstallResult{Agent: install.Agent, SourcePath: install.SourcePath, AgentPath: install.AgentPath, SkillPath: install.SkillPath}
+	if err := ValidateRulesInstall(result); err != nil {
+		return RulesInstallResult{}, err
+	}
+	result.Validated = true
+	return result, nil
+}
+
+func ValidateRulesInstall(result RulesInstallResult) error {
+	source, err := os.ReadFile(result.SourcePath)
+	if err != nil {
+		return fmt.Errorf("validate rules source: %w", err)
+	}
+	if !strings.Contains(string(source), "ConnectMac AWS AI Rules") {
+		return fmt.Errorf("validate rules source: missing ConnectMac AWS AI Rules")
+	}
+	agent, err := os.ReadFile(result.AgentPath)
+	if err != nil {
+		return fmt.Errorf("validate agent rules: %w", err)
+	}
+	agentText := string(agent)
+	if strings.Count(agentText, rulesStart) != 1 || strings.Count(agentText, rulesEnd) != 1 {
+		return fmt.Errorf("validate agent rules: expected exactly one ConnectMac marker block")
+	}
+	skill, err := os.ReadFile(filepath.Join(result.SkillPath, "SKILL.md"))
+	if err != nil {
+		return fmt.Errorf("validate skill: %w", err)
+	}
+	if !strings.Contains(string(skill), "name: connectmac-aws") {
+		return fmt.Errorf("validate skill: missing connectmac-aws name")
+	}
+	if _, err := os.Stat(filepath.Join(result.SkillPath, "agents", "openai.yaml")); err != nil {
+		return fmt.Errorf("validate skill metadata: %w", err)
+	}
+	return nil
 }
 
 func normalizeAgentName(agent string) string {

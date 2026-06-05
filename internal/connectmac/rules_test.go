@@ -110,7 +110,50 @@ func TestAppInitRules(t *testing.T) {
 	if !strings.Contains(out.String(), "Rule content source: ~/.connectmac/rules.md") {
 		t.Fatalf("out = %q", out.String())
 	}
+	if !strings.Contains(out.String(), "validation passed") {
+		t.Fatalf("out = %q", out.String())
+	}
 	if _, err := os.Stat(filepath.Join(skillsDir, "connectmac-aws", "SKILL.md")); err != nil {
 		t.Fatalf("expected skill: %v", err)
+	}
+}
+
+func TestAppInitRulesDryRunDoesNotWrite(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	skillsDir := filepath.Join(t.TempDir(), "skills")
+	t.Setenv("HOME", home)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"init-rules", "--agent", "codex", "--project", project, "--skills-dir", skillsDir, "--dry-run"}); code != 0 {
+		t.Fatalf("init-rules dry-run code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "AI rules install dry run") || !strings.Contains(out.String(), "No files were written.") {
+		t.Fatalf("out = %q", out.String())
+	}
+	for _, path := range []string{
+		filepath.Join(home, ".connectmac", "rules.md"),
+		filepath.Join(project, "AGENTS.md"),
+		filepath.Join(skillsDir, "connectmac-aws", "SKILL.md"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry-run should not create %s, err=%v", path, err)
+		}
+	}
+}
+
+func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"init-rules", "--print-rules"}); code != 0 {
+		t.Fatalf("print-rules code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "ConnectMac AWS AI Rules") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".connectmac", "rules.md")); !os.IsNotExist(err) {
+		t.Fatalf("print-rules should not write source, err=%v", err)
 	}
 }
