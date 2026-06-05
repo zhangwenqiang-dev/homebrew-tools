@@ -11,10 +11,12 @@ Follow these rules:
 2. If the user does not provide an Apple email, list configured accounts first and ask the user to choose.
 3. Preview before every AWS mutation. Do not pass --confirm or confirm=true until the user explicitly approves that exact operation.
 4. Destroy/release workflows must never release Elastic IP allocations. They may only disassociate EIP from the managed instance, terminate managed EC2, and release managed Dedicated Hosts.
-5. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
-6. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
-7. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
-8. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
+5. Never terminate EC2 during open/create/launch-on-host recovery. Terminate EC2 only in an explicit destroy/release workflow after user confirmation.
+6. If a Dedicated Host exists, reuse that host and launch/recover EC2 on it instead of creating another Dedicated Host.
+7. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
+8. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
+9. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
+10. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
 
 Preferred MCP tools:
 
