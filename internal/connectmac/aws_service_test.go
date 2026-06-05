@@ -382,6 +382,30 @@ func TestAWSServiceCreateStopsAfterHostAllocatedWhenEIPAssociationFails(t *testi
 	}
 }
 
+func TestAWSServiceCreateStopsAfterHostAllocatedWhenRunInstanceFails(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.InstanceTypePriority = []string{"mac2.metal", "mac2-m2.metal"}
+	fake := &fakeAWSClient{
+		eip:    ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		runErr: fmt.Errorf("run instance failed"),
+	}
+	service := testAWSService(fake)
+	_, _, err := service.Create(context.Background(), profile)
+	if err == nil || !strings.Contains(err.Error(), "stop retrying") {
+		t.Fatalf("expected stop retrying error, got %v", err)
+	}
+	calls := strings.Join(fake.calls, ",")
+	if strings.Count(calls, "allocate:") != 1 {
+		t.Fatalf("expected exactly one host allocation, calls = %v", fake.calls)
+	}
+	if strings.Contains(calls, "mac2-m2.metal") {
+		t.Fatalf("must not try next instance type after host allocation, calls = %v", fake.calls)
+	}
+	if strings.Contains(calls, "terminate:") || strings.Contains(calls, "release:") {
+		t.Fatalf("must not auto-terminate/release after run instance failure, calls = %v", fake.calls)
+	}
+}
+
 func TestAWSServiceDestroyRequiresManagedTags(t *testing.T) {
 	fake := &fakeAWSClient{
 		status: AWSStatus{
@@ -561,6 +585,7 @@ type fakeAWSClient struct {
 	eip            ElasticIP
 	offerings      map[string][]string
 	subnetAZs      map[string]string
+	runErr         error
 	associateErr   error
 }
 
@@ -619,6 +644,9 @@ func (c *fakeAWSClient) AllocateHost(ctx context.Context, plan MacPlan, availabi
 
 func (c *fakeAWSClient) RunInstance(ctx context.Context, plan MacPlan, hostID, instanceType, amiID string) (string, error) {
 	c.calls = append(c.calls, fmt.Sprintf("run:%s:%s:%s:%s", hostID, plan.SubnetID, instanceType, amiID))
+	if c.runErr != nil {
+		return "", c.runErr
+	}
 	if len(c.statusSequence) == 0 && len(c.status.Instances) == 0 {
 		c.status.Instances = []InstanceStatus{{InstanceID: "i-created", State: "running", InstanceType: instanceType, HostID: hostID, Tags: managedTestTags()}}
 	}

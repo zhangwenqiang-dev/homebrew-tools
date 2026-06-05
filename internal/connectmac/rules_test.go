@@ -153,8 +153,13 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 	if !strings.Contains(out.String(), "ConnectMac AWS AI Rules") {
 		t.Fatalf("out = %q", out.String())
 	}
-	if !strings.Contains(out.String(), "Never terminate EC2 during open/create/launch-on-host recovery") {
-		t.Fatalf("out missing terminate safety rule = %q", out.String())
+	for _, want := range []string{
+		"After a Dedicated Host is allocated, any EC2 launch/start failure must stop the create loop",
+		"Never terminate EC2 during open/create/launch-on-host recovery",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("out missing %q = %q", want, out.String())
+		}
 	}
 	if _, err := os.Stat(filepath.Join(home, ".connectmac", "rules.md")); !os.IsNotExist(err) {
 		t.Fatalf("print-rules should not write source, err=%v", err)
@@ -164,6 +169,7 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 func TestDefaultSkillTemplateIncludesTerminateSafetyRule(t *testing.T) {
 	skill := DefaultSkillTemplate()
 	for _, want := range []string{
+		"After a Dedicated Host is allocated, any EC2 launch/start failure must stop the create loop",
 		"Never terminate EC2 during open/create/launch-on-host recovery",
 		"If a Dedicated Host exists, reuse that host",
 	} {
