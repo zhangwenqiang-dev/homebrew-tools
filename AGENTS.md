@@ -19,23 +19,31 @@ Follow these rules:
 10. Destroy workflows that terminate EC2 must defer Dedicated Host release until a later repeated destroy run after AWS finishes the Mac host transition.
 11. Do not create AWS key pairs or change security group ingress unless the user explicitly asks for that setup step.
 12. Do not SSH-probe a newly launched Mac until AWS readiness checks pass.
-13. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
-14. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
+13. Before opening or creating a Mac, use cm_aws_capacity or cm aws capacity when the user asks about quota, instance type order, capacity, or why a type was selected.
+14. If SSH fails with Permission denied (publickey), first compare the profile's AWS key_name with local identity_file; report any mismatch before changing config or retrying.
+15. Treat ready as "the managed Mac is already usable." Do not describe ready as needing to wait, create, or open a new AWS resource.
+16. For blocked decisions, stop and explain the blocking reason instead of continuing automatically.
 
 Preferred MCP tools:
 
 - cm_list_profiles
 - cm_find_profile_by_apple
+- cm_aws_capacity
+- cm_aws_plan
 - cm_aws_open_mac_by_email
 - cm_aws_destroy_mac_by_email
 - cm_aws_status
 - cm_aws_wait_ready
+- cm_aws_launch_on_host
+- cm_aws_adopt_host
 
 CLI fallback:
 
 ```bash
 cm profile accounts
 cm profile find <apple-email>
+cm aws capacity <profile-or-apple-email>
+cm aws plan <profile-or-apple-email>
 cm aws status <profile-or-apple-email>
 cm aws open <profile-or-apple-email>
 cm aws destroy <profile-or-apple-email>

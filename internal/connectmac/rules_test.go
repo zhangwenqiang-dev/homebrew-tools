@@ -159,6 +159,8 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 		"When AWS create/open/launch-on-host fails, report the exact error reason",
 		"Launch EC2 on a Dedicated Host only when the host state is available",
 		"Destroy workflows that terminate EC2 must defer Dedicated Host release",
+		"cm_aws_capacity",
+		"Permission denied (publickey)",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("out missing %q = %q", want, out.String())
@@ -178,6 +180,8 @@ func TestDefaultSkillTemplateIncludesTerminateSafetyRule(t *testing.T) {
 		"When AWS create/open/launch-on-host fails, report the exact error reason",
 		"Launch EC2 on a Dedicated Host only when the host state is available",
 		"Destroy workflows that terminate EC2 must defer Dedicated Host release",
+		"cm_aws_capacity",
+		"Permission denied (publickey)",
 	} {
 		if !strings.Contains(skill, want) {
 			t.Fatalf("skill template missing %q", want)
