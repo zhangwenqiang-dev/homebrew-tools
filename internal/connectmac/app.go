@@ -153,7 +153,7 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(a.Err, "usage: cm aws <plan|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email> [--confirm] [--all] [--host-id <id>]")
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|capacity|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email> [--confirm] [--all] [--host-id <id>]")
 		return 2
 	}
 	command := args[0]
@@ -209,6 +209,14 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 	switch command {
 	case "plan":
 		fmt.Fprint(a.Out, FormatMacPlan(plan))
+		return 0
+	case "capacity":
+		_, capacity, err := a.AWSService.Capacity(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws capacity failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatAWSCapacity(plan, capacity))
 		return 0
 	case "open":
 		return a.runAWSOpen(ctx, profile, plan, confirm)
@@ -870,6 +878,7 @@ func (a App) printUsage() {
   cm profile accounts [--config <path>]
   cm profile find <apple-email> [--config <path>]
   cm aws plan <profile-or-apple-email> [--config <path>]
+  cm aws capacity <profile-or-apple-email> [--config <path>]
   cm aws open <profile-or-apple-email> [--confirm] [--config <path>]
   cm aws create <profile-or-apple-email> [--confirm] [--config <path>]
   cm aws status <profile-or-apple-email> [--config <path>]

@@ -116,6 +116,46 @@ func TestAWSServiceStatusUsesClient(t *testing.T) {
 	}
 }
 
+func TestAWSServiceCapacityCombinesQuotasUsageAndOfferings(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.InstanceTypePriority = []string{"mac2-m2.metal", "mac2.metal", "mac1.metal"}
+	profile.AWS.AllowIntelFallback = true
+	fake := &fakeAWSClient{
+		quotas: map[string]float64{
+			"mac2-m2.metal": 1,
+			"mac2.metal":    2,
+			"mac1.metal":    1,
+		},
+		allHosts: []DedicatedHostStatus{
+			{HostID: "h-m2", State: "available", InstanceType: "mac2-m2.metal", ZoneID: "usw2-az1"},
+			{HostID: "h-mac2", State: "pending", InstanceType: "mac2.metal", ZoneID: "usw2-az2"},
+			{HostID: "h-old", State: "released", InstanceType: "mac1.metal", ZoneID: "usw2-az3"},
+		},
+		offerings: map[string][]string{
+			"mac2-m2.metal": {"usw2-az1", "usw2-az2"},
+			"mac2.metal":    {"usw2-az2"},
+			"mac1.metal":    {"usw2-az3"},
+		},
+	}
+	service := testAWSService(fake)
+	plan, capacity, err := service.Capacity(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Capacity returned error: %v", err)
+	}
+	text := FormatAWSCapacity(plan, capacity)
+	for _, want := range []string{
+		"AWS Mac capacity for profile xcode-vnc",
+		"mac2-m2.metal  1      1       0",
+		"mac2.metal     2      1       1",
+		"mac1.metal     1      0       1",
+		"Running Dedicated mac2-m2 Hosts",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("capacity output missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestAWSServiceStatusHidesTerminalResourcesByDefault(t *testing.T) {
 	fake := &fakeAWSClient{
 		status: AWSStatus{
@@ -621,7 +661,9 @@ type fakeAWSClient struct {
 	status         AWSStatus
 	statusSequence []AWSStatus
 	host           DedicatedHostStatus
+	allHosts       []DedicatedHostStatus
 	eip            ElasticIP
+	quotas         map[string]float64
 	offerings      map[string][]string
 	subnetAZs      map[string]string
 	runErr         error
@@ -653,6 +695,16 @@ func (c *fakeAWSClient) DescribeHostByID(ctx context.Context, hostID string) (De
 		return c.host, nil
 	}
 	return DedicatedHostStatus{HostID: hostID, State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1"}, nil
+}
+
+func (c *fakeAWSClient) DescribeAllHosts(ctx context.Context) ([]DedicatedHostStatus, error) {
+	c.calls = append(c.calls, "all-hosts")
+	return c.allHosts, nil
+}
+
+func (c *fakeAWSClient) DedicatedHostQuotas(ctx context.Context, instanceTypes []string) (map[string]float64, error) {
+	c.calls = append(c.calls, "quotas:"+strings.Join(instanceTypes, ","))
+	return c.quotas, nil
 }
 
 func (c *fakeAWSClient) TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error {

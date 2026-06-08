@@ -9,6 +9,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -17,6 +18,8 @@ type AWSClient interface {
 	DescribeStatus(ctx context.Context, plan MacPlan) (AWSStatus, error)
 	DescribeAdoptionCandidates(ctx context.Context, plan MacPlan) (AWSStatus, error)
 	DescribeHostByID(ctx context.Context, hostID string) (DedicatedHostStatus, error)
+	DescribeAllHosts(ctx context.Context) ([]DedicatedHostStatus, error)
+	DedicatedHostQuotas(ctx context.Context, instanceTypes []string) (map[string]float64, error)
 	TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error
 	InstanceTypeOfferings(ctx context.Context, instanceType string) ([]string, error)
 	SubnetAvailabilityZoneID(ctx context.Context, subnetID string) (string, error)
@@ -72,8 +75,9 @@ type ElasticIP struct {
 }
 
 type RealAWSClient struct {
-	ec2 *ec2.Client
-	sts *sts.Client
+	ec2           *ec2.Client
+	servicequotas *servicequotas.Client
+	sts           *sts.Client
 }
 
 func NewRealAWSClient(ctx context.Context, plan MacPlan) (RealAWSClient, error) {
@@ -88,8 +92,9 @@ func NewRealAWSClient(ctx context.Context, plan MacPlan) (RealAWSClient, error) 
 		return RealAWSClient{}, fmt.Errorf("load aws config: %w", err)
 	}
 	return RealAWSClient{
-		ec2: ec2.NewFromConfig(cfg),
-		sts: sts.NewFromConfig(cfg),
+		ec2:           ec2.NewFromConfig(cfg),
+		servicequotas: servicequotas.NewFromConfig(cfg),
+		sts:           sts.NewFromConfig(cfg),
 	}, nil
 }
 
@@ -186,6 +191,56 @@ func (c RealAWSClient) DescribeHostByID(ctx context.Context, hostID string) (Ded
 		return DedicatedHostStatus{}, fmt.Errorf("dedicated host %s not found", hostID)
 	}
 	return hosts[0], nil
+}
+
+func (c RealAWSClient) DescribeAllHosts(ctx context.Context) ([]DedicatedHostStatus, error) {
+	var hosts []DedicatedHostStatus
+	input := &ec2.DescribeHostsInput{}
+	for {
+		out, err := c.ec2.DescribeHosts(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("describe all hosts: %w", err)
+		}
+		for _, host := range out.Hosts {
+			hosts = append(hosts, dedicatedHostStatusFromEC2(host))
+		}
+		if out.NextToken == nil || aws.ToString(out.NextToken) == "" {
+			break
+		}
+		input.NextToken = out.NextToken
+	}
+	return hosts, nil
+}
+
+func (c RealAWSClient) DedicatedHostQuotas(ctx context.Context, instanceTypes []string) (map[string]float64, error) {
+	quotaNames := make(map[string]string, len(instanceTypes))
+	for _, instanceType := range instanceTypes {
+		quotaNames[dedicatedHostQuotaName(instanceType)] = instanceType
+	}
+	quotas := make(map[string]float64, len(instanceTypes))
+	input := &servicequotas.ListServiceQuotasInput{
+		ServiceCode: aws.String("ec2"),
+	}
+	for {
+		out, err := c.servicequotas.ListServiceQuotas(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("list EC2 service quotas: %w", err)
+		}
+		for _, quota := range out.Quotas {
+			instanceType, ok := quotaNames[aws.ToString(quota.QuotaName)]
+			if !ok {
+				continue
+			}
+			if quota.Value != nil {
+				quotas[instanceType] = *quota.Value
+			}
+		}
+		if out.NextToken == nil || aws.ToString(out.NextToken) == "" {
+			break
+		}
+		input.NextToken = out.NextToken
+	}
+	return quotas, nil
 }
 
 func (c RealAWSClient) TagResources(ctx context.Context, resourceIDs []string, tags []AWSTagConfig) error {

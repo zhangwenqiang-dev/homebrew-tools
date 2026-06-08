@@ -56,6 +56,53 @@ func (s AWSService) StatusWithOptions(ctx context.Context, profile Profile, opti
 	return plan, status, nil
 }
 
+func (s AWSService) Capacity(ctx context.Context, profile Profile) (MacPlan, AWSCapacity, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, AWSCapacity{}, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, AWSCapacity{}, err
+	}
+	identity, err := client.CallerIdentity(ctx)
+	if err != nil {
+		return MacPlan{}, AWSCapacity{}, err
+	}
+	quotas, err := client.DedicatedHostQuotas(ctx, plan.InstanceTypePriority)
+	if err != nil {
+		return MacPlan{}, AWSCapacity{}, err
+	}
+	hosts, err := client.DescribeAllHosts(ctx)
+	if err != nil {
+		return MacPlan{}, AWSCapacity{}, err
+	}
+	inUse := dedicatedHostUsageByInstanceType(hosts)
+	items := make([]AWSCapacityItem, 0, len(plan.InstanceTypePriority))
+	for _, instanceType := range plan.InstanceTypePriority {
+		offerings, err := client.InstanceTypeOfferings(ctx, instanceType)
+		if err != nil {
+			offerings = []string{fmt.Sprintf("error: %v", err)}
+		}
+		sort.Strings(offerings)
+		quota := quotas[instanceType]
+		used := inUse[instanceType]
+		available := quota - float64(used)
+		if available < 0 {
+			available = 0
+		}
+		items = append(items, AWSCapacityItem{
+			InstanceType: instanceType,
+			QuotaName:    dedicatedHostQuotaName(instanceType),
+			Quota:        quota,
+			InUse:        used,
+			Available:    available,
+			OfferingAZs:  offerings,
+		})
+	}
+	return plan, AWSCapacity{CallerIdentity: identity, Items: items}, nil
+}
+
 func (s AWSService) WaitReady(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
 	plan, err := s.Plan(profile)
 	if err != nil {
@@ -95,6 +142,17 @@ func (s AWSService) WaitReady(ctx context.Context, profile Profile) (MacPlan, AW
 		case <-timer.C:
 		}
 	}
+}
+
+func dedicatedHostUsageByInstanceType(hosts []DedicatedHostStatus) map[string]int {
+	counts := map[string]int{}
+	for _, host := range hosts {
+		if host.InstanceType == "" || isTerminalHostState(host.State) {
+			continue
+		}
+		counts[host.InstanceType]++
+	}
+	return counts
 }
 
 func (s AWSService) AdoptionPreview(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
@@ -677,6 +735,20 @@ type AWSStatusOptions struct {
 	IncludeTerminal bool
 }
 
+type AWSCapacity struct {
+	CallerIdentity CallerIdentity
+	Items          []AWSCapacityItem
+}
+
+type AWSCapacityItem struct {
+	InstanceType string
+	QuotaName    string
+	Quota        float64
+	InUse        int
+	Available    float64
+	OfferingAZs  []string
+}
+
 type AWSOpenDecision struct {
 	Kind   string
 	HostID string
@@ -853,6 +925,28 @@ func FormatAWSStatus(plan MacPlan, status AWSStatus) string {
 	return b.String()
 }
 
+func FormatAWSCapacity(plan MacPlan, capacity AWSCapacity) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "AWS Mac capacity for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Caller: %s\n", capacity.CallerIdentity.ARN)
+	fmt.Fprintf(&b, "Account: %s\n", MaskAWSAccount(capacity.CallerIdentity.Account))
+	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
+	rows := make([][]string, 0, len(capacity.Items)+1)
+	rows = append(rows, []string{"INSTANCE TYPE", "QUOTA", "IN USE", "AVAILABLE", "OFFERING AZS", "SERVICE QUOTA"})
+	for _, item := range capacity.Items {
+		rows = append(rows, []string{
+			item.InstanceType,
+			formatQuotaValue(item.Quota),
+			fmt.Sprintf("%d", item.InUse),
+			formatQuotaValue(item.Available),
+			emptyTableValue(strings.Join(item.OfferingAZs, ",")),
+			item.QuotaName,
+		})
+	}
+	fmt.Fprint(&b, formatRows(rows))
+	return b.String()
+}
+
 func FormatAWSReadyStatus(plan MacPlan, status AWSStatus) string {
 	return fmt.Sprintf("AWS Mac ready for profile %s: %t\n%s\n%s", plan.ProfileName, AWSStatusReady(status), AWSReadinessSummary(status), FormatAWSManualSetupGuide(plan))
 }
@@ -891,6 +985,16 @@ func FormatAWSCreateAttempts(attempts []AWSCreateAttempt) string {
 			emptyTableValue(attempt.Detail),
 		})
 	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "Create attempts:")
+	fmt.Fprint(&b, formatRows(rows))
+	return b.String()
+}
+
+func formatRows(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
 	widths := make([]int, len(rows[0]))
 	for _, row := range rows {
 		for i, value := range row {
@@ -900,7 +1004,6 @@ func FormatAWSCreateAttempts(attempts []AWSCreateAttempt) string {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Create attempts:")
 	for rowIndex, row := range rows {
 		for i, value := range row {
 			if i > 0 {
@@ -920,6 +1023,18 @@ func FormatAWSCreateAttempts(attempts []AWSCreateAttempt) string {
 		}
 	}
 	return b.String()
+}
+
+func formatQuotaValue(value float64) string {
+	if value == float64(int64(value)) {
+		return fmt.Sprintf("%.0f", value)
+	}
+	return fmt.Sprintf("%.2f", value)
+}
+
+func dedicatedHostQuotaName(instanceType string) string {
+	family := strings.TrimSuffix(instanceType, ".metal")
+	return fmt.Sprintf("Running Dedicated %s Hosts", family)
 }
 
 func emptyTableValue(value string) string {

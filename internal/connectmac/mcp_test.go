@@ -125,6 +125,25 @@ func TestMCPAWSPlan(t *testing.T) {
 	}
 }
 
+func TestMCPAWSCapacity(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{
+			quotas: map[string]float64{"mac2.metal": 1},
+			allHosts: []DedicatedHostStatus{
+				{HostID: "h-1", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1"},
+			},
+			offerings: map[string][]string{"mac2.metal": {"usw2-az1"}},
+		}, nil
+	}
+	out := runMCPCall(t, app, config, "cm_aws_capacity", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "AWS Mac capacity") || !strings.Contains(out, "Running Dedicated mac2 Hosts") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
 func TestMCPFindProfileByAppleEmail(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	out := runMCPCall(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{
@@ -203,7 +222,7 @@ func TestMCPAWSWaitReady(t *testing.T) {
 func TestMCPToolsIncludesAWSHostWorkflow(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	out := runMCPToolsList(t, app, config)
-	for _, want := range []string{"cm_find_profile_by_apple", "cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
+	for _, want := range []string{"cm_find_profile_by_apple", "cm_aws_capacity", "cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("tools output missing %q: %q", want, out)
 		}
