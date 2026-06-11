@@ -1,0 +1,26 @@
+ConnectMac AI 操作完整流程
+
+创建Mac专用主机条件：
+1、在指定区域创建Mac专用主机
+2、name tag 的命名：xcode-<小写缩写>-<年月日（20260603）>-<账号邮箱>
+3、可选实例系列：mac1、mac2、mac2-m1ultra、mac2-m2、mac2-m2pro、mac-m3ultra、mac-m4、mac-m4max、mac-m4pro
+4、创建Mac专用主机，实例类型的优先级排序（架构、价格），类型有：mac1.metal、mac2.metal、mac2-m2.metal、mac2-m2pro.metal、mac2-m1ultra.metal、mac-m3ultra.metal、mac-m4.metal、mac-m4pro.metal
+5、专用主机所在的可用区:*-az[1-4]
+6、有取消默认项要取消（Host maintenance 取消启用）
+创建EC2实例（租赁Mac专用主机）：
+7、名称：xcode-<小写缩写>-<年月日（20260603）>-<账号邮箱>
+8、AMI：ami-063755aadeb97329a （macOS Tahoe）
+9、选择实例类型（要看专用主机创建的是什么类型）
+10、选择密钥对（获取配置中的值（名称或ID））
+11、禁用自动分配公有IP
+12、安全组要使用指定的安全组（获取配置中的值（ID））
+13、租赁配置
+	1、专属主机 - 在专属主机上启动此实例
+	2、目标主机： 主机ID
+	3、租赁主机ID：使用刚刚创建的主机ID
+	4、租赁关联：主机
+弹性IP绑定：
+14、使用指定的弹性IP（ID），绑定到新创建的EC2，且要确定 弹性IP的Tag（Name或Apple）的值 是 账号邮箱
+
+AWS CLI / AWS SDK / EC2 API
+使用那种比较好 EC2 专用主机的创建和终止
