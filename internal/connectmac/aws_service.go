@@ -605,7 +605,11 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match", host.HostID)
 		}
 		if len(result.TerminatedInstances) > 0 {
-			result.DeferredHosts = append(result.DeferredHosts, fmt.Sprintf("%s:%s", host.HostID, emptyStatus(host.State)))
+			result.DeferredHosts = append(result.DeferredHosts, AWSDeferredHost{
+				HostID: host.HostID,
+				State:  emptyStatus(host.State),
+				Reason: "EC2 was terminated in this run; wait for AWS Mac host transition before release",
+			})
 			continue
 		}
 		if err := client.ReleaseHost(ctx, host.HostID); err != nil {
@@ -702,8 +706,14 @@ type AWSDestroyResult struct {
 	ReleasedHosts          []string
 	SkippedInstances       []string
 	SkippedHosts           []string
-	DeferredHosts          []string
+	DeferredHosts          []AWSDeferredHost
 	RetainedElasticIP      ElasticIP
+}
+
+type AWSDeferredHost struct {
+	HostID string
+	State  string
+	Reason string
 }
 
 type AWSDestroyPartialError struct {
@@ -1047,25 +1057,55 @@ func emptyTableValue(value string) string {
 func FormatAWSDestroyResult(plan MacPlan, result AWSDestroyResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac destroy executed for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Compute release: %s\n", awsDestroyReleaseStatus(result))
+	fmt.Fprintf(&b, "Elastic IP retained: true\n")
+	fmt.Fprintf(&b, "Need rerun: %t\n", len(result.DeferredHosts) > 0)
+	if len(result.DeferredHosts) > 0 {
+		fmt.Fprintf(&b, "Suggested wait: 60 minutes\n")
+	}
 	fmt.Fprintf(&b, "Disassociated Elastic IP: %t\n", result.DisassociatedElasticIP)
 	fmt.Fprintf(&b, "Retained Elastic IP: %s public_ip=%s\n", emptyTableValue(result.RetainedElasticIP.AllocationID), emptyTableValue(result.RetainedElasticIP.PublicIP))
-	fmt.Fprintf(&b, "Terminated instances: %s\n", strings.Join(result.TerminatedInstances, ", "))
-	fmt.Fprintf(&b, "Skipped instances: %s\n", strings.Join(result.SkippedInstances, ", "))
-	fmt.Fprintf(&b, "Released hosts: %s\n", strings.Join(result.ReleasedHosts, ", "))
-	fmt.Fprintf(&b, "Deferred hosts: %s\n", strings.Join(result.DeferredHosts, ", "))
-	fmt.Fprintf(&b, "Skipped hosts: %s\n", strings.Join(result.SkippedHosts, ", "))
-	fmt.Fprintf(&b, "Next action: %s\n", AWSDestroyNextAction(result))
+	fmt.Fprintf(&b, "Terminated instances: %s\n", formatStringList(result.TerminatedInstances))
+	fmt.Fprintf(&b, "Skipped instances: %s\n", formatStringList(result.SkippedInstances))
+	fmt.Fprintf(&b, "Released hosts: %s\n", formatStringList(result.ReleasedHosts))
+	fmt.Fprintln(&b, "Deferred hosts:")
+	if len(result.DeferredHosts) == 0 {
+		fmt.Fprintln(&b, "-")
+	} else {
+		for _, host := range result.DeferredHosts {
+			fmt.Fprintf(&b, "- %s state=%s reason=%s\n", host.HostID, emptyTableValue(host.State), host.Reason)
+		}
+	}
+	fmt.Fprintf(&b, "Skipped hosts: %s\n", formatStringList(result.SkippedHosts))
+	fmt.Fprintf(&b, "Next action: %s\n", AWSDestroyNextAction(plan, result))
 	return b.String()
 }
 
-func AWSDestroyNextAction(result AWSDestroyResult) string {
+func AWSDestroyNextAction(plan MacPlan, result AWSDestroyResult) string {
 	if len(result.DeferredHosts) > 0 {
-		return "wait for AWS Mac host transition, then run the same destroy command again; Elastic IP is retained"
+		return fmt.Sprintf("wait 60 minutes, then run: cm aws destroy %s --confirm; Elastic IP is retained", plan.AccountEmail)
 	}
 	if len(result.ReleasedHosts) > 0 || len(result.TerminatedInstances) > 0 || result.DisassociatedElasticIP {
 		return "verify status with cm aws status --all; Elastic IP is retained"
 	}
 	return "nothing active was destroyed; Elastic IP is retained"
+}
+
+func awsDestroyReleaseStatus(result AWSDestroyResult) string {
+	if len(result.DeferredHosts) > 0 {
+		return "partial"
+	}
+	if len(result.ReleasedHosts) > 0 || len(result.TerminatedInstances) > 0 || result.DisassociatedElasticIP {
+		return "complete"
+	}
+	return "none"
+}
+
+func formatStringList(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ", ")
 }
 
 func FormatAWSTags(tags []AWSTagConfig) string {

@@ -487,7 +487,20 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	text := FormatAWSDestroyResult(validPlan(t), result)
-	if !strings.Contains(text, "Retained Elastic IP") || !strings.Contains(text, "Deferred hosts") || !strings.Contains(text, "run the same destroy command again") {
+	for _, want := range []string{
+		"Compute release: partial",
+		"Elastic IP retained: true",
+		"Need rerun: true",
+		"Suggested wait: 60 minutes",
+		"Deferred hosts:",
+		"- h-1 state=pending reason=EC2 was terminated in this run; wait for AWS Mac host transition before release",
+		"cm aws destroy user@example.com --confirm",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy result missing %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(text, "Retained Elastic IP") {
 		t.Fatalf("destroy result missing recovery guidance:\n%s", text)
 	}
 }
