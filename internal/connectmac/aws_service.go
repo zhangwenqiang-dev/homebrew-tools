@@ -9,10 +9,12 @@ import (
 )
 
 type AWSService struct {
-	Now               func() time.Time
-	NewClient         func(ctx context.Context, plan MacPlan) (AWSClient, error)
-	ReadyPollInterval time.Duration
-	ReadyTimeout      time.Duration
+	Now                 func() time.Time
+	NewClient           func(ctx context.Context, plan MacPlan) (AWSClient, error)
+	ReadyPollInterval   time.Duration
+	ReadyTimeout        time.Duration
+	DestroyPollInterval time.Duration
+	DestroyTimeout      time.Duration
 }
 
 func NewAWSService() AWSService {
@@ -604,20 +606,56 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 		if !managedTagsMatch(host.Tags, plan) {
 			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match", host.HostID)
 		}
-		if len(result.TerminatedInstances) > 0 {
+		released, reason, err := s.releaseHostWithRetry(ctx, client, host)
+		if err != nil {
+			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
+		}
+		if !released {
 			result.DeferredHosts = append(result.DeferredHosts, AWSDeferredHost{
 				HostID: host.HostID,
 				State:  emptyStatus(host.State),
-				Reason: "EC2 was terminated in this run; wait for AWS Mac host transition before release",
+				Reason: reason,
 			})
 			continue
-		}
-		if err := client.ReleaseHost(ctx, host.HostID); err != nil {
-			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
 		}
 		result.ReleasedHosts = append(result.ReleasedHosts, host.HostID)
 	}
 	return plan, result, nil
+}
+
+func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, host DedicatedHostStatus) (bool, string, error) {
+	err := client.ReleaseHost(ctx, host.HostID)
+	if err == nil {
+		return true, "", nil
+	}
+	if emptyStatus(host.State) != "pending" {
+		return false, "", err
+	}
+	timeout := s.DestroyTimeout
+	if timeout == 0 {
+		timeout = time.Hour
+	}
+	interval := s.DestroyPollInterval
+	if interval == 0 {
+		interval = time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	lastErr := err
+	for time.Now().Before(deadline) {
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, fmt.Sprintf("release was attempted after EC2 termination but context ended while AWS Mac host transition was still in progress: %v", ctx.Err()), nil
+		case <-timer.C:
+		}
+		err = client.ReleaseHost(ctx, host.HostID)
+		if err == nil {
+			return true, "", nil
+		}
+		lastErr = err
+	}
+	return false, fmt.Sprintf("release was attempted after EC2 termination but AWS Mac host transition was still in progress after %s: %v", timeout, lastErr), nil
 }
 
 func filterTerminalAWSStatus(status AWSStatus) AWSStatus {

@@ -479,22 +479,19 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Destroy returned error: %v", err)
 	}
-	want := []string{"status", "disassociate:eipassoc-1", "terminate:i-1"}
+	want := []string{"status", "disassociate:eipassoc-1", "terminate:i-1", "release:h-1"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
-	if len(result.TerminatedInstances) != 1 || len(result.ReleasedHosts) != 0 || len(result.DeferredHosts) != 1 {
+	if len(result.TerminatedInstances) != 1 || strings.Join(result.ReleasedHosts, ",") != "h-1" || len(result.DeferredHosts) != 0 {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	text := FormatAWSDestroyResult(validPlan(t), result)
 	for _, want := range []string{
-		"Compute release: partial",
+		"Compute release: complete",
 		"Elastic IP retained: true",
-		"Need rerun: true",
-		"Suggested wait: 60 minutes",
-		"Deferred hosts:",
-		"- h-1 state=pending reason=EC2 was terminated in this run; wait for AWS Mac host transition before release",
-		"cm aws destroy user@example.com --confirm",
+		"Need rerun: false",
+		"Released hosts: h-1",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("destroy result missing %q:\n%s", want, text)
@@ -502,6 +499,69 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	}
 	if !strings.Contains(text, "Retained Elastic IP") {
 		t.Fatalf("destroy result missing recovery guidance:\n%s", text)
+	}
+}
+
+func TestAWSServiceDestroyDefersPendingHostReleaseFailure(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "pending", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
+		},
+		releaseErr: fmt.Errorf("host transition is still in progress"),
+	}
+	service := testAWSService(fake)
+	service.DestroyPollInterval = time.Millisecond
+	service.DestroyTimeout = 3 * time.Millisecond
+	_, result, err := service.Destroy(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	calls := strings.Join(fake.calls, ",")
+	if !strings.HasPrefix(calls, "status,release:h-1,release:h-1") {
+		t.Fatalf("calls = %v", fake.calls)
+	}
+	if len(result.DeferredHosts) != 1 || result.DeferredHosts[0].HostID != "h-1" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	text := FormatAWSDestroyResult(validPlan(t), result)
+	for _, want := range []string{
+		"Compute release: partial",
+		"Need rerun: true",
+		"Suggested wait: 60 minutes",
+		"Deferred hosts:",
+		"release was attempted after EC2 termination but AWS Mac host transition was still in progress",
+		"cm aws destroy user@example.com --confirm",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy result missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAWSServiceDestroyRetriesPendingHostReleaseUntilSuccess(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "pending", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
+		},
+		releaseErrs: []error{fmt.Errorf("host transition is still in progress"), nil},
+	}
+	service := testAWSService(fake)
+	service.DestroyPollInterval = time.Millisecond
+	service.DestroyTimeout = time.Second
+	_, result, err := service.Destroy(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	want := []string{"status", "release:h-1", "release:h-1"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if strings.Join(result.ReleasedHosts, ",") != "h-1" || len(result.DeferredHosts) != 0 {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 
@@ -681,6 +741,8 @@ type fakeAWSClient struct {
 	subnetAZs      map[string]string
 	runErr         error
 	associateErr   error
+	releaseErr     error
+	releaseErrs    []error
 }
 
 func (c *fakeAWSClient) CallerIdentity(ctx context.Context) (CallerIdentity, error) {
@@ -785,5 +847,13 @@ func (c *fakeAWSClient) TerminateInstance(ctx context.Context, instanceID string
 
 func (c *fakeAWSClient) ReleaseHost(ctx context.Context, hostID string) error {
 	c.calls = append(c.calls, "release:"+hostID)
+	if len(c.releaseErrs) > 0 {
+		err := c.releaseErrs[0]
+		c.releaseErrs = c.releaseErrs[1:]
+		return err
+	}
+	if c.releaseErr != nil {
+		return c.releaseErr
+	}
 	return nil
 }
