@@ -11,6 +11,7 @@ import (
 type AWSService struct {
 	Now                 func() time.Time
 	NewClient           func(ctx context.Context, plan MacPlan) (AWSClient, error)
+	Progress            func(message string)
 	ReadyPollInterval   time.Duration
 	ReadyTimeout        time.Duration
 	DestroyPollInterval time.Duration
@@ -585,17 +586,20 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 			continue
 		}
 		if !managedTagsMatch(instance.Tags, plan) {
-			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to terminate instance %s because required safety tags do not match", instance.InstanceID)
+			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to terminate instance %s because required safety tags do not match: %s", instance.InstanceID, managedTagsMismatch(instance.Tags, plan))
 		}
 		if status.ElasticIP.AssociationID != "" && status.ElasticIP.InstanceID == instance.InstanceID {
+			s.progress("Disassociating Elastic IP %s from instance %s", status.ElasticIP.AssociationID, instance.InstanceID)
 			if err := client.DisassociateElasticIP(ctx, status.ElasticIP.AssociationID); err != nil {
 				return MacPlan{}, result, err
 			}
 			result.DisassociatedElasticIP = true
 		}
+		s.progress("Terminating EC2 instance %s and waiting for AWS termination", instance.InstanceID)
 		if err := client.TerminateInstance(ctx, instance.InstanceID); err != nil {
 			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
 		}
+		s.progress("EC2 instance %s is terminated", instance.InstanceID)
 		result.TerminatedInstances = append(result.TerminatedInstances, instance.InstanceID)
 	}
 	for _, host := range status.Hosts {
@@ -604,7 +608,7 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 			continue
 		}
 		if !managedTagsMatch(host.Tags, plan) {
-			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match", host.HostID)
+			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match: %s", host.HostID, managedTagsMismatch(host.Tags, plan))
 		}
 		released, reason, err := s.releaseHostWithRetry(ctx, client, host)
 		if err != nil {
@@ -624,8 +628,10 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 }
 
 func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, host DedicatedHostStatus) (bool, string, error) {
+	s.progress("Attempting to release Dedicated Host %s", host.HostID)
 	err := client.ReleaseHost(ctx, host.HostID)
 	if err == nil {
+		s.progress("Dedicated Host %s is released", host.HostID)
 		return true, "", nil
 	}
 	if emptyStatus(host.State) != "pending" {
@@ -642,6 +648,7 @@ func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, 
 	deadline := time.Now().Add(timeout)
 	lastErr := err
 	for time.Now().Before(deadline) {
+		s.progress("Dedicated Host %s is pending; retry release in %s", host.HostID, interval)
 		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
@@ -651,11 +658,19 @@ func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, 
 		}
 		err = client.ReleaseHost(ctx, host.HostID)
 		if err == nil {
+			s.progress("Dedicated Host %s is released", host.HostID)
 			return true, "", nil
 		}
 		lastErr = err
 	}
 	return false, fmt.Sprintf("release was attempted after EC2 termination but AWS Mac host transition was still in progress after %s: %v", timeout, lastErr), nil
+}
+
+func (s AWSService) progress(format string, args ...interface{}) {
+	if s.Progress == nil {
+		return
+	}
+	s.Progress(fmt.Sprintf(format, args...))
 }
 
 func filterTerminalAWSStatus(status AWSStatus) AWSStatus {
@@ -879,7 +894,7 @@ func FormatMacDestroyPreview(plan MacPlan) string {
 	fmt.Fprintf(&b, "AWS Mac destroy preview for profile %s\n", plan.ProfileName)
 	fmt.Fprintf(&b, "Managed resource name: %s\n", plan.ResourceName)
 	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
-	fmt.Fprintf(&b, "Safety tags required before any mutation: %s\n", FormatAWSTags(plan.Tags[1:]))
+	fmt.Fprintf(&b, "Safety tags required before any mutation: %s\n", FormatAWSTags(managedRequiredTags(plan)))
 	fmt.Fprintln(&b, "Operations:")
 	fmt.Fprintln(&b, "- Disassociate Elastic IP only if attached to the managed instance; retain the Elastic IP allocation")
 	fmt.Fprintln(&b, "- Terminate the managed EC2 instance")
@@ -896,12 +911,12 @@ func FormatAWSAdoptionPreview(plan MacPlan, status AWSStatus) string {
 	for _, host := range status.Hosts {
 		fmt.Fprintf(&b, "- host=%s state=%s type=%s zone=%s\n", host.HostID, host.State, host.InstanceType, host.ZoneID)
 	}
-	fmt.Fprintf(&b, "Instances matched by Name: %d\n", len(status.Instances))
+	fmt.Fprintf(&b, "Instance candidates: %d\n", len(status.Instances))
 	for _, instance := range status.Instances {
 		fmt.Fprintf(&b, "- instance=%s state=%s type=%s host=%s public_ip=%s\n", instance.InstanceID, instance.State, instance.InstanceType, instance.HostID, instance.PublicIP)
 	}
 	fmt.Fprintf(&b, "Elastic IP owner tag: %s=%s\n", plan.ElasticIPOwnerTag.Key, plan.ElasticIPOwnerTag.Value)
-	fmt.Fprintf(&b, "Tags to add: cm-managed=true, cm-profile=%s, cm-account-email=%s\n", plan.ProfileName, plan.AccountEmail)
+	fmt.Fprintf(&b, "Tags to add: %s\n", FormatAWSTags(adoptionTags(plan)))
 	return b.String()
 }
 
@@ -1174,6 +1189,28 @@ func managedTagsMatch(tags []AWSTagConfig, plan MacPlan) bool {
 	return hasTag(tags, "cm-managed", "true") &&
 		hasTag(tags, "cm-profile", plan.ProfileName) &&
 		hasTag(tags, "cm-account-email", plan.AccountEmail)
+}
+
+func managedRequiredTags(plan MacPlan) []AWSTagConfig {
+	return []AWSTagConfig{
+		{Key: "cm-managed", Value: "true"},
+		{Key: "cm-profile", Value: plan.ProfileName},
+		{Key: "cm-account-email", Value: plan.AccountEmail},
+	}
+}
+
+func managedTagsMismatch(tags []AWSTagConfig, plan MacPlan) string {
+	required := managedRequiredTags(plan)
+	missing := make([]string, 0, len(required))
+	for _, tag := range required {
+		if !hasTag(tags, tag.Key, tag.Value) {
+			missing = append(missing, fmt.Sprintf("missing %s=%s", tag.Key, tag.Value))
+		}
+	}
+	if len(missing) == 0 {
+		return "required tags are present but did not match"
+	}
+	return strings.Join(missing, ", ")
 }
 
 func validateAdoptionCandidates(plan MacPlan, status AWSStatus) error {

@@ -464,6 +464,11 @@ func TestAWSServiceDestroyRequiresManagedTags(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refuse to release host") {
 		t.Fatalf("expected safety tag error, got %v", err)
 	}
+	for _, want := range []string{"missing cm-managed=true", "missing cm-profile=xcode-vnc", "missing cm-account-email=user@example.com"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected missing tag detail %q, got %v", want, err)
+		}
+	}
 }
 
 func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
@@ -639,6 +644,28 @@ func TestAWSServiceAdoptTagsMatchedResources(t *testing.T) {
 	}
 	if strings.Join(result.TaggedResources, ",") != "h-1,i-1" {
 		t.Fatalf("tagged resources = %v", result.TaggedResources)
+	}
+}
+
+func TestAWSServiceAdoptAllowsManualInstanceNameWhenEIPPointsToHostInstance(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "xcode-user@example.com"}}}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", HostID: "h-1", Tags: []AWSTagConfig{{Key: "Name", Value: "h-1"}}}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", InstanceID: "i-1", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Adopt(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Adopt returned error: %v", err)
+	}
+	if strings.Join(result.TaggedResources, ",") != "h-1,i-1" {
+		t.Fatalf("tagged resources = %v", result.TaggedResources)
+	}
+	text := FormatAWSAdoptionPreview(validPlan(t), fake.status)
+	if !strings.Contains(text, "Instance candidates: 1") || !strings.Contains(text, "cm-creator=Xiao Chen") {
+		t.Fatalf("unexpected adoption preview:\n%s", text)
 	}
 }
 

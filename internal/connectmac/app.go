@@ -332,7 +332,11 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to execute AWS destruction.")
 			return 0
 		}
-		_, result, err := a.AWSService.Destroy(ctx, profile)
+		service := a.AWSService
+		service.Progress = func(message string) {
+			fmt.Fprintln(a.Out, message)
+		}
+		_, result, err := service.Destroy(ctx, profile)
 		if err != nil {
 			var partial AWSDestroyPartialError
 			if errors.As(err, &partial) {

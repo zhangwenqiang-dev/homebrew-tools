@@ -167,11 +167,18 @@ func (c RealAWSClient) DescribeAdoptionCandidates(ctx context.Context, plan MacP
 	if err != nil {
 		return AWSStatus{}, err
 	}
-	if err := c.populateInstanceChecks(ctx, instances); err != nil {
-		return AWSStatus{}, err
-	}
 	eip, err := c.describeElasticIP(ctx, plan.ElasticIPAllocationID)
 	if err != nil {
+		return AWSStatus{}, err
+	}
+	if len(instances) == 0 && eip.InstanceID != "" {
+		instance, err := c.describeInstanceByID(ctx, eip.InstanceID)
+		if err != nil {
+			return AWSStatus{}, err
+		}
+		instances = append(instances, instance)
+	}
+	if err := c.populateInstanceChecks(ctx, instances); err != nil {
 		return AWSStatus{}, err
 	}
 	return AWSStatus{
