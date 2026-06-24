@@ -37,6 +37,22 @@ func InteractiveSSHArgs(profile Profile) ([]string, error) {
 	}, nil
 }
 
+func ExecSSHArgs(profile Profile, command []string) ([]string, error) {
+	keyPath, err := ExpandPath(profile.IdentityFile)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{
+		"-i", keyPath,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		fmt.Sprintf("%s@%s", profile.User, profile.Host),
+	}
+	args = append(args, command...)
+	return args, nil
+}
+
 func TunnelSummary(t Tunnel) string {
 	return "localhost:" + strconv.Itoa(t.LocalPort) + " -> " + t.RemoteHost + ":" + strconv.Itoa(t.RemotePort)
 }

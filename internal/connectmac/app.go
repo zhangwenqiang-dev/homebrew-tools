@@ -93,6 +93,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 			return code
 		}
 		return a.runSSH(ctx, cfg, args[1:])
+	case "exec":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runExec(ctx, cfg, args[1:])
 	case "start":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -408,7 +414,7 @@ func (a App) runInitRules(args []string) int {
 		fmt.Fprintln(a.Out, "AI rules install dry run")
 		fmt.Fprintf(a.Out, "Rules source: %s\n", install.SourcePath)
 		fmt.Fprintf(a.Out, "%s rules: %s\n", install.Agent, install.AgentPath)
-		fmt.Fprintf(a.Out, "connectmac-aws skill: %s\n", install.SkillPath)
+		fmt.Fprintf(a.Out, "connectmac skill: %s\n", install.SkillPath)
 		fmt.Fprintln(a.Out, "No files were written.")
 		return 0
 	}
@@ -419,7 +425,7 @@ func (a App) runInitRules(args []string) int {
 	}
 	fmt.Fprintf(a.Out, "created rules source: %s\n", result.SourcePath)
 	fmt.Fprintf(a.Out, "installed %s rules: %s\n", result.Agent, result.AgentPath)
-	fmt.Fprintf(a.Out, "installed connectmac-aws skill: %s\n", result.SkillPath)
+	fmt.Fprintf(a.Out, "installed connectmac skill: %s\n", result.SkillPath)
 	if result.Validated {
 		fmt.Fprintln(a.Out, "validation passed")
 	}
@@ -637,6 +643,39 @@ func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
 	fmt.Fprintf(a.Out, "SSH: %s@%s\n", profile.User, profile.Host)
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
 		fmt.Fprintf(a.Err, "ssh failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func (a App) runExec(ctx context.Context, cfg Config, args []string) int {
+	if len(args) >= 2 && args[1] == "--" {
+		args = append(args[:1], args[2:]...)
+	}
+	if len(args) < 2 {
+		fmt.Fprintln(a.Err, "usage: cm exec <profile> -- <command>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	profile = a.promptMissingIdentityFile(profile)
+	errs := a.Validator.ValidateAccess(profile)
+	if len(errs) > 0 {
+		printErrors(a.Err, errs)
+		return 1
+	}
+	command := args[1:]
+	sshArgs, err := ExecSSHArgs(profile, command)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "Exec: %s@%s %s\n", profile.User, profile.Host, strings.Join(command, " "))
+	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
+		fmt.Fprintf(a.Err, "ssh exec failed: %v\n", err)
 		return 1
 	}
 	return 0
@@ -891,6 +930,7 @@ func (a App) printUsage() {
   cm check <profile> [--config <path>]
   cm connect <profile> [--config <path>]
   cm ssh <profile> [--config <path>]
+  cm exec <profile> [--config <path>] -- <command>
   cm start <profile> [--config <path>]
   cm pull <profile> <remote-path> [--config <path>]
   cm push <profile> <local-path> <remote-dir> [--config <path>]
@@ -1054,6 +1094,10 @@ profiles:
 func parseConfigFlag(args []string, configPath *string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
 		if args[i] == "--config" && i+1 < len(args) {
 			*configPath = args[i+1]
 			i++

@@ -57,3 +57,25 @@ func TestInteractiveSSHArgs(t *testing.T) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
+
+func TestExecSSHArgs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	profile := validProfile("~/.ssh/example.pem")
+	got, err := ExecSSHArgs(profile, []string{"ls -ld ~/Downloads/Vitora && du -sh ~/Downloads/Vitora"})
+	if err != nil {
+		t.Fatalf("ExecSSHArgs returned error: %v", err)
+	}
+	wantKey := filepath.Join(home, ".ssh", "example.pem")
+	want := []string{
+		"-i", wantKey,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		"user@mac-host.example.com",
+		"ls -ld ~/Downloads/Vitora && du -sh ~/Downloads/Vitora",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}

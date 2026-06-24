@@ -41,7 +41,7 @@ func TestBuildRulesInstallUsesAgentsSkillsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".agents", "skills", "connectmac-aws")
+	want := filepath.Join(home, ".agents", "skills", "connectmac")
 	if install.SkillPath != want {
 		t.Fatalf("skill path = %q, want %q", install.SkillPath, want)
 	}
@@ -88,7 +88,7 @@ func TestInstallRulesWritesSourceAndUpsertsAgentBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(skill), "name: connectmac-aws") {
+	if !strings.Contains(string(skill), "name: connectmac") {
 		t.Fatalf("skill = %q", string(skill))
 	}
 }
@@ -113,7 +113,7 @@ func TestAppInitRules(t *testing.T) {
 	if !strings.Contains(out.String(), "validation passed") {
 		t.Fatalf("out = %q", out.String())
 	}
-	if _, err := os.Stat(filepath.Join(skillsDir, "connectmac-aws", "SKILL.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(skillsDir, "connectmac", "SKILL.md")); err != nil {
 		t.Fatalf("expected skill: %v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestAppInitRulesDryRunDoesNotWrite(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(home, ".connectmac", "rules.md"),
 		filepath.Join(project, "AGENTS.md"),
-		filepath.Join(skillsDir, "connectmac-aws", "SKILL.md"),
+		filepath.Join(skillsDir, "connectmac", "SKILL.md"),
 	} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("dry-run should not create %s, err=%v", path, err)

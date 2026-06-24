@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -268,6 +269,32 @@ func TestAppPushUsesRsyncRunner(t *testing.T) {
 		t.Fatal("expected rsync runner to be called")
 	}
 	if !strings.Contains(out.String(), "Push:") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppExecUsesForegroundRunner(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	command := "ls -ld ~/Downloads/Vitora && du -sh ~/Downloads/Vitora"
+	if code := app.Run(context.Background(), []string{"exec", "xcode-vnc", "--config", config, "--", command, "--config", "remote.yaml"}); code != 0 {
+		t.Fatalf("exec code = %d, err = %s", code, errOut.String())
+	}
+	if len(runner.foreground) == 0 {
+		t.Fatal("expected foreground runner to be called")
+	}
+	if !containsString(runner.foreground, "IdentitiesOnly=yes") {
+		t.Fatalf("foreground args missing IdentitiesOnly=yes: %#v", runner.foreground)
+	}
+	if got := runner.foreground[len(runner.foreground)-3:]; !reflect.DeepEqual(got, []string{command, "--config", "remote.yaml"}) {
+		t.Fatalf("command args = %#v, want command and remote --config preserved", got)
+	}
+	if !strings.Contains(out.String(), "Exec:") {
 		t.Fatalf("out = %q", out.String())
 	}
 }

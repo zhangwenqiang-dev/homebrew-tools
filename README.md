@@ -138,6 +138,12 @@ Open an interactive SSH shell:
 cm ssh xcode-vnc
 ```
 
+Run a non-interactive SSH command through the profile configuration:
+
+```bash
+cm exec xcode-vnc -- 'ls -ld ~/Downloads/Vitora && du -sh ~/Downloads/Vitora'
+```
+
 Start a managed background tunnel:
 
 ```bash
@@ -182,6 +188,12 @@ cm push xcode-vnc ./MyProject ~/Downloads/
 
 When pushing a directory, `cm` uploads it directly with rsync and applies the profile's push exclude rules.
 
+After a push, use `cm exec` to verify the remote path with the same SSH host, user, and key configured in the profile:
+
+```bash
+cm exec xcode-vnc -- 'ls -ld ~/Downloads/MyProject && du -sh ~/Downloads/MyProject && find ~/Downloads/MyProject -maxdepth 1 -name .git -type d -print'
+```
+
 Use a custom config path:
 
 ```bash
@@ -200,7 +212,7 @@ cm init-rules --agent cursor --project . --dry-run
 cm init-rules --print-rules
 ```
 
-`cm init-rules` writes the source rule file to `~/.connectmac/rules.md`, syncs the same rule block into the selected agent location, installs the `connectmac-aws` skill, and validates the installation. Codex/Trae rules go to `AGENTS.md`, Claude rules go to `CLAUDE.md`, and Cursor rules go to `.cursor/rules/connectmac.mdc`. The skill is installed to `~/.agents/skills/connectmac-aws` by default so supported AI tools can share it; pass `--skills-dir` to choose another skills directory. Use `--dry-run` to preview file paths without writing, and `--print-rules` to print the long-term rule content. When `cm init` creates a new config, it also asks whether to initialize AI rules. After installation, tell your AI agent to remember the content of `~/.connectmac/rules.md` exactly as long-term memory.
+`cm init-rules` writes the source rule file to `~/.connectmac/rules.md`, syncs the same rule block into the selected agent location, installs the `connectmac` skill, and validates the installation. Codex/Trae rules go to `AGENTS.md`, Claude rules go to `CLAUDE.md`, and Cursor rules go to `.cursor/rules/connectmac.mdc`. The skill is installed to `~/.agents/skills/connectmac` by default so supported AI tools can share it; pass `--skills-dir` to choose another skills directory. Use `--dry-run` to preview file paths without writing, and `--print-rules` to print the long-term rule content. When `cm init` creates a new config, it also asks whether to initialize AI rules. After installation, tell your AI agent to remember the content of `~/.connectmac/rules.md` exactly as long-term memory.
 
 Start the MCP server for AI clients:
 

@@ -9,7 +9,7 @@ import (
 
 const (
 	DefaultRulesPath = "~/.connectmac/rules.md"
-	SkillName        = "connectmac-aws"
+	SkillName        = "connectmac"
 	rulesStart       = "<!-- BEGIN CONNECTMAC AWS RULES -->"
 	rulesEnd         = "<!-- END CONNECTMAC AWS RULES -->"
 )
@@ -166,8 +166,8 @@ func ValidateRulesInstall(result RulesInstallResult) error {
 	if err != nil {
 		return fmt.Errorf("validate skill: %w", err)
 	}
-	if !strings.Contains(string(skill), "name: connectmac-aws") {
-		return fmt.Errorf("validate skill: missing connectmac-aws name")
+	if !strings.Contains(string(skill), "name: connectmac") {
+		return fmt.Errorf("validate skill: missing connectmac name")
 	}
 	if _, err := os.Stat(filepath.Join(result.SkillPath, "agents", "openai.yaml")); err != nil {
 		return fmt.Errorf("validate skill metadata: %w", err)
@@ -260,7 +260,7 @@ func DefaultRulesTemplate() string {
 	return strings.Join([]string{
 		"# ConnectMac AWS AI Rules",
 		"",
-		"Use the connectmac-aws skill for any request involving cm aws, AWS Mac Dedicated Hosts, Mac virtual machines, 提包机, Apple-account-based Mac access, or opening/creating/releasing/destroying AWS Mac resources.",
+		"Use the connectmac skill for any request involving cm aws, AWS Mac Dedicated Hosts, Mac virtual machines, 提包机, Apple-account-based Mac access, or opening/creating/releasing/destroying AWS Mac resources.",
 		"",
 		"Follow these rules:",
 		"",
@@ -319,7 +319,7 @@ func DefaultRulesTemplate() string {
 func DefaultSkillTemplate() string {
 	return strings.Join([]string{
 		"---",
-		"name: connectmac-aws",
+		"name: connectmac",
 		"description: Safely operate the local `cm` ConnectMac tool for AWS Mac Dedicated Host workflows. Use when the user asks to open, create, release, destroy, check, list, or manage Mac virtual machines, AWS Mac hosts, 提包机, Apple-account-based Mac access, `cm aws`, or `cm` MCP workflows. Always require an explicit Apple account email for AI-driven open/create/destroy requests; if missing, list configured accounts and ask the user to choose.",
 		"---",
 		"",
