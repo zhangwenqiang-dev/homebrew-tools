@@ -77,7 +77,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.34",
+				"version": "0.1.35",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -349,11 +349,19 @@ func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args ma
 	if err != nil {
 		return nil, err
 	}
-	text := fmt.Sprintf("Resolved Apple account %s -> profile %s\n", email, profile.Name) + FormatAWSOpenPreview(plan, status)
+	action := AWSOpenAction(status)
+	var candidates []AWSCreateAttempt
+	if action.Kind == "create" {
+		_, values, err := s.App.AWSService.CreateCandidates(ctx, profile)
+		if err != nil {
+			return nil, err
+		}
+		candidates = values
+	}
+	text := fmt.Sprintf("Resolved Apple account %s -> profile %s\n", email, profile.Name) + FormatAWSOpenPreviewWithCandidates(plan, status, candidates)
 	if !boolArg(args, "confirm") {
 		return mcpText(text + "Preview only. Call again with confirm=true to open or wait for this Mac."), nil
 	}
-	action := AWSOpenAction(status)
 	switch action.Kind {
 	case "ready":
 		return mcpText(text + FormatAWSReadyStatus(plan, status)), nil

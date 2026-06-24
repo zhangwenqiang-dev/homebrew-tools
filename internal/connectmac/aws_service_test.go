@@ -233,6 +233,38 @@ func TestAWSOpenAction(t *testing.T) {
 	}
 }
 
+func TestFormatAWSOpenPreviewWithCandidates(t *testing.T) {
+	plan := validPlan(t)
+	status := AWSStatus{ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"}}
+	text := FormatAWSOpenPreviewWithCandidates(plan, status, []AWSCreateAttempt{{
+		AvailabilityZoneID: "use1-az6",
+		InstanceType:       "mac2-m2.metal",
+		AMI:                "ami-arm",
+		SubnetID:           "<subnet-id-az6>",
+		Status:             "candidate",
+		Detail:             "ready for AllocateHost",
+	}})
+	for _, want := range []string{"Decision: create", "Create candidates:", "use1-az6", "mac2-m2.metal", "candidate"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("open preview missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestFormatAWSManualSetupGuideExitsSSHBeforeLocalCommands(t *testing.T) {
+	text := FormatAWSManualSetupGuide(validPlan(t))
+	for _, want := range []string{
+		"cm ssh xcode-vnc\n  # Enter the remote Mac SSH shell",
+		"sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  # Start the Screen Sharing service now.\n  exit",
+		"exit\n  # Exit SSH and return to the local terminal.\n  cm start xcode-vnc",
+		"cm open-vnc xcode-vnc\n  # Open macOS Screen Sharing through the local tunnel.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("manual setup guide missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestHostIDsFromInstancesDedupesEmptyValues(t *testing.T) {
 	got := hostIDsFromInstances([]InstanceStatus{
 		{InstanceID: "i-1", HostID: "h-1"},
@@ -273,6 +305,10 @@ func TestAWSServiceWaitReadyPollsUntilAllChecksPass(t *testing.T) {
 	service := testAWSService(fake)
 	service.ReadyPollInterval = time.Millisecond
 	service.ReadyTimeout = time.Second
+	var progress []string
+	service.Progress = func(message string) {
+		progress = append(progress, message)
+	}
 	_, status, err := service.WaitReady(context.Background(), validAWSProfile())
 	if err != nil {
 		t.Fatalf("WaitReady returned error: %v", err)
@@ -282,6 +318,9 @@ func TestAWSServiceWaitReadyPollsUntilAllChecksPass(t *testing.T) {
 	}
 	if strings.Join(fake.calls, ",") != "status,status" {
 		t.Fatalf("calls = %v", fake.calls)
+	}
+	if len(progress) != 1 || !strings.Contains(progress[0], "Waiting for AWS readiness:") || !strings.Contains(progress[0], "instance_status=initializing") {
+		t.Fatalf("progress = %v", progress)
 	}
 }
 
@@ -300,9 +339,19 @@ func TestAWSServiceCreateAllocatesRunsAndAssociates(t *testing.T) {
 	if result.SubnetID != "<subnet-id>" {
 		t.Fatalf("subnet id = %q", result.SubnetID)
 	}
-	want := []string{"verify-eip", "offerings:mac2.metal", "subnet:<subnet-id>", "allocate:usw2-az1:mac2.metal", "run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a", "status", "associate:<elastic-ip-allocation-id>:i-created"}
-	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
-		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	calls := strings.Join(fake.calls, ",")
+	for _, want := range []string{
+		"verify-eip",
+		"quotas:mac2.metal,mac2-m2.metal",
+		"all-hosts",
+		"allocate:usw2-az1:mac2.metal",
+		"run:h-created:<subnet-id>:mac2.metal:ami-063755aadeb97329a",
+		"status",
+		"associate:<elastic-ip-allocation-id>:i-created",
+	} {
+		if !strings.Contains(calls, want) {
+			t.Fatalf("calls missing %q: %v", want, fake.calls)
+		}
 	}
 }
 
@@ -387,6 +436,54 @@ func TestAWSServiceCreateSkipsUnsupportedAvailabilityZone(t *testing.T) {
 	}
 }
 
+func TestAWSServiceCreateSkipsMissingSubnetCandidate(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.SubnetID = ""
+	profile.AWS.SubnetsByAZ = map[string]string{"usw2-az2": "<subnet-id-az2>"}
+	fake := &fakeAWSClient{
+		eip: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		subnetAZs: map[string]string{
+			"<subnet-id-az2>": "usw2-az2",
+		},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Create(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.AvailabilityZoneID != "usw2-az2" {
+		t.Fatalf("availability zone = %q", result.AvailabilityZoneID)
+	}
+	if len(result.Attempts) < 2 || result.Attempts[0].Status != "no-subnet" {
+		t.Fatalf("unexpected attempts: %+v", result.Attempts)
+	}
+}
+
+func TestAWSServiceCreateSkipsQuotaExhaustedCandidate(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.InstanceTypePriority = []string{"mac2.metal", "mac2-m2.metal"}
+	fake := &fakeAWSClient{
+		eip:      ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "user@example.com"}}},
+		quotas:   map[string]float64{"mac2.metal": 1, "mac2-m2.metal": 1},
+		allHosts: []DedicatedHostStatus{{HostID: "h-used", State: "available", InstanceType: "mac2.metal"}},
+	}
+	service := testAWSService(fake)
+	_, result, err := service.Create(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if result.InstanceType != "mac2-m2.metal" {
+		t.Fatalf("instance type = %q", result.InstanceType)
+	}
+	if result.Attempts[0].Status != "quota-exhausted" {
+		t.Fatalf("unexpected attempts: %+v", result.Attempts)
+	}
+	calls := strings.Join(fake.calls, ",")
+	if strings.Contains(calls, "allocate:usw2-az1:mac2.metal") {
+		t.Fatalf("must not allocate quota-exhausted type, calls = %v", fake.calls)
+	}
+}
+
 func TestAWSServiceCreateRejectsWrongEIPOwner(t *testing.T) {
 	fake := &fakeAWSClient{
 		eip: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", Tags: []AWSTagConfig{{Key: "Apple", Value: "other@example.com"}}},
@@ -417,8 +514,8 @@ func TestAWSServiceCreateStopsAfterHostAllocatedWhenEIPAssociationFails(t *testi
 	if strings.Count(calls, "allocate:") != 1 {
 		t.Fatalf("expected exactly one host allocation, calls = %v", fake.calls)
 	}
-	if strings.Contains(calls, "mac2-m2.metal") {
-		t.Fatalf("must not try next instance type after host allocation, calls = %v", fake.calls)
+	if strings.Contains(calls, "allocate:usw2-az1:mac2-m2.metal") || strings.Contains(calls, "run:h-created:<subnet-id>:mac2-m2.metal") {
+		t.Fatalf("must not allocate or run next instance type after host allocation, calls = %v", fake.calls)
 	}
 	if strings.Contains(calls, "terminate:") || strings.Contains(calls, "release:") {
 		t.Fatalf("must not auto-terminate/release after association failure, calls = %v", fake.calls)
@@ -444,8 +541,8 @@ func TestAWSServiceCreateStopsAfterHostAllocatedWhenRunInstanceFails(t *testing.
 	if strings.Count(calls, "allocate:") != 1 {
 		t.Fatalf("expected exactly one host allocation, calls = %v", fake.calls)
 	}
-	if strings.Contains(calls, "mac2-m2.metal") {
-		t.Fatalf("must not try next instance type after host allocation, calls = %v", fake.calls)
+	if strings.Contains(calls, "allocate:usw2-az1:mac2-m2.metal") || strings.Contains(calls, "run:h-created:<subnet-id>:mac2-m2.metal") {
+		t.Fatalf("must not allocate or run next instance type after host allocation, calls = %v", fake.calls)
 	}
 	if strings.Contains(calls, "terminate:") || strings.Contains(calls, "release:") {
 		t.Fatalf("must not auto-terminate/release after run instance failure, calls = %v", fake.calls)

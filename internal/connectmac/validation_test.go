@@ -76,8 +76,18 @@ func TestValidateAWSProfileRejectsInvalidZoneID(t *testing.T) {
 	profile := validAWSProfile()
 	profile.AWS.AvailabilityZoneIDs = []string{"us-west-2a"}
 	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
-	if !containsError(errs, "must end with -az1") {
+	if !containsError(errs, "must end with -az1 through -az99") {
 		t.Fatalf("expected zone id error, got %v", errs)
+	}
+}
+
+func TestValidateAWSProfileAllowsHigherNumberedZoneID(t *testing.T) {
+	profile := validAWSProfile()
+	profile.AWS.AvailabilityZoneIDs = []string{"use1-az6"}
+	profile.AWS.SubnetsByAZ = map[string]string{"use1-az6": "<subnet-id-az6>"}
+	errs := NewValidatorForTest(nil).ValidateAWSProfile(profile)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
 	}
 }
 

@@ -137,6 +137,7 @@ func (s AWSService) WaitReady(ctx context.Context, profile Profile) (MacPlan, AW
 		if !time.Now().Before(deadline) {
 			return MacPlan{}, last, fmt.Errorf("timed out waiting for AWS Mac readiness: %s", AWSReadinessSummary(status))
 		}
+		s.progress("Waiting for AWS readiness: %s; retry in %s", AWSReadinessSummary(status), interval)
 		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
@@ -252,94 +253,154 @@ func (s AWSService) Create(ctx context.Context, profile Profile) (MacPlan, AWSCr
 	}
 	var lastErr error
 	var attempts []AWSCreateAttempt
-	for _, instanceType := range plan.InstanceTypePriority {
-		ami := amiForInstanceType(AWSConfig{AMI: AWSAMIConfig{MacX86: profile.AWS.AMI.MacX86, MacARM: profile.AWS.AMI.MacARM}}, instanceType)
-		if ami == "" {
+	candidates := createCandidates(ctx, client, plan, profile.AWS)
+	for _, candidate := range candidates {
+		attempt := candidate
+		if attempt.Status != "candidate" {
+			attempts = append(attempts, attempt)
+			lastErr = fmt.Errorf("%s", attempt.Detail)
 			continue
 		}
-		offerings, err := client.InstanceTypeOfferings(ctx, instanceType)
+		attemptPlan := plan
+		attemptPlan.SubnetID = attempt.SubnetID
+		hostID, err := client.AllocateHost(ctx, attemptPlan, attempt.AvailabilityZoneID, attempt.InstanceType)
 		if err != nil {
-			attempts = append(attempts, AWSCreateAttempt{
-				InstanceType: instanceType,
-				Status:       "failed",
-				Detail:       err.Error(),
-			})
+			attempt.Status = "failed"
+			attempt.Detail = err.Error()
+			attempts = append(attempts, attempt)
 			lastErr = err
 			continue
 		}
-		supportedZones := stringSet(offerings)
-		for _, zoneID := range plan.AvailabilityZoneIDs {
-			attempt := AWSCreateAttempt{
-				AvailabilityZoneID: zoneID,
-				InstanceType:       instanceType,
-			}
-			if !supportedZones[zoneID] {
-				attempt.Status = "unsupported"
-				attempt.Detail = fmt.Sprintf("%s is not offered in %s", instanceType, zoneID)
-				attempts = append(attempts, attempt)
-				lastErr = fmt.Errorf("%s", attempt.Detail)
-				continue
-			}
-			subnetID, err := subnetForLaunch(ctx, client, plan, zoneID)
-			if err != nil {
-				attempt.Status = "failed"
-				attempt.Detail = err.Error()
-				attempts = append(attempts, attempt)
-				lastErr = err
-				continue
-			}
-			attempt.SubnetID = subnetID
-			attemptPlan := plan
-			attemptPlan.SubnetID = subnetID
-			hostID, err := client.AllocateHost(ctx, attemptPlan, zoneID, instanceType)
-			if err != nil {
-				attempt.Status = "failed"
-				attempt.Detail = err.Error()
-				attempts = append(attempts, attempt)
-				lastErr = err
-				continue
-			}
-			attempt.Detail = fmt.Sprintf("host=%s", hostID)
-			instanceID, err := client.RunInstance(ctx, attemptPlan, hostID, instanceType, ami)
-			if err != nil {
-				attempt.Status = "failed"
-				attempt.Detail = fmt.Sprintf("host=%s; %s", hostID, err.Error())
-				attempts = append(attempts, attempt)
-				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "run-instance", HostID: hostID, Cause: fmt.Errorf("dedicated host %s was allocated; stop retrying and fix instance launch: %w", hostID, err)}
-			}
-			if err := s.waitInstanceRunning(ctx, client, plan, instanceID); err != nil {
-				attempt.Status = "failed"
-				attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
-				attempts = append(attempts, attempt)
-				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "wait-instance-running", HostID: hostID, InstanceID: instanceID, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and wait or clean up: %w", hostID, instanceID, err)}
-			}
-			associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
-			if err != nil {
-				attempt.Status = "failed"
-				attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
-				attempts = append(attempts, attempt)
-				return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "associate-elastic-ip", HostID: hostID, InstanceID: instanceID, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and fix elastic ip association: %w", hostID, instanceID, err)}
-			}
-			attempt.Status = "created"
-			attempt.Detail = fmt.Sprintf("host=%s instance=%s", hostID, instanceID)
+		attempt.Detail = fmt.Sprintf("host=%s", hostID)
+		instanceID, err := client.RunInstance(ctx, attemptPlan, hostID, attempt.InstanceType, attempt.AMI)
+		if err != nil {
+			attempt.Status = "failed"
+			attempt.Detail = fmt.Sprintf("host=%s; %s", hostID, err.Error())
 			attempts = append(attempts, attempt)
-			return plan, AWSCreateResult{
-				HostID:              hostID,
-				InstanceID:          instanceID,
-				AssociationID:       associationID,
-				AvailabilityZoneID:  zoneID,
-				InstanceType:        instanceType,
-				AMI:                 ami,
-				SubnetID:            subnetID,
-				ElasticIPAllocation: plan.ElasticIPAllocationID,
-				Attempts:            attempts,
-			}, nil
+			return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "run-instance", HostID: hostID, Cause: fmt.Errorf("dedicated host %s was allocated; stop retrying and fix instance launch: %w", hostID, err)}
 		}
+		if err := s.waitInstanceRunning(ctx, client, plan, instanceID); err != nil {
+			attempt.Status = "failed"
+			attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
+			attempts = append(attempts, attempt)
+			return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "wait-instance-running", HostID: hostID, InstanceID: instanceID, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and wait or clean up: %w", hostID, instanceID, err)}
+		}
+		associationID, err := client.AssociateElasticIP(ctx, plan.ElasticIPAllocationID, instanceID)
+		if err != nil {
+			attempt.Status = "failed"
+			attempt.Detail = fmt.Sprintf("host=%s instance=%s; %s", hostID, instanceID, err.Error())
+			attempts = append(attempts, attempt)
+			return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Stage: "associate-elastic-ip", HostID: hostID, InstanceID: instanceID, Cause: fmt.Errorf("dedicated host %s and instance %s were created; stop retrying and fix elastic ip association: %w", hostID, instanceID, err)}
+		}
+		attempt.Status = "created"
+		attempt.Detail = fmt.Sprintf("host=%s instance=%s", hostID, instanceID)
+		attempts = append(attempts, attempt)
+		return plan, AWSCreateResult{
+			HostID:              hostID,
+			InstanceID:          instanceID,
+			AssociationID:       associationID,
+			AvailabilityZoneID:  attempt.AvailabilityZoneID,
+			InstanceType:        attempt.InstanceType,
+			AMI:                 attempt.AMI,
+			SubnetID:            attempt.SubnetID,
+			ElasticIPAllocation: plan.ElasticIPAllocationID,
+			Attempts:            attempts,
+		}, nil
 	}
 	if lastErr != nil {
 		return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: lastErr}
 	}
 	return MacPlan{}, AWSCreateResult{}, AWSCreateAttemptsError{Attempts: attempts, Cause: fmt.Errorf("no aws create candidate was attempted")}
+}
+
+func (s AWSService) CreateCandidates(ctx context.Context, profile Profile) (MacPlan, []AWSCreateAttempt, error) {
+	plan, err := s.Plan(profile)
+	if err != nil {
+		return MacPlan{}, nil, err
+	}
+	client, err := s.client(ctx, plan)
+	if err != nil {
+		return MacPlan{}, nil, err
+	}
+	return plan, createCandidates(ctx, client, plan, profile.AWS), nil
+}
+
+func createCandidates(ctx context.Context, client AWSClient, plan MacPlan, cfg AWSConfig) []AWSCreateAttempt {
+	quotas, quotaErr := client.DedicatedHostQuotas(ctx, plan.InstanceTypePriority)
+	var inUse map[string]int
+	if quotaErr == nil {
+		if hosts, err := client.DescribeAllHosts(ctx); err == nil {
+			inUse = dedicatedHostUsageByInstanceType(hosts)
+		}
+	}
+	candidates := make([]AWSCreateAttempt, 0, len(plan.InstanceTypePriority)*len(plan.AvailabilityZoneIDs))
+	for _, instanceType := range plan.InstanceTypePriority {
+		ami := amiForInstanceType(cfg, instanceType)
+		if ami == "" {
+			continue
+		}
+		if quota, ok := quotas[instanceType]; quotaErr == nil && inUse != nil && ok && float64(inUse[instanceType]) >= quota {
+			for _, zoneID := range plan.AvailabilityZoneIDs {
+				candidates = append(candidates, AWSCreateAttempt{
+					AvailabilityZoneID: zoneID,
+					InstanceType:       instanceType,
+					AMI:                ami,
+					Status:             "quota-exhausted",
+					Detail:             fmt.Sprintf("%s quota %.0f is fully used", instanceType, quota),
+				})
+			}
+			continue
+		}
+		offerings, err := client.InstanceTypeOfferings(ctx, instanceType)
+		if err != nil {
+			candidates = append(candidates, AWSCreateAttempt{
+				InstanceType: instanceType,
+				AMI:          ami,
+				Status:       "failed",
+				Detail:       err.Error(),
+			})
+			continue
+		}
+		supportedZones := stringSet(offerings)
+		for _, zoneID := range plan.AvailabilityZoneIDs {
+			candidate := AWSCreateAttempt{
+				AvailabilityZoneID: zoneID,
+				InstanceType:       instanceType,
+				AMI:                ami,
+			}
+			if !supportedZones[zoneID] {
+				candidate.Status = "unsupported"
+				candidate.Detail = fmt.Sprintf("%s is not offered in %s", instanceType, zoneID)
+				candidates = append(candidates, candidate)
+				continue
+			}
+			subnetID := plan.SubnetForAZ(zoneID)
+			if subnetID == "" {
+				candidate.Status = "no-subnet"
+				candidate.Detail = fmt.Sprintf("no subnet configured for availability zone %s", zoneID)
+				candidates = append(candidates, candidate)
+				continue
+			}
+			candidate.SubnetID = subnetID
+			actualZoneID, err := client.SubnetAvailabilityZoneID(ctx, subnetID)
+			if err != nil {
+				candidate.Status = "failed"
+				candidate.Detail = err.Error()
+				candidates = append(candidates, candidate)
+				continue
+			}
+			if actualZoneID != zoneID {
+				candidate.Status = "subnet-mismatch"
+				candidate.Detail = fmt.Sprintf("subnet %s is in %s, but candidate availability zone is %s", subnetID, actualZoneID, zoneID)
+				candidates = append(candidates, candidate)
+				continue
+			}
+			candidate.Status = "candidate"
+			candidate.Detail = "ready for AllocateHost"
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
 }
 
 func (s AWSService) LaunchOnHostPreview(ctx context.Context, profile Profile, hostID string) (MacPlan, AWSLaunchOnHostPreview, error) {
@@ -720,6 +781,7 @@ type AWSCreateResult struct {
 type AWSCreateAttempt struct {
 	AvailabilityZoneID string
 	InstanceType       string
+	AMI                string
 	SubnetID           string
 	Status             string
 	Detail             string
@@ -889,6 +951,14 @@ func FormatAWSOpenPreview(plan MacPlan, status AWSStatus) string {
 	return b.String()
 }
 
+func FormatAWSOpenPreviewWithCandidates(plan MacPlan, status AWSStatus, candidates []AWSCreateAttempt) string {
+	text := FormatAWSOpenPreview(plan, status)
+	if AWSOpenAction(status).Kind != "create" || len(candidates) == 0 {
+		return text
+	}
+	return text + FormatAWSCreateCandidates(candidates)
+}
+
 func FormatMacDestroyPreview(plan MacPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac destroy preview for profile %s\n", plan.ProfileName)
@@ -1015,7 +1085,7 @@ func FormatAWSReadyStatus(plan MacPlan, status AWSStatus) string {
 }
 
 func FormatAWSManualSetupGuide(plan MacPlan) string {
-	return fmt.Sprintf("Manual GUI setup:\n  cm ssh %s\n  sudo passwd ec2-user\n  sudo launchctl enable system/com.apple.screensharing\n  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  cm start %s\n  cm open-vnc %s\n", plan.ProfileName, plan.ProfileName, plan.ProfileName)
+	return fmt.Sprintf("Manual GUI setup:\n  cm ssh %s\n  # Enter the remote Mac SSH shell for first-time GUI/VNC setup.\n  sudo passwd ec2-user\n  # Set the remote ec2-user password for Screen Sharing/VNC login.\n  sudo launchctl enable system/com.apple.screensharing\n  # Enable the macOS Screen Sharing service.\n  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  # Start the Screen Sharing service now.\n  exit\n  # Exit SSH and return to the local terminal.\n  cm start %s\n  # Start the local SSH tunnel to the remote Mac VNC port.\n  cm open-vnc %s\n  # Open macOS Screen Sharing through the local tunnel.\n", plan.ProfileName, plan.ProfileName, plan.ProfileName)
 }
 
 func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {
@@ -1034,6 +1104,14 @@ func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {
 }
 
 func FormatAWSCreateAttempts(attempts []AWSCreateAttempt) string {
+	return formatAWSCreateAttemptTable("Create attempts:", attempts)
+}
+
+func FormatAWSCreateCandidates(candidates []AWSCreateAttempt) string {
+	return formatAWSCreateAttemptTable("Create candidates:", candidates)
+}
+
+func formatAWSCreateAttemptTable(title string, attempts []AWSCreateAttempt) string {
 	if len(attempts) == 0 {
 		return ""
 	}
@@ -1049,7 +1127,7 @@ func FormatAWSCreateAttempts(attempts []AWSCreateAttempt) string {
 		})
 	}
 	var b strings.Builder
-	fmt.Fprintln(&b, "Create attempts:")
+	fmt.Fprintln(&b, title)
 	fmt.Fprint(&b, formatRows(rows))
 	return b.String()
 }

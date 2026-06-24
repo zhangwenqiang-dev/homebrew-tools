@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -112,12 +113,12 @@ func (v Validator) ValidateAWSProfile(profile Profile) []error {
 	}
 	for _, zoneID := range profile.AWS.AvailabilityZoneIDs {
 		if !validAvailabilityZoneID(zoneID) {
-			errs = append(errs, fmt.Errorf("aws availability zone id %q must end with -az1, -az2, -az3, or -az4", zoneID))
+			errs = append(errs, fmt.Errorf("aws availability zone id %q must end with -az1 through -az99", zoneID))
 		}
 	}
 	for zoneID, subnetID := range profile.AWS.SubnetsByAZ {
 		if !validAvailabilityZoneID(zoneID) {
-			errs = append(errs, fmt.Errorf("aws subnets_by_az key %q must end with -az1, -az2, -az3, or -az4", zoneID))
+			errs = append(errs, fmt.Errorf("aws subnets_by_az key %q must end with -az1 through -az99", zoneID))
 		}
 		if subnetID == "" {
 			errs = append(errs, fmt.Errorf("aws subnets_by_az %q subnet id is required", zoneID))
@@ -227,10 +228,16 @@ func validateIdentityFile(path string) error {
 }
 
 func validAvailabilityZoneID(zoneID string) bool {
-	return strings.HasSuffix(zoneID, "-az1") ||
-		strings.HasSuffix(zoneID, "-az2") ||
-		strings.HasSuffix(zoneID, "-az3") ||
-		strings.HasSuffix(zoneID, "-az4")
+	index := strings.LastIndex(zoneID, "-az")
+	if index < 0 || index+3 >= len(zoneID) {
+		return false
+	}
+	number := zoneID[index+3:]
+	if len(number) > 2 {
+		return false
+	}
+	value, err := strconv.Atoi(number)
+	return err == nil && value >= 1 && value <= 99
 }
 
 func unknownProfileError(cfg Config, name string) error {

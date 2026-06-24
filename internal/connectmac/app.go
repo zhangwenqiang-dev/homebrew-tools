@@ -232,7 +232,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
-		_, status, err := a.AWSService.WaitReady(ctx, profile)
+		_, status, err := a.awsServiceWithProgress().WaitReady(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
 			return 1
@@ -251,7 +251,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		}
 		return 0
 	case "wait-ready":
-		_, status, err := a.AWSService.WaitReady(ctx, profile)
+		_, status, err := a.awsServiceWithProgress().WaitReady(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
 			return 1
@@ -482,8 +482,17 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 		fmt.Fprintf(a.Err, "aws open failed: %v\n", err)
 		return 1
 	}
-	fmt.Fprint(a.Out, FormatAWSOpenPreview(plan, status))
 	action := AWSOpenAction(status)
+	var candidates []AWSCreateAttempt
+	if action.Kind == "create" {
+		_, values, err := a.AWSService.CreateCandidates(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws open failed: %v\n", err)
+			return 1
+		}
+		candidates = values
+	}
+	fmt.Fprint(a.Out, FormatAWSOpenPreviewWithCandidates(plan, status, candidates))
 	if !confirm {
 		fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to open or wait for this Mac.")
 		return 0
@@ -493,7 +502,7 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
 	case "wait-ready":
-		_, readyStatus, err := a.AWSService.WaitReady(ctx, profile)
+		_, readyStatus, err := a.awsServiceWithProgress().WaitReady(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
 			return 1
@@ -507,7 +516,7 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
-		_, readyStatus, err := a.AWSService.WaitReady(ctx, profile)
+		_, readyStatus, err := a.awsServiceWithProgress().WaitReady(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
 			return 1
@@ -521,7 +530,7 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 			return 1
 		}
 		fmt.Fprint(a.Out, FormatAWSCreateResult(plan, result))
-		_, readyStatus, err := a.AWSService.WaitReady(ctx, profile)
+		_, readyStatus, err := a.awsServiceWithProgress().WaitReady(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "aws wait-ready failed: %v\n", err)
 			return 1
@@ -532,6 +541,14 @@ func (a App) runAWSOpen(ctx context.Context, profile Profile, plan MacPlan, conf
 		fmt.Fprintf(a.Err, "aws open cannot continue automatically: %s\n", action.Detail)
 		return 1
 	}
+}
+
+func (a App) awsServiceWithProgress() AWSService {
+	service := a.AWSService
+	service.Progress = func(message string) {
+		fmt.Fprintln(a.Out, message)
+	}
+	return service
 }
 
 func resolveProfileRef(cfg Config, ref string) (Profile, error) {
