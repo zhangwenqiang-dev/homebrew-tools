@@ -200,6 +200,24 @@ Use a custom config path:
 cm list --config ./examples/config.yaml
 ```
 
+Install shell tab completion:
+
+```bash
+cm completion zsh > ~/.zsh/completions/_cm
+cm completion bash > ~/.bash_completion.d/cm
+cm completion fish > ~/.config/fish/completions/cm.fish
+```
+
+Homebrew installs completion scripts automatically during `brew install cm` or `brew upgrade cm`. For manual zsh installation, ensure your `~/.zshrc` loads the completion directory:
+
+```bash
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit
+compinit
+```
+
+Completion dynamically reads configured profiles and Apple account emails, so commands like `cm ssh <Tab>` and `cm aws open <Tab>` can suggest current config values.
+
 Initialize AI safety rules for supported agents:
 
 ```bash

@@ -63,6 +63,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runInit(configPath, args[1:])
 	case "init-rules":
 		return a.runInitRules(args[1:])
+	case "completion":
+		return a.runCompletion(configPath, args[1:])
 	case "list":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -437,6 +439,50 @@ func (a App) runInitRules(args []string) int {
 func (a App) runList(cfg Config) int {
 	fmt.Fprint(a.Out, listProfilesText(cfg))
 	return 0
+}
+
+func (a App) runCompletion(configPath string, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|profile-commands>")
+		return 2
+	}
+	switch args[0] {
+	case "zsh":
+		fmt.Fprint(a.Out, zshCompletionScript())
+		return 0
+	case "bash":
+		fmt.Fprint(a.Out, bashCompletionScript())
+		return 0
+	case "fish":
+		fmt.Fprint(a.Out, fishCompletionScript())
+		return 0
+	case "commands":
+		printLines(a.Out, completionCommands())
+		return 0
+	case "aws-commands":
+		printLines(a.Out, completionAWSCommands())
+		return 0
+	case "profile-commands":
+		printLines(a.Out, completionProfileCommands())
+		return 0
+	case "profiles":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		printLines(a.Out, sortedProfileNames(cfg))
+		return 0
+	case "apple-emails":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		printLines(a.Out, sortedAppleEmails(cfg))
+		return 0
+	default:
+		fmt.Fprintf(a.Err, "unknown completion target %q\n", args[0])
+		return 2
+	}
 }
 
 func (a App) runProfile(cfg Config, args []string) int {
@@ -926,6 +972,7 @@ func (a App) printUsage() {
   cm init [--config <path>]
   cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
   cm init-rules --print-rules
+  cm completion <zsh|bash|fish>
   cm list [--config <path>]
   cm check <profile> [--config <path>]
   cm connect <profile> [--config <path>]
@@ -1146,6 +1193,256 @@ func sortedProfileNames(cfg Config) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func sortedAppleEmails(cfg Config) []string {
+	seen := map[string]bool{}
+	var emails []string
+	for _, profile := range cfg.Profiles {
+		for _, email := range profileAppleEmails(profile) {
+			if !seen[email] {
+				seen[email] = true
+				emails = append(emails, email)
+			}
+		}
+	}
+	sort.Strings(emails)
+	return emails
+}
+
+func printLines(out io.Writer, values []string) {
+	for _, value := range values {
+		fmt.Fprintln(out, value)
+	}
+}
+
+func completionCommands() []string {
+	return []string{
+		"init",
+		"init-rules",
+		"completion",
+		"list",
+		"profile",
+		"check",
+		"connect",
+		"ssh",
+		"exec",
+		"start",
+		"pull",
+		"push",
+		"forget-host",
+		"open-vnc",
+		"stop",
+		"status",
+		"mcp",
+		"aws",
+	}
+}
+
+func completionProfileCommands() []string {
+	return []string{"accounts", "find"}
+}
+
+func completionAWSCommands() []string {
+	return []string{
+		"plan",
+		"capacity",
+		"open",
+		"create",
+		"status",
+		"wait-ready",
+		"adopt",
+		"adopt-host",
+		"launch-on-host",
+		"destroy",
+	}
+}
+
+func zshCompletionScript() string {
+	return `#compdef cm
+
+_cm_config_args() {
+  local -a args
+  args=()
+  local i
+  for (( i = 1; i < ${#words}; i++ )); do
+    if [[ "${words[$i]}" == "--config" && -n "${words[$((i + 1))]}" ]]; then
+      args=(--config "${words[$((i + 1))]}")
+      break
+    fi
+  done
+  echo "${args[@]}"
+}
+
+_cm_profiles() {
+  local -a config_args values
+  config_args=(${(z)$(_cm_config_args)})
+  values=("${(@f)$(command cm completion profiles "${config_args[@]}" 2>/dev/null)}")
+  compadd -- "${values[@]}"
+}
+
+_cm_profile_or_apple() {
+  local -a config_args values
+  config_args=(${(z)$(_cm_config_args)})
+  values=("${(@f)$(command cm completion profiles "${config_args[@]}" 2>/dev/null)}")
+  values+=("${(@f)$(command cm completion apple-emails "${config_args[@]}" 2>/dev/null)}")
+  compadd -- "${values[@]}"
+}
+
+_cm() {
+  local -a commands aws_commands profile_commands
+  commands=("${(@f)$(command cm completion commands 2>/dev/null)}")
+  aws_commands=("${(@f)$(command cm completion aws-commands 2>/dev/null)}")
+  profile_commands=("${(@f)$(command cm completion profile-commands 2>/dev/null)}")
+
+  if [[ "${words[$((CURRENT - 1))]}" == "--config" ]]; then
+    _files
+    return
+  fi
+
+  if (( CURRENT == 2 )); then
+    compadd -- "${commands[@]}"
+    return
+  fi
+
+  case "${words[2]}" in
+    check|connect|ssh|start|forget-host|open-vnc|stop)
+      (( CURRENT == 3 )) && _cm_profiles
+      ;;
+    pull)
+      if (( CURRENT == 3 )); then
+        _cm_profiles
+      else
+        _files
+      fi
+      ;;
+    push)
+      if (( CURRENT == 3 )); then
+        _cm_profiles
+      elif (( CURRENT == 4 )); then
+        _files
+      else
+        _files -/
+      fi
+      ;;
+    exec)
+      (( CURRENT == 3 )) && _cm_profiles
+      ;;
+    profile)
+      if (( CURRENT == 3 )); then
+        compadd -- "${profile_commands[@]}"
+      elif [[ "${words[3]}" == "find" ]]; then
+        local -a config_args apple_emails
+        config_args=(${(z)$(_cm_config_args)})
+        apple_emails=("${(@f)$(command cm completion apple-emails "${config_args[@]}" 2>/dev/null)}")
+        compadd -- "${apple_emails[@]}"
+      fi
+      ;;
+    aws)
+      if (( CURRENT == 3 )); then
+        compadd -- "${aws_commands[@]}"
+      elif (( CURRENT == 4 )); then
+        _cm_profile_or_apple
+      else
+        case "${words[$((CURRENT - 1))]}" in
+          --host-id) ;;
+          *) _values 'aws option' --confirm --all --host-id --config ;;
+        esac
+      fi
+      ;;
+    completion)
+      _values 'shell' zsh bash fish
+      ;;
+  esac
+}
+
+_cm "$@"
+`
+}
+
+func bashCompletionScript() string {
+	return `_cm_completion()
+{
+  local cur prev cmd sub config_args
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  cmd="${COMP_WORDS[1]}"
+  config_args=()
+  local i
+  for (( i=1; i<COMP_CWORD; i++ )); do
+    if [[ "${COMP_WORDS[i]}" == "--config" && -n "${COMP_WORDS[i+1]}" ]]; then
+      config_args=(--config "${COMP_WORDS[i+1]}")
+      break
+    fi
+  done
+
+  if [[ "$prev" == "--config" ]]; then
+    COMPREPLY=( $(compgen -f -- "$cur") )
+    return 0
+  fi
+
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$(cm completion commands 2>/dev/null)" -- "$cur") )
+    return 0
+  fi
+
+  case "$cmd" in
+    check|connect|ssh|start|forget-host|open-vnc|stop|exec)
+      [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      ;;
+    pull)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -f -- "$cur") )
+      fi
+      ;;
+    push)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -f -- "$cur") )
+      fi
+      ;;
+    profile)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion profile-commands 2>/dev/null)" -- "$cur") )
+      elif [[ "${COMP_WORDS[2]}" == "find" ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      fi
+      ;;
+    aws)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion aws-commands 2>/dev/null)" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 3 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--confirm --all --host-id --config" -- "$cur") )
+      fi
+      ;;
+    completion)
+      COMPREPLY=( $(compgen -W "zsh bash fish" -- "$cur") )
+      ;;
+  esac
+  return 0
+}
+complete -F _cm_completion cm
+`
+}
+
+func fishCompletionScript() string {
+	return `complete -c cm -f
+complete -c cm -n "not __fish_seen_subcommand_from (cm completion commands)" -a "(cm completion commands)"
+complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc stop exec" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from (cm completion profile-commands)" -a "(cm completion profile-commands)"
+complete -c cm -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from find" -a "(cm completion apple-emails)"
+complete -c cm -n "__fish_seen_subcommand_from aws; and not __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion aws-commands)"
+complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion apple-emails)"
+complete -c cm -n "__fish_seen_subcommand_from completion" -a "zsh bash fish"
+`
 }
 
 func filepathDir(path string) string {

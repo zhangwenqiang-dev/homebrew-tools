@@ -102,6 +102,34 @@ func TestAppListFormatsProfilesAsTable(t *testing.T) {
 	}
 }
 
+func TestAppCompletionProfiles(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"completion", "profiles", "--config", config}); code != 0 {
+		t.Fatalf("completion profiles code = %d, err = %s", code, errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "xcode-vnc" {
+		t.Fatalf("profiles output = %q", out.String())
+	}
+}
+
+func TestAppCompletionZshScriptUsesDynamicProfiles(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"completion", "zsh"}); code != 0 {
+		t.Fatalf("completion zsh code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("zsh completion missing %q: %q", want, text)
+		}
+	}
+}
+
 func TestAppCheck(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
