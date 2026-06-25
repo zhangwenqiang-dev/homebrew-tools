@@ -12,6 +12,13 @@ go build -o bin/cm ./cmd/cm
 
 For internal installation, copy `bin/cm` to a shared tool path such as `/usr/local/bin/cm`.
 
+Check the installed version:
+
+```bash
+cm version
+cm --version
+```
+
 ## Quick Start
 
 Create the default config:
@@ -178,12 +185,14 @@ Pull a remote file or directory into the current directory:
 
 ```bash
 cm pull xcode-vnc ~/Desktop/App.ipa
+cm pull user@example.com ~/Desktop/App.ipa
 ```
 
 Upload a local file or directory to a remote directory:
 
 ```bash
 cm push xcode-vnc ./MyProject ~/Downloads/
+cm push user@example.com ./MyProject ~/Downloads/
 ```
 
 When pushing a directory, `cm` uploads it directly with rsync and applies the profile's push exclude rules.
@@ -350,10 +359,11 @@ Do not keep PEM files in project folders, Desktop, Downloads, shared folders, or
 
 ## Rsync Transfers
 
-`cm pull` reads the SSH target from the selected profile and downloads into the current directory:
+`cm pull` reads the SSH target from the selected profile or Apple email and downloads into the current directory:
 
 ```bash
 cm pull xcode-vnc ~/Desktop/file.zip
+cm pull user@example.com ~/Desktop/file.zip
 ```
 
 This runs rsync against:
@@ -366,6 +376,7 @@ user@<profile-host>:~/Desktop/file.zip -> .
 
 ```bash
 cm push xcode-vnc ./build.zip ~/Downloads/
+cm push user@example.com ./build.zip ~/Downloads/
 ```
 
 For directories, `cm push` uploads the directory directly with rsync. By default, these paths are excluded:

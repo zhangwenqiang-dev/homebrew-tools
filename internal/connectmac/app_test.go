@@ -102,6 +102,25 @@ func TestAppListFormatsProfilesAsTable(t *testing.T) {
 	}
 }
 
+func TestAppVersion(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	app.Version = "0.1.test"
+	if code := app.Run(context.Background(), []string{"version"}); code != 0 {
+		t.Fatalf("version code = %d, err = %s", code, errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "cm 0.1.test" {
+		t.Fatalf("version output = %q", out.String())
+	}
+	out.Reset()
+	if code := app.Run(context.Background(), []string{"--version"}); code != 0 {
+		t.Fatalf("--version code = %d, err = %s", code, errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "cm 0.1.test" {
+		t.Fatalf("--version output = %q", out.String())
+	}
+}
+
 func TestAppCompletionProfiles(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -280,6 +299,22 @@ func TestAppPullUsesRsyncRunner(t *testing.T) {
 	}
 }
 
+func TestAppPullAcceptsAppleEmail(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"pull", "user@example.com", "~/Desktop/a.zip", "--config", config}); code != 0 {
+		t.Fatalf("pull code = %d, err = %s", code, errOut.String())
+	}
+	if !containsString(runner.rsync, "user@mac-host.example.com:~/Desktop/a.zip") {
+		t.Fatalf("rsync args = %#v", runner.rsync)
+	}
+}
+
 func TestAppPushUsesRsyncRunner(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -298,6 +333,24 @@ func TestAppPushUsesRsyncRunner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Push:") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppPushAcceptsAppleEmail(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	localFile := filepath.Join(dir, "build.zip")
+	writeFile(t, localFile, "zip")
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"push", "user@example.com", localFile, "~/Downloads/", "--config", config}); code != 0 {
+		t.Fatalf("push code = %d, err = %s", code, errOut.String())
+	}
+	if !containsString(runner.rsync, "user@mac-host.example.com:~/Downloads/") {
+		t.Fatalf("rsync args = %#v", runner.rsync)
 	}
 }
 

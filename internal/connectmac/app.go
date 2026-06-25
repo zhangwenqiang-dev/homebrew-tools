@@ -28,6 +28,7 @@ type App struct {
 	In           io.Reader
 	Out          io.Writer
 	Err          io.Writer
+	Version      string
 	Runner       Runner
 	Validator    Validator
 	StateManager StateManager
@@ -39,6 +40,7 @@ func NewApp(out, err io.Writer) App {
 		In:           os.Stdin,
 		Out:          out,
 		Err:          err,
+		Version:      "dev",
 		Runner:       ExecRunner{},
 		Validator:    NewValidator(),
 		StateManager: NewStateManager(DefaultStateDir),
@@ -49,6 +51,10 @@ func NewApp(out, err io.Writer) App {
 func (a App) Run(ctx context.Context, args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		a.printUsage()
+		return 0
+	}
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
+		a.printVersion()
 		return 0
 	}
 	configPath := DefaultConfigPath
@@ -63,6 +69,9 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runInit(configPath, args[1:])
 	case "init-rules":
 		return a.runInitRules(args[1:])
+	case "version":
+		a.printVersion()
+		return 0
 	case "completion":
 		return a.runCompletion(configPath, args[1:])
 	case "list":
@@ -774,12 +783,12 @@ func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
 
 func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 	if len(args) != 2 {
-		fmt.Fprintln(a.Err, "usage: cm pull <profile> <remote-path>")
+		fmt.Fprintln(a.Err, "usage: cm pull <profile-or-apple-email> <remote-path>")
 		return 2
 	}
-	profile, ok := cfg.Profile(args[0])
-	if !ok {
-		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+	profile, err := resolveProfileRef(cfg, args[0])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 2
 	}
 	profile = a.promptMissingIdentityFile(profile)
@@ -801,12 +810,12 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 
 func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 	if len(args) != 3 {
-		fmt.Fprintln(a.Err, "usage: cm push <profile> <local-path> <remote-dir>")
+		fmt.Fprintln(a.Err, "usage: cm push <profile-or-apple-email> <local-path> <remote-dir>")
 		return 2
 	}
-	profile, ok := cfg.Profile(args[0])
-	if !ok {
-		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+	profile, err := resolveProfileRef(cfg, args[0])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 2
 	}
 	profile = a.promptMissingIdentityFile(profile)
@@ -969,6 +978,7 @@ func (a App) loadConfig(path string) (Config, int) {
 
 func (a App) printUsage() {
 	fmt.Fprint(a.Out, `Usage:
+  cm version
   cm init [--config <path>]
   cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
   cm init-rules --print-rules
@@ -979,8 +989,8 @@ func (a App) printUsage() {
   cm ssh <profile> [--config <path>]
   cm exec <profile> [--config <path>] -- <command>
   cm start <profile> [--config <path>]
-  cm pull <profile> <remote-path> [--config <path>]
-  cm push <profile> <local-path> <remote-dir> [--config <path>]
+  cm pull <profile-or-apple-email> <remote-path> [--config <path>]
+  cm push <profile-or-apple-email> <local-path> <remote-dir> [--config <path>]
   cm forget-host <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
   cm profile accounts [--config <path>]
@@ -999,6 +1009,14 @@ func (a App) printUsage() {
   cm stop <profile>
   cm status
 `)
+}
+
+func (a App) printVersion() {
+	version := a.Version
+	if version == "" {
+		version = "dev"
+	}
+	fmt.Fprintf(a.Out, "cm %s\n", version)
 }
 
 func (ExecRunner) RunForeground(ctx context.Context, args []string) error {
@@ -1220,6 +1238,7 @@ func completionCommands() []string {
 	return []string{
 		"init",
 		"init-rules",
+		"version",
 		"completion",
 		"list",
 		"profile",
@@ -1311,14 +1330,14 @@ _cm() {
       ;;
     pull)
       if (( CURRENT == 3 )); then
-        _cm_profiles
+        _cm_profile_or_apple
       else
         _files
       fi
       ;;
     push)
       if (( CURRENT == 3 )); then
-        _cm_profiles
+        _cm_profile_or_apple
       elif (( CURRENT == 4 )); then
         _files
       else
@@ -1393,14 +1412,14 @@ func bashCompletionScript() string {
       ;;
     pull)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
       else
         COMPREPLY=( $(compgen -f -- "$cur") )
       fi
       ;;
     push)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
       else
         COMPREPLY=( $(compgen -f -- "$cur") )
       fi
@@ -1436,6 +1455,7 @@ func fishCompletionScript() string {
 complete -c cm -n "not __fish_seen_subcommand_from (cm completion commands)" -a "(cm completion commands)"
 complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc stop exec" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from (cm completion profile-commands)" -a "(cm completion profile-commands)"
 complete -c cm -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from find" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and not __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion aws-commands)"
