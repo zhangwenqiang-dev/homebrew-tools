@@ -660,6 +660,9 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 		if err := client.TerminateInstance(ctx, instance.InstanceID); err != nil {
 			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
 		}
+		if err := s.waitInstanceTerminated(ctx, client, plan, instance.InstanceID); err != nil {
+			return MacPlan{}, result, AWSDestroyPartialError{Result: result, Cause: err}
+		}
 		s.progress("EC2 instance %s is terminated", instance.InstanceID)
 		result.TerminatedInstances = append(result.TerminatedInstances, instance.InstanceID)
 	}
@@ -686,6 +689,56 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 		result.ReleasedHosts = append(result.ReleasedHosts, host.HostID)
 	}
 	return plan, result, nil
+}
+
+func (s AWSService) waitInstanceTerminated(ctx context.Context, client AWSClient, plan MacPlan, instanceID string) error {
+	timeout := s.DestroyTimeout
+	if timeout == 0 {
+		timeout = 45 * time.Minute
+	}
+	interval := s.DestroyPollInterval
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+	start := time.Now()
+	deadline := start.Add(timeout)
+	for {
+		status, err := client.DescribeStatus(ctx, plan)
+		if err != nil {
+			return err
+		}
+		instance, ok := findInstanceStatus(status, instanceID)
+		if !ok || isTerminalInstanceState(instance.State) {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out waiting for EC2 instance %s termination; last state=%s", instanceID, emptyStatus(instance.State))
+		}
+		s.progress("Waiting for EC2 termination: instance=%s state=%s elapsed=%s; retry in %s", instanceID, emptyStatus(instance.State), roundDuration(time.Since(start)), interval)
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func findInstanceStatus(status AWSStatus, instanceID string) (InstanceStatus, bool) {
+	for _, instance := range status.Instances {
+		if instance.InstanceID == instanceID {
+			return instance, true
+		}
+	}
+	return InstanceStatus{}, false
+}
+
+func roundDuration(value time.Duration) time.Duration {
+	if value < time.Second {
+		return 0
+	}
+	return value.Round(time.Second)
 }
 
 func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, host DedicatedHostStatus) (bool, string, error) {
@@ -960,11 +1013,39 @@ func FormatAWSOpenPreviewWithCandidates(plan MacPlan, status AWSStatus, candidat
 }
 
 func FormatMacDestroyPreview(plan MacPlan) string {
+	return FormatMacDestroyPreviewWithStatus(plan, AWSStatus{})
+}
+
+func FormatMacDestroyPreviewWithStatus(plan MacPlan, status AWSStatus) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "AWS Mac destroy preview for profile %s\n", plan.ProfileName)
 	fmt.Fprintf(&b, "Managed resource name: %s\n", plan.ResourceName)
 	fmt.Fprintf(&b, "Region: %s\n", plan.Region)
 	fmt.Fprintf(&b, "Safety tags required before any mutation: %s\n", FormatAWSTags(managedRequiredTags(plan)))
+	if len(status.Hosts) > 0 || len(status.Instances) > 0 || status.ElasticIP.AllocationID != "" {
+		fmt.Fprintln(&b, "Matched resources:")
+		for _, host := range status.Hosts {
+			fmt.Fprintf(&b, "- host=%s state=%s type=%s zone=%s\n", emptyTableValue(host.HostID), emptyTableValue(host.State), emptyTableValue(host.InstanceType), emptyTableValue(host.ZoneID))
+		}
+		for _, instance := range status.Instances {
+			fmt.Fprintf(&b, "- instance=%s state=%s type=%s host=%s public_ip=%s ready=%t\n",
+				emptyTableValue(instance.InstanceID),
+				emptyTableValue(instance.State),
+				emptyTableValue(instance.InstanceType),
+				emptyTableValue(instance.HostID),
+				emptyTableValue(instance.PublicIP),
+				InstanceReady(instance, status.ElasticIP),
+			)
+		}
+		if status.ElasticIP.AllocationID != "" {
+			fmt.Fprintf(&b, "- elastic_ip=%s association=%s instance=%s public_ip=%s retained=true\n",
+				emptyTableValue(status.ElasticIP.AllocationID),
+				emptyTableValue(status.ElasticIP.AssociationID),
+				emptyTableValue(status.ElasticIP.InstanceID),
+				emptyTableValue(status.ElasticIP.PublicIP),
+			)
+		}
+	}
 	fmt.Fprintln(&b, "Operations:")
 	fmt.Fprintln(&b, "- Disassociate Elastic IP only if attached to the managed instance; retain the Elastic IP allocation")
 	fmt.Fprintln(&b, "- Terminate the managed EC2 instance")
@@ -1209,6 +1290,21 @@ func FormatAWSDestroyResult(plan MacPlan, result AWSDestroyResult) string {
 	}
 	fmt.Fprintf(&b, "Skipped hosts: %s\n", formatStringList(result.SkippedHosts))
 	fmt.Fprintf(&b, "Next action: %s\n", AWSDestroyNextAction(plan, result))
+	return b.String()
+}
+
+func FormatAWSDestroyFinalStatus(plan MacPlan, status AWSStatus) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Final status for profile %s\n", plan.ProfileName)
+	fmt.Fprintf(&b, "Dedicated hosts: %d\n", len(status.Hosts))
+	fmt.Fprintf(&b, "Instances: %d\n", len(status.Instances))
+	fmt.Fprintf(&b, "Elastic IP retained: true allocation=%s association=%s instance=%s public_ip=%s\n",
+		emptyTableValue(status.ElasticIP.AllocationID),
+		emptyTableValue(status.ElasticIP.AssociationID),
+		emptyTableValue(status.ElasticIP.InstanceID),
+		emptyTableValue(status.ElasticIP.PublicIP),
+	)
+	fmt.Fprintf(&b, "Ready: %t\n", AWSStatusReady(status))
 	return b.String()
 }
 

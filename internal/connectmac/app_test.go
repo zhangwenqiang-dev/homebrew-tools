@@ -510,13 +510,103 @@ func TestAppAWSDestroyResolvesAppleEmail(t *testing.T) {
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", AssociationID: "eipassoc-1", InstanceID: "i-1", PublicIP: "203.0.113.10"},
+		}}, nil
+	}
 	if code := app.Run(context.Background(), []string{"aws", "destroy", "user@example.com", "--config", config}); code != 0 {
 		t.Fatalf("aws destroy by email code = %d, err = %s", code, errOut.String())
 	}
 	text := out.String()
-	for _, want := range []string{"Resolved Apple account user@example.com -> profile xcode-vnc", "AWS Mac destroy preview", "retain the Elastic IP allocation"} {
+	for _, want := range []string{"Resolved Apple account user@example.com -> profile xcode-vnc", "AWS Mac destroy preview", "Matched resources:", "retain the Elastic IP allocation"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("destroy by email output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAppAWSDestroyConfirmPrintsFinalStatus(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	fake := &fakeAWSClient{status: AWSStatus{
+		Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1", Tags: managedTestTags()}},
+		Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", InstanceType: "mac2.metal", HostID: "h-1", Tags: managedTestTags()}},
+		ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", AssociationID: "eipassoc-1", InstanceID: "i-1", PublicIP: "203.0.113.10"},
+	}}
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return fake, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "destroy", "user@example.com", "--confirm", "--config", config}); code != 0 {
+		t.Fatalf("aws destroy confirm code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"AWS Mac destroy executed", "Final status", "Dedicated hosts: 0", "Instances: 0", "Elastic IP retained: true"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy confirm output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAppAWSRunningListsRunningInstances(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-1",
+				State:               "running",
+				InstanceType:        "mac2.metal",
+				HostID:              "h-1",
+				PublicIP:            "203.0.113.10",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+				Tags:                managedTestTags(),
+			}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", InstanceID: "i-1", PublicIP: "203.0.113.10"},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "running", "--config", config}); code != 0 {
+		t.Fatalf("aws running code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"APPLE ACCOUNT", "user@example.com", "xcode-vnc", "usw2-az1", "mac2.metal", "i-1", "true"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("aws running output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAppAWSDestroyManyPreview(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", AssociationID: "eipassoc-1", InstanceID: "i-1", PublicIP: "203.0.113.10"},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"aws", "destroy-many", "user@example.com", "--config", config}); code != 0 {
+		t.Fatalf("aws destroy-many code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"Resolved Apple account user@example.com -> profile xcode-vnc", "AWS Mac destroy preview", "Preview only. Include --confirm"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy-many output missing %q:\n%s", want, text)
 		}
 	}
 }

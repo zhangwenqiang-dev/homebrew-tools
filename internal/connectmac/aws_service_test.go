@@ -581,7 +581,7 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Destroy returned error: %v", err)
 	}
-	want := []string{"status", "disassociate:eipassoc-1", "terminate:i-1", "release:h-1"}
+	want := []string{"status", "disassociate:eipassoc-1", "terminate:i-1", "status", "release:h-1"}
 	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
@@ -601,6 +601,42 @@ func TestAWSServiceDestroyRunsSafeOrder(t *testing.T) {
 	}
 	if !strings.Contains(text, "Retained Elastic IP") {
 		t.Fatalf("destroy result missing recovery guidance:\n%s", text)
+	}
+}
+
+func TestAWSServiceDestroyReportsEC2TerminationProgress(t *testing.T) {
+	fake := &fakeAWSClient{
+		statusSequence: []AWSStatus{
+			{
+				Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: managedTestTags()}},
+				Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", Tags: managedTestTags()}},
+				ElasticIP: ElasticIP{AssociationID: "eipassoc-1", InstanceID: "i-1"},
+			},
+			{
+				Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: managedTestTags()}},
+				Instances: []InstanceStatus{{InstanceID: "i-1", State: "shutting-down", Tags: managedTestTags()}},
+				ElasticIP: ElasticIP{},
+			},
+			{
+				Hosts:     []DedicatedHostStatus{{HostID: "h-1", Tags: managedTestTags()}},
+				Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+				ElasticIP: ElasticIP{},
+			},
+		},
+	}
+	var progress []string
+	service := testAWSService(fake)
+	service.DestroyPollInterval = time.Millisecond
+	service.DestroyTimeout = time.Second
+	service.Progress = func(message string) {
+		progress = append(progress, message)
+	}
+	_, _, err := service.Destroy(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	if !containsString(progress, "Waiting for EC2 termination: instance=i-1 state=shutting-down elapsed=0s; retry in 1ms") {
+		t.Fatalf("progress = %#v", progress)
 	}
 }
 
@@ -961,11 +997,22 @@ func (c *fakeAWSClient) AssociateElasticIP(ctx context.Context, allocationID, in
 
 func (c *fakeAWSClient) DisassociateElasticIP(ctx context.Context, associationID string) error {
 	c.calls = append(c.calls, "disassociate:"+associationID)
+	if c.status.ElasticIP.AssociationID == associationID {
+		c.status.ElasticIP.AssociationID = ""
+		c.status.ElasticIP.InstanceID = ""
+	}
 	return nil
 }
 
 func (c *fakeAWSClient) TerminateInstance(ctx context.Context, instanceID string) error {
 	c.calls = append(c.calls, "terminate:"+instanceID)
+	if len(c.statusSequence) == 0 {
+		for i, instance := range c.status.Instances {
+			if instance.InstanceID == instanceID {
+				c.status.Instances[i].State = "terminated"
+			}
+		}
+	}
 	return nil
 }
 
@@ -978,6 +1025,11 @@ func (c *fakeAWSClient) ReleaseHost(ctx context.Context, hostID string) error {
 	}
 	if c.releaseErr != nil {
 		return c.releaseErr
+	}
+	for i, host := range c.status.Hosts {
+		if host.HostID == hostID {
+			c.status.Hosts[i].State = "released"
+		}
 	}
 	return nil
 }

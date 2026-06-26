@@ -169,11 +169,28 @@ func (a App) runMCP(ctx context.Context, configPath string) int {
 }
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(a.Err, "usage: cm aws <plan|capacity|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy|destroy-many|destroy-all|running> [profile-or-apple-email] [--confirm] [--all] [--host-id <id>] [--except <profile-or-apple-email>]")
+		return 2
+	}
+	command := args[0]
+	if command == "running" {
+		if len(args) != 1 {
+			fmt.Fprintln(a.Err, "usage: cm aws running")
+			return 2
+		}
+		return a.runAWSRunning(ctx, cfg)
+	}
+	if command == "destroy-many" {
+		return a.runAWSDestroyMany(ctx, cfg, args[1:])
+	}
+	if command == "destroy-all" {
+		return a.runAWSDestroyAll(ctx, cfg, args[1:])
+	}
 	if len(args) < 2 {
 		fmt.Fprintln(a.Err, "usage: cm aws <plan|capacity|open|create|status|wait-ready|adopt|adopt-host|launch-on-host|destroy> <profile-or-apple-email> [--confirm] [--all] [--host-id <id>]")
 		return 2
 	}
-	command := args[0]
 	profileRef := args[1]
 	confirm := false
 	hostID := ""
@@ -344,32 +361,220 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprint(a.Out, FormatAWSReadyStatus(plan, status))
 		return 0
 	case "destroy":
-		fmt.Fprint(a.Out, FormatMacDestroyPreview(plan))
-		if !confirm {
-			fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to execute AWS destruction.")
-			return 0
-		}
-		service := a.AWSService
-		service.Progress = func(message string) {
-			fmt.Fprintln(a.Out, message)
-		}
-		_, result, err := service.Destroy(ctx, profile)
-		if err != nil {
-			var partial AWSDestroyPartialError
-			if errors.As(err, &partial) {
-				fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, partial.Result))
-				fmt.Fprintf(a.Err, "aws destroy partially completed: %v\n", err)
-				return 1
-			}
-			fmt.Fprintf(a.Err, "aws destroy failed: %v\n", err)
-			return 1
-		}
-		fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, result))
-		return 0
+		return a.runAWSDestroy(ctx, profile, plan, confirm)
 	default:
 		fmt.Fprintf(a.Err, "unknown aws command %q\n", command)
 		return 2
 	}
+}
+
+func (a App) runAWSDestroy(ctx context.Context, profile Profile, plan MacPlan, confirm bool) int {
+	_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+	if err != nil {
+		fmt.Fprintf(a.Err, "aws destroy preview failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(a.Out, FormatMacDestroyPreviewWithStatus(plan, status))
+	if !confirm {
+		fmt.Fprintln(a.Out, "Preview only. Run again with --confirm to execute AWS destruction.")
+		return 0
+	}
+	service := a.awsServiceWithProgress()
+	_, result, err := service.Destroy(ctx, profile)
+	if err != nil {
+		var partial AWSDestroyPartialError
+		if errors.As(err, &partial) {
+			fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, partial.Result))
+			a.printAWSDestroyFinalStatus(ctx, profile)
+			fmt.Fprintf(a.Err, "aws destroy partially completed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(a.Err, "aws destroy failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, result))
+	a.printAWSDestroyFinalStatus(ctx, profile)
+	return 0
+}
+
+func (a App) printAWSDestroyFinalStatus(ctx context.Context, profile Profile) {
+	plan, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+	if err != nil {
+		fmt.Fprintf(a.Err, "aws destroy final status failed: %v\n", err)
+		return
+	}
+	fmt.Fprint(a.Out, FormatAWSDestroyFinalStatus(plan, status))
+}
+
+func (a App) runAWSRunning(ctx context.Context, cfg Config) int {
+	rows := [][]string{{"APPLE ACCOUNT", "PROFILE", "REGION", "AZ", "TYPE", "INSTANCE", "PUBLIC IP", "READY"}}
+	var errs []string
+	for _, name := range sortedProfileNames(cfg) {
+		profile, _ := cfg.Profile(name)
+		if profile.AWS.Profile == "" {
+			continue
+		}
+		validationErrs := a.Validator.ValidateAWSProfile(profile)
+		if len(validationErrs) > 0 {
+			continue
+		}
+		plan, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", profile.Name, err))
+			continue
+		}
+		for _, instance := range status.Instances {
+			if instance.State != "running" {
+				continue
+			}
+			rows = append(rows, []string{
+				emptyTableValue(plan.AccountEmail),
+				plan.ProfileName,
+				plan.Region,
+				emptyTableValue(zoneForInstance(status.Hosts, instance.HostID)),
+				emptyTableValue(instance.InstanceType),
+				emptyTableValue(instance.InstanceID),
+				emptyTableValue(instance.PublicIP),
+				fmt.Sprintf("%t", InstanceReady(instance, status.ElasticIP)),
+			})
+		}
+	}
+	if len(rows) == 1 {
+		fmt.Fprintln(a.Out, "No running AWS Mac instances found.")
+	} else {
+		fmt.Fprint(a.Out, formatRows(rows))
+	}
+	if len(errs) > 0 {
+		fmt.Fprintln(a.Err, "Errors:")
+		for _, err := range errs {
+			fmt.Fprintf(a.Err, "- %s\n", err)
+		}
+		return 1
+	}
+	return 0
+}
+
+func zoneForInstance(hosts []DedicatedHostStatus, hostID string) string {
+	for _, host := range hosts {
+		if host.HostID == hostID {
+			return host.ZoneID
+		}
+	}
+	return ""
+}
+
+func (a App) runAWSDestroyMany(ctx context.Context, cfg Config, args []string) int {
+	refs, confirm, err := parseDestroyManyArgs(args)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 2
+	}
+	return a.runAWSDestroyProfiles(ctx, cfg, refs, confirm, "destroy-many")
+}
+
+func parseDestroyManyArgs(args []string) ([]string, bool, error) {
+	confirm := false
+	var refs []string
+	for _, arg := range args {
+		switch arg {
+		case "--confirm":
+			confirm = true
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return nil, false, fmt.Errorf("unknown destroy-many option %q", arg)
+			}
+			refs = append(refs, arg)
+		}
+	}
+	if len(refs) == 0 {
+		return nil, false, fmt.Errorf("usage: cm aws destroy-many <profile-or-apple-email>... [--confirm]")
+	}
+	return refs, confirm, nil
+}
+
+func (a App) runAWSDestroyAll(ctx context.Context, cfg Config, args []string) int {
+	exceptRefs, confirm, err := parseDestroyAllArgs(args)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 2
+	}
+	except := map[string]bool{}
+	for _, ref := range exceptRefs {
+		profile, err := resolveProfileRef(cfg, ref)
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 2
+		}
+		except[profile.Name] = true
+	}
+	var refs []string
+	for _, name := range sortedProfileNames(cfg) {
+		if !except[name] {
+			refs = append(refs, name)
+		}
+	}
+	return a.runAWSDestroyProfiles(ctx, cfg, refs, confirm, "destroy-all")
+}
+
+func parseDestroyAllArgs(args []string) ([]string, bool, error) {
+	confirm := false
+	var exceptRefs []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--confirm":
+			confirm = true
+		case "--except":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return nil, false, fmt.Errorf("--except requires a profile or Apple email")
+			}
+			exceptRefs = append(exceptRefs, args[i])
+		default:
+			return nil, false, fmt.Errorf("unknown destroy-all option %q", args[i])
+		}
+	}
+	return exceptRefs, confirm, nil
+}
+
+func (a App) runAWSDestroyProfiles(ctx context.Context, cfg Config, refs []string, confirm bool, command string) int {
+	matched := 0
+	for _, ref := range refs {
+		profile, err := resolveProfileRef(cfg, ref)
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 2
+		}
+		if profile.Name != ref && strings.Contains(ref, "@") {
+			fmt.Fprintf(a.Out, "Resolved Apple account %s -> profile %s\n", ref, profile.Name)
+		}
+		errs := a.Validator.ValidateAWSProfile(profile)
+		if len(errs) > 0 {
+			printErrors(a.Err, errs)
+			return 1
+		}
+		plan, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+		if err != nil {
+			fmt.Fprintf(a.Err, "aws %s preview failed for %s: %v\n", command, profile.Name, err)
+			return 1
+		}
+		if len(status.Hosts) == 0 && len(status.Instances) == 0 {
+			continue
+		}
+		matched++
+		if !confirm {
+			fmt.Fprint(a.Out, FormatMacDestroyPreviewWithStatus(plan, status))
+			fmt.Fprintln(a.Out, "Preview only. Include --confirm to execute AWS destruction.")
+			continue
+		}
+		code := a.runAWSDestroy(ctx, profile, plan, true)
+		if code != 0 {
+			return code
+		}
+	}
+	if matched == 0 {
+		fmt.Fprintf(a.Out, "No active AWS Mac resources matched %s.\n", command)
+	}
+	return 0
 }
 
 func (a App) runInit(configPath string, args []string) int {
@@ -1005,6 +1210,9 @@ func (a App) printUsage() {
   cm aws adopt-host <profile-or-apple-email> --host-id <id> [--confirm] [--config <path>]
   cm aws launch-on-host <profile-or-apple-email> --host-id <id> [--confirm] [--config <path>]
   cm aws destroy <profile-or-apple-email> [--confirm] [--config <path>]
+  cm aws destroy-many <profile-or-apple-email>... [--confirm] [--config <path>]
+  cm aws destroy-all [--except <profile-or-apple-email>] [--confirm] [--config <path>]
+  cm aws running [--config <path>]
   cm mcp [--config <path>]
   cm stop <profile>
   cm status
@@ -1274,6 +1482,9 @@ func completionAWSCommands() []string {
 		"adopt-host",
 		"launch-on-host",
 		"destroy",
+		"destroy-many",
+		"destroy-all",
+		"running",
 	}
 }
 
@@ -1365,7 +1576,8 @@ _cm() {
       else
         case "${words[$((CURRENT - 1))]}" in
           --host-id) ;;
-          *) _values 'aws option' --confirm --all --host-id --config ;;
+          --except) _cm_profile_or_apple ;;
+          *) _values 'aws option' --confirm --all --host-id --except --config ;;
         esac
       fi
       ;;
@@ -1437,7 +1649,11 @@ func bashCompletionScript() string {
       elif [[ $COMP_CWORD -eq 3 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
       else
-        COMPREPLY=( $(compgen -W "--confirm --all --host-id --config" -- "$cur") )
+        if [[ "$prev" == "--except" ]]; then
+          COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+        else
+          COMPREPLY=( $(compgen -W "--confirm --all --host-id --except --config" -- "$cur") )
+        fi
       fi
       ;;
     completion)

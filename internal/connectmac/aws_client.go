@@ -3,7 +3,6 @@ package connectmac
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -389,10 +388,6 @@ func (c RealAWSClient) TerminateInstance(ctx context.Context, instanceID string)
 	_, err := c.ec2.TerminateInstances(ctx, input)
 	if err != nil {
 		return fmt.Errorf("terminate instance %s: %w", instanceID, err)
-	}
-	waiter := ec2.NewInstanceTerminatedWaiter(c.ec2)
-	if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{instanceID}}, 15*time.Minute); err != nil {
-		return fmt.Errorf("wait for instance %s termination: %w", instanceID, err)
 	}
 	return nil
 }
