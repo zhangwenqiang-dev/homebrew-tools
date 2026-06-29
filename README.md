@@ -245,7 +245,11 @@ Start the MCP server for AI clients:
 
 ```bash
 cm mcp
+cm mcp tools
+cm mcp tools --json
 ```
+
+`cm mcp` is a stdio MCP server and waits for JSON-RPC messages on stdin. It does not print tools when run directly. Use `cm mcp tools` for a human-readable list, `cm mcp tools --json` for the MCP `tools/list` result JSON, or `scripts/cm-mcp-tools` as a small local probe.
 
 Preview AWS Mac Dedicated Host automation:
 
@@ -412,16 +416,34 @@ profiles:
 
 ## MCP Server
 
-`cm mcp` starts a stdio MCP server for AI clients.
+`cm mcp` starts a stdio MCP server for AI clients. It waits for MCP JSON-RPC on stdin and may appear to print nothing when run directly. To discover tools without an MCP client, run:
+
+```bash
+cm mcp tools
+cm mcp tools --json
+scripts/cm-mcp-tools
+```
 
 Available tools:
 
 ```text
 cm_list_profiles
+cm_find_profile_by_apple
 cm_check_profile
 cm_push
 cm_pull
 cm_forget_host
+cm_aws_plan
+cm_aws_capacity
+cm_aws_status
+cm_aws_wait_ready
+cm_aws_create_mac
+cm_aws_open_mac_by_email
+cm_aws_adopt_mac
+cm_aws_adopt_host
+cm_aws_launch_on_host
+cm_aws_destroy_mac
+cm_aws_destroy_mac_by_email
 ```
 
 Tools with side effects require `confirm: true`. Without confirmation, they return a preview only.

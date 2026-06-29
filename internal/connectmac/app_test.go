@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -118,6 +119,66 @@ func TestAppVersion(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) != "cm 0.1.test" {
 		t.Fatalf("--version output = %q", out.String())
+	}
+}
+
+func TestAppMCPHelpExplainsStdioServer(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"mcp", "--help"}); code != 0 {
+		t.Fatalf("mcp help code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"cm mcp tools", "stdio MCP server", "does not print a tool list"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("mcp help missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestAppMCPToolsHumanReadable(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"mcp", "tools"}); code != 0 {
+		t.Fatalf("mcp tools code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"TOOL", "DESCRIPTION", "REQUIRED", "cm_list_profiles", "cm_aws_destroy_mac_by_email", "apple_email"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("mcp tools missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestAppMCPToolsJSON(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"mcp", "tools", "--json"}); code != 0 {
+		t.Fatalf("mcp tools --json code = %d, err = %s", code, errOut.String())
+	}
+	var payload struct {
+		Tools []struct {
+			Name        string                 `json:"name"`
+			Description string                 `json:"description"`
+			InputSchema map[string]interface{} `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out.String())
+	}
+	if len(payload.Tools) != 17 {
+		t.Fatalf("tool count = %d, want 17", len(payload.Tools))
+	}
+	found := false
+	for _, tool := range payload.Tools {
+		if tool.Name == "cm_push" {
+			found = true
+			required, _ := tool.InputSchema["required"].([]interface{})
+			if len(required) != 3 {
+				t.Fatalf("cm_push required = %#v", required)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("cm_push not found in tools: %#v", payload.Tools)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -77,7 +78,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.40",
+				"version": "0.1.41",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -776,6 +777,43 @@ func mcpTools() []map[string]interface{} {
 			"required": []string{"apple_email"},
 		}),
 	}
+}
+
+func FormatMCPToolsText() string {
+	tools := mcpTools()
+	sort.Slice(tools, func(i, j int) bool {
+		return fmt.Sprint(tools[i]["name"]) < fmt.Sprint(tools[j]["name"])
+	})
+	rows := make([][]string, 0, len(tools)+1)
+	rows = append(rows, []string{"TOOL", "DESCRIPTION", "REQUIRED"})
+	for _, tool := range tools {
+		rows = append(rows, []string{
+			fmt.Sprint(tool["name"]),
+			fmt.Sprint(tool["description"]),
+			strings.Join(mcpToolRequiredParams(tool), ", "),
+		})
+	}
+	return formatRows(rows)
+}
+
+func WriteMCPToolsJSON(out io.Writer) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(map[string]interface{}{"tools": mcpTools()})
+}
+
+func mcpToolRequiredParams(tool map[string]interface{}) []string {
+	schema, _ := tool["inputSchema"].(map[string]interface{})
+	rawRequired, _ := schema["required"].([]string)
+	if rawRequired != nil {
+		return rawRequired
+	}
+	rawAny, _ := schema["required"].([]interface{})
+	required := make([]string, 0, len(rawAny))
+	for _, value := range rawAny {
+		required = append(required, fmt.Sprint(value))
+	}
+	return required
 }
 
 func mcpTool(name, description string, schema map[string]interface{}) map[string]interface{} {

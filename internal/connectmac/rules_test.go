@@ -67,7 +67,7 @@ func TestInstallRulesWritesSourceAndUpsertsAgentBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(source), "ConnectMac AWS AI Rules") {
+	if !strings.Contains(string(source), "ConnectMac AI Rules") {
 		t.Fatalf("source rules = %q", string(source))
 	}
 	agent, err := os.ReadFile(agentFile)
@@ -90,6 +90,37 @@ func TestInstallRulesWritesSourceAndUpsertsAgentBlock(t *testing.T) {
 	}
 	if !strings.Contains(string(skill), "name: connectmac") {
 		t.Fatalf("skill = %q", string(skill))
+	}
+}
+
+func TestInstallRulesReplacesLegacyAWSMarkerBlock(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	agentFile := filepath.Join(project, "AGENTS.md")
+	if err := os.WriteFile(agentFile, []byte("before\n\n"+oldRulesStart+"\nold\n"+oldRulesEnd+"\n\nafter\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	install, err := BuildRulesInstall("codex", project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallRules(install); err != nil {
+		t.Fatalf("InstallRules returned error: %v", err)
+	}
+	agent, err := os.ReadFile(agentFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(agent)
+	if strings.Contains(text, oldRulesStart) || strings.Contains(text, oldRulesEnd) {
+		t.Fatalf("legacy marker block was not replaced:\n%s", text)
+	}
+	if strings.Count(text, rulesStart) != 1 || strings.Count(text, rulesEnd) != 1 {
+		t.Fatalf("agent file marker count wrong:\n%s", text)
+	}
+	if !strings.Contains(text, "ConnectMac AI Rules") {
+		t.Fatalf("agent file missing new rule title:\n%s", text)
 	}
 }
 
@@ -150,7 +181,7 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"init-rules", "--print-rules"}); code != 0 {
 		t.Fatalf("print-rules code = %d, err = %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "ConnectMac AWS AI Rules") {
+	if !strings.Contains(out.String(), "ConnectMac AI Rules") {
 		t.Fatalf("out = %q", out.String())
 	}
 	for _, want := range []string{
@@ -160,6 +191,10 @@ func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
 		"Launch EC2 on a Dedicated Host only when the host state is available",
 		"Destroy workflows that terminate EC2 must defer Dedicated Host release",
 		"cm_aws_capacity",
+		"cm_push",
+		"cm_aws_create_mac",
+		"cm_aws_destroy_mac",
+		"cm mcp tools --json",
 		"Permission denied (publickey)",
 	} {
 		if !strings.Contains(out.String(), want) {

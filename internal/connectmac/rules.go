@@ -10,8 +10,10 @@ import (
 const (
 	DefaultRulesPath = "~/.connectmac/rules.md"
 	SkillName        = "connectmac"
-	rulesStart       = "<!-- BEGIN CONNECTMAC AWS RULES -->"
-	rulesEnd         = "<!-- END CONNECTMAC AWS RULES -->"
+	rulesStart       = "<!-- BEGIN CONNECTMAC RULES -->"
+	rulesEnd         = "<!-- END CONNECTMAC RULES -->"
+	oldRulesStart    = "<!-- BEGIN CONNECTMAC AWS RULES -->"
+	oldRulesEnd      = "<!-- END CONNECTMAC AWS RULES -->"
 )
 
 type InitRulesOptions struct {
@@ -151,8 +153,8 @@ func ValidateRulesInstall(result RulesInstallResult) error {
 	if err != nil {
 		return fmt.Errorf("validate rules source: %w", err)
 	}
-	if !strings.Contains(string(source), "ConnectMac AWS AI Rules") {
-		return fmt.Errorf("validate rules source: missing ConnectMac AWS AI Rules")
+	if !strings.Contains(string(source), "ConnectMac AI Rules") {
+		return fmt.Errorf("validate rules source: missing ConnectMac AI Rules")
 	}
 	agent, err := os.ReadFile(result.AgentPath)
 	if err != nil {
@@ -235,8 +237,16 @@ func upsertMarkedBlock(content, block string) string {
 	content = strings.TrimRight(content, "\n")
 	start := strings.Index(content, rulesStart)
 	end := strings.Index(content, rulesEnd)
+	if start < 0 || end < start {
+		start = strings.Index(content, oldRulesStart)
+		end = strings.Index(content, oldRulesEnd)
+	}
 	if start >= 0 && end >= start {
-		end += len(rulesEnd)
+		if strings.HasPrefix(content[start:], oldRulesStart) {
+			end += len(oldRulesEnd)
+		} else {
+			end += len(rulesEnd)
+		}
 		next := strings.TrimLeft(content[end:], "\n")
 		prefix := strings.TrimRight(content[:start], "\n")
 		if prefix != "" && next != "" {
@@ -258,7 +268,7 @@ func upsertMarkedBlock(content, block string) string {
 
 func DefaultRulesTemplate() string {
 	return strings.Join([]string{
-		"# ConnectMac AWS AI Rules",
+		"# ConnectMac AI Rules",
 		"",
 		"Use the connectmac skill for any request involving cm aws, AWS Mac Dedicated Hosts, Mac virtual machines, 提包机, Apple-account-based Mac access, or opening/creating/releasing/destroying AWS Mac resources.",
 		"",
@@ -285,14 +295,29 @@ func DefaultRulesTemplate() string {
 		"",
 		"- cm_list_profiles",
 		"- cm_find_profile_by_apple",
+		"- cm_check_profile",
+		"- cm_push",
+		"- cm_pull",
+		"- cm_forget_host",
 		"- cm_aws_capacity",
 		"- cm_aws_plan",
-		"- cm_aws_open_mac_by_email",
-		"- cm_aws_destroy_mac_by_email",
 		"- cm_aws_status",
 		"- cm_aws_wait_ready",
-		"- cm_aws_launch_on_host",
+		"- cm_aws_create_mac",
+		"- cm_aws_open_mac_by_email",
+		"- cm_aws_adopt_mac",
 		"- cm_aws_adopt_host",
+		"- cm_aws_launch_on_host",
+		"- cm_aws_destroy_mac",
+		"- cm_aws_destroy_mac_by_email",
+		"",
+		"Tool discovery:",
+		"",
+		"- There is no plain `cm tools` command.",
+		"- `cm mcp` starts the stdio MCP server and may print nothing when run directly.",
+		"- Use `cm mcp tools` for a human-readable tool list.",
+		"- Use `cm mcp tools --json` or MCP `initialize` + `tools/list` for the raw MCP tool list.",
+		"- If MCP tools are not visible to the agent, use the CLI fallback below.",
 		"",
 		"CLI fallback:",
 		"",
@@ -326,7 +351,7 @@ func DefaultSkillTemplate() string {
 		"description: Safely operate the local `cm` ConnectMac tool for AWS Mac Dedicated Host workflows. Use when the user asks to open, create, release, destroy, check, list, or manage Mac virtual machines, AWS Mac hosts, 提包机, Apple-account-based Mac access, `cm aws`, or `cm` MCP workflows. Always require an explicit Apple account email for AI-driven open/create/destroy requests; if missing, list configured accounts and ask the user to choose.",
 		"---",
 		"",
-		"# ConnectMac AWS",
+		"# ConnectMac",
 		"",
 		"## Core Rules",
 		"",
@@ -351,14 +376,30 @@ func DefaultSkillTemplate() string {
 		"",
 		"- `cm_list_profiles`: list configured profiles.",
 		"- `cm_find_profile_by_apple`: resolve an explicit `apple_email` to a profile.",
-		"- `cm_aws_capacity`: read-only Mac Dedicated Host quotas, active host usage, remaining capacity, and offering AZs.",
+		"- `cm_check_profile`: validate a profile without connecting.",
+		"- `cm_push`: preview or execute rsync upload; requires `confirm=true` to execute.",
+		"- `cm_pull`: preview or execute rsync download; requires `confirm=true` to execute.",
+		"- `cm_forget_host`: preview or remove `known_hosts` entries for a profile host; requires `confirm=true` to execute.",
 		"- `cm_aws_plan`: preview local AWS Mac creation settings without calling AWS APIs.",
-		"- `cm_aws_open_mac_by_email`: preview or open by explicit `apple_email`.",
-		"- `cm_aws_destroy_mac_by_email`: preview or release compute by explicit `apple_email`.",
+		"- `cm_aws_capacity`: read-only Mac Dedicated Host quotas, active host usage, remaining capacity, and offering AZs.",
 		"- `cm_aws_status`: inspect a known profile.",
 		"- `cm_aws_wait_ready`: wait for AWS readiness after confirmed create/open/launch.",
-		"- `cm_aws_launch_on_host`: preview or launch EC2 on an explicit existing Dedicated Host.",
+		"- `cm_aws_create_mac`: preview or create AWS Mac compute by profile; requires `confirm=true` to execute.",
+		"- `cm_aws_open_mac_by_email`: preview or open by explicit `apple_email`; requires `confirm=true` to mutate AWS.",
+		"- `cm_aws_adopt_mac`: preview or tag existing AWS Mac resources as managed; requires `confirm=true` to execute.",
 		"- `cm_aws_adopt_host`: preview or tag an existing empty Dedicated Host as managed.",
+		"- `cm_aws_launch_on_host`: preview or launch EC2 on an explicit existing Dedicated Host; requires `confirm=true` to execute.",
+		"- `cm_aws_destroy_mac`: preview or destroy AWS Mac compute by profile; requires `confirm=true` to execute.",
+		"- `cm_aws_destroy_mac_by_email`: preview or release compute by explicit `apple_email`; requires `confirm=true` to execute.",
+		"",
+		"Tool discovery:",
+		"",
+		"- Do not use `cm tools`; ordinary CLI has no such command.",
+		"- `cm mcp` is a stdio MCP server. Running it directly can appear to hang or print nothing because it waits for JSON-RPC on stdin.",
+		"- Use `cm mcp tools` to print tool names, descriptions, and required parameters.",
+		"- Use `cm mcp tools --json` to print the MCP `tools/list` result JSON.",
+		"- MCP clients should call `initialize` followed by `tools/list`.",
+		"- If MCP tools are unavailable or hidden, use the CLI fallback commands below.",
 		"",
 		"For AI requests like \"给 xxx@mail.com 打开 Mac\" or \"释放 xxx@mail.com 的 Mac\":",
 		"",
@@ -431,9 +472,9 @@ func DefaultSkillTemplate() string {
 func DefaultSkillOpenAIYAML() string {
 	return strings.Join([]string{
 		"interface:",
-		"  display_name: \"ConnectMac AWS\"",
+		"  display_name: \"ConnectMac\"",
 		"  short_description: \"Safely operate cm AWS Mac profiles by Apple account email.\"",
-		"  default_prompt: \"Use ConnectMac AWS to preview or operate AWS Mac workflows safely by explicit Apple account email.\"",
+		"  default_prompt: \"Use ConnectMac to preview or operate AWS Mac workflows safely by explicit Apple account email.\"",
 		"",
 	}, "\n")
 }

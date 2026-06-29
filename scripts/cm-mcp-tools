@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+CM_BIN="${CM_BIN:-cm}"
+
+if [ "${1:-}" = "--json" ]; then
+  exec "$CM_BIN" mcp tools --json
+fi
+
+exec "$CM_BIN" mcp tools "$@"

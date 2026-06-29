@@ -145,7 +145,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	case "status":
 		return a.runStatus()
 	case "mcp":
-		return a.runMCP(ctx, configPath)
+		return a.runMCP(ctx, configPath, args[1:])
 	case "aws":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -159,12 +159,50 @@ func (a App) Run(ctx context.Context, args []string) int {
 	}
 }
 
-func (a App) runMCP(ctx context.Context, configPath string) int {
+func (a App) runMCP(ctx context.Context, configPath string, args []string) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "--help", "-h", "help":
+			a.printMCPUsage()
+			return 0
+		case "tools":
+			return a.runMCPTools(args[1:])
+		default:
+			fmt.Fprintf(a.Err, "unknown mcp command %q\n\n", args[0])
+			a.printMCPUsage()
+			return 2
+		}
+	}
 	server := MCPServer{App: a, ConfigPath: configPath}
 	if err := server.Serve(ctx, os.Stdin, a.Out); err != nil {
 		fmt.Fprintf(a.Err, "mcp failed: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+func (a App) runMCPTools(args []string) int {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--help", "-h":
+			a.printMCPUsage()
+			return 0
+		default:
+			fmt.Fprintf(a.Err, "unknown mcp tools option %q\n", arg)
+			return 2
+		}
+	}
+	if jsonOutput {
+		if err := WriteMCPToolsJSON(a.Out); err != nil {
+			fmt.Fprintf(a.Err, "mcp tools failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprint(a.Out, FormatMCPToolsText())
 	return 0
 }
 
@@ -657,7 +695,7 @@ func (a App) runList(cfg Config) int {
 
 func (a App) runCompletion(configPath string, args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|profile-commands>")
+		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands>")
 		return 2
 	}
 	switch args[0] {
@@ -675,6 +713,9 @@ func (a App) runCompletion(configPath string, args []string) int {
 		return 0
 	case "aws-commands":
 		printLines(a.Out, completionAWSCommands())
+		return 0
+	case "mcp-commands":
+		printLines(a.Out, completionMCPCommands())
 		return 0
 	case "profile-commands":
 		printLines(a.Out, completionProfileCommands())
@@ -1214,8 +1255,23 @@ func (a App) printUsage() {
   cm aws destroy-all [--except <profile-or-apple-email>] [--confirm] [--config <path>]
   cm aws running [--config <path>]
   cm mcp [--config <path>]
+  cm mcp tools [--json]
   cm stop <profile>
   cm status
+`)
+}
+
+func (a App) printMCPUsage() {
+	fmt.Fprint(a.Out, `Usage:
+  cm mcp [--config <path>]
+  cm mcp tools
+  cm mcp tools --json
+
+cm mcp starts the stdio MCP server. It waits for JSON-RPC messages on stdin
+and does not print a tool list when run directly.
+
+Use cm mcp tools for a human-readable tool list, or cm mcp tools --json for
+the MCP tools/list result JSON.
 `)
 }
 
@@ -1488,6 +1544,10 @@ func completionAWSCommands() []string {
 	}
 }
 
+func completionMCPCommands() []string {
+	return []string{"tools"}
+}
+
 func zshCompletionScript() string {
 	return `#compdef cm
 
@@ -1520,9 +1580,10 @@ _cm_profile_or_apple() {
 }
 
 _cm() {
-  local -a commands aws_commands profile_commands
+  local -a commands aws_commands mcp_commands profile_commands
   commands=("${(@f)$(command cm completion commands 2>/dev/null)}")
   aws_commands=("${(@f)$(command cm completion aws-commands 2>/dev/null)}")
+  mcp_commands=("${(@f)$(command cm completion mcp-commands 2>/dev/null)}")
   profile_commands=("${(@f)$(command cm completion profile-commands 2>/dev/null)}")
 
   if [[ "${words[$((CURRENT - 1))]}" == "--config" ]]; then
@@ -1579,6 +1640,13 @@ _cm() {
           --except) _cm_profile_or_apple ;;
           *) _values 'aws option' --confirm --all --host-id --except --config ;;
         esac
+      fi
+      ;;
+    mcp)
+      if (( CURRENT == 3 )); then
+        compadd -- "${mcp_commands[@]}"
+      elif [[ "${words[3]}" == "tools" ]]; then
+        _values 'mcp tools option' --json --config
       fi
       ;;
     completion)
@@ -1656,6 +1724,13 @@ func bashCompletionScript() string {
         fi
       fi
       ;;
+    mcp)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion mcp-commands 2>/dev/null)" -- "$cur") )
+      elif [[ "${COMP_WORDS[2]}" == "tools" ]]; then
+        COMPREPLY=( $(compgen -W "--json --config" -- "$cur") )
+      fi
+      ;;
     completion)
       COMPREPLY=( $(compgen -W "zsh bash fish" -- "$cur") )
       ;;
@@ -1677,6 +1752,8 @@ complete -c cm -n "__fish_seen_subcommand_from profile; and __fish_seen_subcomma
 complete -c cm -n "__fish_seen_subcommand_from aws; and not __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion aws-commands)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion apple-emails)"
+complete -c cm -n "__fish_seen_subcommand_from mcp; and not __fish_seen_subcommand_from (cm completion mcp-commands)" -a "(cm completion mcp-commands)"
+complete -c cm -n "__fish_seen_subcommand_from mcp; and __fish_seen_subcommand_from tools" -a "--json"
 complete -c cm -n "__fish_seen_subcommand_from completion" -a "zsh bash fish"
 `
 }
