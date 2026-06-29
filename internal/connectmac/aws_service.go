@@ -1166,7 +1166,7 @@ func FormatAWSReadyStatus(plan MacPlan, status AWSStatus) string {
 }
 
 func FormatAWSManualSetupGuide(plan MacPlan) string {
-	return fmt.Sprintf("Manual GUI setup:\n  cm ssh %s\n  # Enter the remote Mac SSH shell for first-time GUI/VNC setup.\n  sudo passwd ec2-user\n  # Set the remote ec2-user password for Screen Sharing/VNC login.\n  sudo launchctl enable system/com.apple.screensharing\n  # Enable the macOS Screen Sharing service.\n  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  # Start the Screen Sharing service now.\n  exit\n  # Exit SSH and return to the local terminal.\n  cm start %s\n  # Start the local SSH tunnel to the remote Mac VNC port.\n  cm open-vnc %s\n  # Open macOS Screen Sharing through the local tunnel.\n", plan.ProfileName, plan.ProfileName, plan.ProfileName)
+	return fmt.Sprintf("Manual GUI setup:\n  cm ssh %s\n  # Enter the remote Mac SSH shell for first-time GUI/VNC setup.\n  sudo passwd ec2-user\n  # 输入你要设置的密码，例如：12345678\n  # 再次输入你要设置的密码，例如：12345678\n  sudo launchctl enable system/com.apple.screensharing\n  # Enable the macOS Screen Sharing service.\n  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  # Start the Screen Sharing service now.\n  exit\n  # Exit SSH and return to the local terminal.\n  cm start %s\n  # Start the local SSH tunnel to the remote Mac VNC port.\n  cm open-vnc %s\n  # Open macOS Screen Sharing through the local tunnel.\n", plan.ProfileName, plan.ProfileName, plan.ProfileName)
 }
 
 func FormatAWSCreateResult(plan MacPlan, result AWSCreateResult) string {

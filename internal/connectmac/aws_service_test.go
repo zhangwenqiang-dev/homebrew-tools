@@ -255,6 +255,7 @@ func TestFormatAWSManualSetupGuideExitsSSHBeforeLocalCommands(t *testing.T) {
 	text := FormatAWSManualSetupGuide(validPlan(t))
 	for _, want := range []string{
 		"cm ssh xcode-vnc\n  # Enter the remote Mac SSH shell",
+		"sudo passwd ec2-user\n  # 输入你要设置的密码，例如：12345678\n  # 再次输入你要设置的密码，例如：12345678",
 		"sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n  # Start the Screen Sharing service now.\n  exit",
 		"exit\n  # Exit SSH and return to the local terminal.\n  cm start xcode-vnc",
 		"cm open-vnc xcode-vnc\n  # Open macOS Screen Sharing through the local tunnel.",
