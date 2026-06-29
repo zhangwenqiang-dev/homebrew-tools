@@ -376,6 +376,24 @@ func TestAppPullAcceptsAppleEmail(t *testing.T) {
 	}
 }
 
+func TestAppPullAcceptsSyncFilters(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"pull", "xcode-vnc", "~/Desktop/a.zip", "--include", "*.zip", "--exclude", "*.tmp", "--config", config}); code != 0 {
+		t.Fatalf("pull code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"--include", "*.zip", "--exclude", ".DS_Store", "--exclude", "*.tmp", "--exclude", "*"} {
+		if !containsString(runner.rsync, want) {
+			t.Fatalf("rsync args missing %q = %#v", want, runner.rsync)
+		}
+	}
+}
+
 func TestAppPushUsesRsyncRunner(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -394,6 +412,26 @@ func TestAppPushUsesRsyncRunner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Push:") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppPushAcceptsSyncFilters(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	localFile := filepath.Join(dir, "build.zip")
+	writeFile(t, localFile, "zip")
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"push", "xcode-vnc", localFile, "~/Downloads/", "--include", "Sources/***", "--exclude", "DerivedData", "--config", config}); code != 0 {
+		t.Fatalf("push code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"--include", "Sources/***", "--exclude", "xcuserdata", "--exclude", "DerivedData", "--exclude", "*"} {
+		if !containsString(runner.rsync, want) {
+			t.Fatalf("rsync args missing %q = %#v", want, runner.rsync)
+		}
 	}
 }
 

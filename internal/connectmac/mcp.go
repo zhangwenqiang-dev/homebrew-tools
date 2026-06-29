@@ -78,7 +78,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.41",
+				"version": "0.1.42",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -188,6 +188,10 @@ func (s MCPServer) mcpPush(ctx context.Context, cfg Config, args map[string]inte
 		return nil, err
 	}
 	remoteDir = NormalizeRemotePath(remoteDir)
+	extraFilters, err := mcpSyncFilters(args)
+	if err != nil {
+		return nil, err
+	}
 	preview := fmt.Sprintf("Push %s -> %s\n", localPath, RemoteTarget(profile, remoteDir))
 	if !boolArg(args, "confirm") {
 		return mcpText(preview + "Preview only. Call again with confirm=true to execute."), nil
@@ -198,7 +202,7 @@ func (s MCPServer) mcpPush(ctx context.Context, cfg Config, args map[string]inte
 	if !s.validateMCPRsync(profile) {
 		return nil, fmt.Errorf("profile validation failed")
 	}
-	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, profile.Sync.Push.Excludes)
+	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, mergeSyncFilters(profile.Sync.Push, extraFilters))
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +225,10 @@ func (s MCPServer) mcpPull(ctx context.Context, cfg Config, args map[string]inte
 		return nil, err
 	}
 	localDir := stringArg(args, "local_dir", ".")
+	extraFilters, err := mcpSyncFilters(args)
+	if err != nil {
+		return nil, err
+	}
 	preview := fmt.Sprintf("Pull %s -> %s\n", RemoteTarget(profile, remotePath), localDir)
 	if !boolArg(args, "confirm") {
 		return mcpText(preview + "Preview only. Call again with confirm=true to execute."), nil
@@ -228,7 +236,7 @@ func (s MCPServer) mcpPull(ctx context.Context, cfg Config, args map[string]inte
 	if !s.validateMCPRsync(profile) {
 		return nil, fmt.Errorf("profile validation failed")
 	}
-	rsyncArgs, err := RsyncPullArgs(profile, remotePath, localDir, profile.Sync.Pull.Excludes)
+	rsyncArgs, err := RsyncPullArgs(profile, remotePath, localDir, mergeSyncFilters(profile.Sync.Pull, extraFilters))
 	if err != nil {
 		return nil, err
 	}
@@ -681,27 +689,63 @@ func boolArg(args map[string]interface{}, name string) bool {
 	return ok && value
 }
 
+func mcpSyncFilters(args map[string]interface{}) (SyncFilters, error) {
+	includes, err := optionalStringArrayArg(args, "includes")
+	if err != nil {
+		return SyncFilters{}, err
+	}
+	excludes, err := optionalStringArrayArg(args, "excludes")
+	if err != nil {
+		return SyncFilters{}, err
+	}
+	return SyncFilters{Includes: includes, Excludes: excludes}, nil
+}
+
+func optionalStringArrayArg(args map[string]interface{}, name string) ([]string, error) {
+	value, ok := args[name]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	raw, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array of strings", name)
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		text, ok := item.(string)
+		if !ok || text == "" {
+			return nil, fmt.Errorf("%s must be an array of non-empty strings", name)
+		}
+		out = append(out, text)
+	}
+	return out, nil
+}
+
 func mcpTools() []map[string]interface{} {
 	return []map[string]interface{}{
 		mcpTool("cm_list_profiles", "List configured cm profiles.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
 		mcpTool("cm_find_profile_by_apple", "Find the cm profile for an explicit Apple account email. If the user did not provide an email, ask them to choose from configured accounts.", appleEmailSchema()),
 		mcpTool("cm_check_profile", "Validate a profile without connecting.", profileSchema()),
-		mcpTool("cm_push", "Preview or execute rsync upload. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_push", "Preview or execute rsync upload with optional includes/excludes filters. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":    stringSchema(),
 				"local_path": stringSchema(),
 				"remote_dir": stringSchema(),
+				"includes":   stringArraySchema(),
+				"excludes":   stringArraySchema(),
 				"confirm":    map[string]string{"type": "boolean"},
 			},
 			"required": []string{"profile", "local_path", "remote_dir"},
 		}),
-		mcpTool("cm_pull", "Preview or execute rsync download. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_pull", "Preview or execute rsync download with optional includes/excludes filters. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":     stringSchema(),
 				"remote_path": stringSchema(),
 				"local_dir":   stringSchema(),
+				"includes":    stringArraySchema(),
+				"excludes":    stringArraySchema(),
 				"confirm":     map[string]string{"type": "boolean"},
 			},
 			"required": []string{"profile", "remote_path"},
@@ -838,4 +882,8 @@ func appleEmailSchema() map[string]interface{} {
 
 func stringSchema() map[string]string {
 	return map[string]string{"type": "string"}
+}
+
+func stringArraySchema() map[string]interface{} {
+	return map[string]interface{}{"type": "array", "items": stringSchema()}
 }

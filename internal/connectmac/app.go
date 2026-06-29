@@ -1028,8 +1028,13 @@ func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
 }
 
 func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
-	if len(args) != 2 {
-		fmt.Fprintln(a.Err, "usage: cm pull <profile-or-apple-email> <remote-path>")
+	if len(args) < 2 {
+		fmt.Fprintln(a.Err, "usage: cm pull <profile-or-apple-email> <remote-path> [--include <pattern>] [--exclude <pattern>]")
+		return 2
+	}
+	extraFilters, err := parseSyncFilterFlags(args[2:])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 2
 	}
 	profile, err := resolveProfileRef(cfg, args[0])
@@ -1041,7 +1046,7 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 	if !a.validateRsyncAccess(profile) {
 		return 1
 	}
-	rsyncArgs, err := RsyncPullArgs(profile, args[1], ".", profile.Sync.Pull.Excludes)
+	rsyncArgs, err := RsyncPullArgs(profile, args[1], ".", mergeSyncFilters(profile.Sync.Pull, extraFilters))
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1
@@ -1055,8 +1060,13 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 }
 
 func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
-	if len(args) != 3 {
-		fmt.Fprintln(a.Err, "usage: cm push <profile-or-apple-email> <local-path> <remote-dir>")
+	if len(args) < 3 {
+		fmt.Fprintln(a.Err, "usage: cm push <profile-or-apple-email> <local-path> <remote-dir> [--include <pattern>] [--exclude <pattern>]")
+		return 2
+	}
+	extraFilters, err := parseSyncFilterFlags(args[3:])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 2
 	}
 	profile, err := resolveProfileRef(cfg, args[0])
@@ -1074,7 +1084,7 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 		return 1
 	}
 	remoteDir := NormalizeRemotePath(args[2])
-	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, profile.Sync.Push.Excludes)
+	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, mergeSyncFilters(profile.Sync.Push, extraFilters))
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1
@@ -1235,8 +1245,8 @@ func (a App) printUsage() {
   cm ssh <profile> [--config <path>]
   cm exec <profile> [--config <path>] -- <command>
   cm start <profile> [--config <path>]
-  cm pull <profile-or-apple-email> <remote-path> [--config <path>]
-  cm push <profile-or-apple-email> <local-path> <remote-dir> [--config <path>]
+  cm pull <profile-or-apple-email> <remote-path> [--include <pattern>] [--exclude <pattern>] [--config <path>]
+  cm push <profile-or-apple-email> <local-path> <remote-dir> [--include <pattern>] [--exclude <pattern>] [--config <path>]
   cm forget-host <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
   cm profile accounts [--config <path>]
@@ -1371,12 +1381,14 @@ profiles:
     host: mac-host.example.com
     sync:
       push:
+        includes: []
         excludes:
           - xcuserdata
           - .svn
           - .git
           - .DS_Store
       pull:
+        includes: []
         excludes: []
     vnc:
       username: mac-user
@@ -1435,6 +1447,36 @@ func parseConfigFlag(args []string, configPath *string) []string {
 		out = append(out, args[i])
 	}
 	return out
+}
+
+func parseSyncFilterFlags(args []string) (SyncFilters, error) {
+	var filters SyncFilters
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--include":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return filters, fmt.Errorf("--include requires a value")
+			}
+			filters.Includes = append(filters.Includes, args[i])
+		case "--exclude":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return filters, fmt.Errorf("--exclude requires a value")
+			}
+			filters.Excludes = append(filters.Excludes, args[i])
+		default:
+			return filters, fmt.Errorf("unknown sync option %q", args[i])
+		}
+	}
+	return filters, nil
+}
+
+func mergeSyncFilters(direction SyncDirection, extra SyncFilters) SyncFilters {
+	return SyncFilters{
+		Includes: append(append([]string{}, direction.Includes...), extra.Includes...),
+		Excludes: append(append([]string{}, direction.Excludes...), extra.Excludes...),
+	}
 }
 
 func requireProfileArg(errOut io.Writer, cfg Config, args []string) (Profile, bool) {
@@ -1603,8 +1645,10 @@ _cm() {
     pull)
       if (( CURRENT == 3 )); then
         _cm_profile_or_apple
-      else
+      elif [[ "${words[$((CURRENT - 1))]}" == "--include" || "${words[$((CURRENT - 1))]}" == "--exclude" ]]; then
         _files
+      else
+        _values 'pull option' --include --exclude --config
       fi
       ;;
     push)
@@ -1612,8 +1656,10 @@ _cm() {
         _cm_profile_or_apple
       elif (( CURRENT == 4 )); then
         _files
+      elif [[ "${words[$((CURRENT - 1))]}" == "--include" || "${words[$((CURRENT - 1))]}" == "--exclude" ]]; then
+        _files
       else
-        _files -/
+        _values 'push option' --include --exclude --config
       fi
       ;;
     exec)
@@ -1693,15 +1739,19 @@ func bashCompletionScript() string {
     pull)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
-      else
+      elif [[ "$prev" == "--include" || "$prev" == "--exclude" ]]; then
         COMPREPLY=( $(compgen -f -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--include --exclude --config" -- "$cur") )
       fi
       ;;
     push)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
-      else
+      elif [[ "$prev" == "--include" || "$prev" == "--exclude" ]]; then
         COMPREPLY=( $(compgen -f -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--include --exclude --config" -- "$cur") )
       fi
       ;;
     profile)
@@ -1747,6 +1797,7 @@ complete -c cm -n "not __fish_seen_subcommand_from (cm completion commands)" -a 
 complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc stop exec" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion apple-emails)"
+complete -c cm -n "__fish_seen_subcommand_from pull push" -a "--include --exclude"
 complete -c cm -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from (cm completion profile-commands)" -a "(cm completion profile-commands)"
 complete -c cm -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from find" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and not __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion aws-commands)"

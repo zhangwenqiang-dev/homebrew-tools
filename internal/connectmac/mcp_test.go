@@ -85,6 +85,47 @@ func TestMCPPushConfirmRunsRsync(t *testing.T) {
 	}
 }
 
+func TestMCPPushAcceptsSyncFilters(t *testing.T) {
+	app, config, runner := mcpTestApp(t)
+	localPath := filepath.Join(t.TempDir(), "file.txt")
+	writeFile(t, localPath, "data")
+	out := runMCPCall(t, app, config, "cm_push", map[string]interface{}{
+		"profile":    "xcode-vnc",
+		"local_path": localPath,
+		"remote_dir": "~/Documents/",
+		"includes":   []interface{}{"Sources/***"},
+		"excludes":   []interface{}{"DerivedData"},
+		"confirm":    true,
+	})
+	if !strings.Contains(out, "Executed") {
+		t.Fatalf("output = %q", out)
+	}
+	for _, want := range []string{"--include", "Sources/***", "--exclude", "xcuserdata", "--exclude", "DerivedData", "--exclude", "*"} {
+		if !containsString(runner.rsync, want) {
+			t.Fatalf("rsync args missing %q = %#v", want, runner.rsync)
+		}
+	}
+}
+
+func TestMCPPullAcceptsSyncFilters(t *testing.T) {
+	app, config, runner := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_pull", map[string]interface{}{
+		"profile":     "xcode-vnc",
+		"remote_path": "~/Desktop/a.zip",
+		"includes":    []interface{}{"*.zip"},
+		"excludes":    []interface{}{"*.tmp"},
+		"confirm":     true,
+	})
+	if !strings.Contains(out, "Executed") {
+		t.Fatalf("output = %q", out)
+	}
+	for _, want := range []string{"--include", "*.zip", "--exclude", ".DS_Store", "--exclude", "*.tmp", "--exclude", "*"} {
+		if !containsString(runner.rsync, want) {
+			t.Fatalf("rsync args missing %q = %#v", want, runner.rsync)
+		}
+	}
+}
+
 func TestMCPForgetHostRequiresConfirm(t *testing.T) {
 	app, config, runner := mcpTestApp(t)
 	out := runMCPCall(t, app, config, "cm_forget_host", map[string]interface{}{

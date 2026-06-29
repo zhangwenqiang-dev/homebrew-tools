@@ -21,12 +21,17 @@ profiles:
     identity_file: ~/.ssh/example.pem
     sync:
       push:
+        includes:
+          - Sources/***
+          - "*.xcodeproj/***"
         excludes:
           - xcuserdata
           - .svn
           - .git
           - .DS_Store
       pull:
+        includes:
+          - "*.ipa"
         excludes:
           - .DS_Store
     vnc:
@@ -83,8 +88,14 @@ func TestParseConfig(t *testing.T) {
 	if len(profile.Sync.Push.Excludes) != 4 {
 		t.Fatalf("push exclude count = %d, want 4", len(profile.Sync.Push.Excludes))
 	}
+	if len(profile.Sync.Push.Includes) != 2 {
+		t.Fatalf("push include count = %d, want 2", len(profile.Sync.Push.Includes))
+	}
 	if len(profile.Sync.Pull.Excludes) != 1 {
 		t.Fatalf("pull exclude count = %d, want 1", len(profile.Sync.Pull.Excludes))
+	}
+	if len(profile.Sync.Pull.Includes) != 1 {
+		t.Fatalf("pull include count = %d, want 1", len(profile.Sync.Pull.Includes))
 	}
 	if profile.VNC.Username != "mac-user" {
 		t.Fatalf("vnc username = %q, want mac-user", profile.VNC.Username)

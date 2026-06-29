@@ -69,12 +69,14 @@ profiles:
     host: mac-host.example.com
     sync:
       push:
+        includes: []
         excludes:
           - xcuserdata
           - .svn
           - .git
           - .DS_Store
       pull:
+        includes: []
         excludes: []
     vnc:
       username: mac-user
@@ -186,6 +188,7 @@ Pull a remote file or directory into the current directory:
 ```bash
 cm pull xcode-vnc ~/Desktop/App.ipa
 cm pull user@example.com ~/Desktop/App.ipa
+cm pull xcode-vnc ~/Desktop/App.ipa --include "*.ipa" --exclude "*.tmp"
 ```
 
 Upload a local file or directory to a remote directory:
@@ -193,9 +196,10 @@ Upload a local file or directory to a remote directory:
 ```bash
 cm push xcode-vnc ./MyProject ~/Downloads/
 cm push user@example.com ./MyProject ~/Downloads/
+cm push xcode-vnc ./MyProject ~/Downloads/ --include "Sources/***" --exclude "DerivedData"
 ```
 
-When pushing a directory, `cm` uploads it directly with rsync and applies the profile's push exclude rules.
+When pushing a directory, `cm` uploads it directly with rsync and applies the profile's push include/exclude rules plus any command-line filters.
 
 After a push, use `cm exec` to verify the remote path with the same SSH host, user, and key configured in the profile:
 
@@ -395,13 +399,16 @@ xcuserdata
 .DS_Store
 ```
 
-You can configure push and pull excludes separately per profile:
+You can configure push and pull includes/excludes separately per profile. When `includes` is non-empty, `cm` appends a final `--exclude "*"` so only matching include patterns are transferred; `excludes` are still applied before that final catch-all.
 
 ```yaml
 profiles:
   xcode-vnc:
     sync:
       push:
+        includes:
+          - "Sources/***"
+          - "*.xcodeproj/***"
         excludes:
           - xcuserdata
           - .svn
@@ -410,6 +417,9 @@ profiles:
           - docs
           - "*.md"
       pull:
+        includes:
+          - "*.ipa"
+          - "*.log"
         excludes:
           - .DS_Store
 ```

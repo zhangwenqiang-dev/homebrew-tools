@@ -83,6 +83,7 @@ type SyncConfig struct {
 }
 
 type SyncDirection struct {
+	Includes []string
 	Excludes []string
 }
 
@@ -233,7 +234,7 @@ func ParseConfig(data string) (Config, error) {
 	inTunnels := false
 	inSync := false
 	syncDirection := ""
-	inSyncExcludes := false
+	syncList := ""
 	inVNC := false
 	inAWS := false
 	inAWSAMI := false
@@ -263,7 +264,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = false
 			inAWS = false
 			inAWSAMI = false
@@ -290,7 +291,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = false
 			inAWS = false
 			inAWSAMI = false
@@ -384,7 +385,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = true
 			inSync = false
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = false
 			inAWS = false
 			inAWSAMI = false
@@ -403,7 +404,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = false
 			inSync = true
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = false
 			inAWS = false
 			inAWSAMI = false
@@ -422,7 +423,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = true
 			inAWS = false
 			inAWSAMI = false
@@ -441,7 +442,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = false
 			inAWS = true
 			inAWSAMI = false
@@ -454,25 +455,25 @@ func ParseConfig(data string) (Config, error) {
 
 		if inSync && indent == 6 && (line == "push:" || line == "pull:") {
 			syncDirection = strings.TrimSuffix(line, ":")
-			inSyncExcludes = false
+			syncList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
 		}
 
-		if inSync && indent == 8 && line == "excludes:" {
+		if inSync && indent == 8 && (line == "includes:" || line == "excludes:") {
 			if syncDirection == "" {
-				return Config{}, fmt.Errorf("sync excludes before push or pull")
+				return Config{}, fmt.Errorf("sync list before push or pull")
 			}
-			inSyncExcludes = true
+			syncList = strings.TrimSuffix(line, ":")
 			cfg.Profiles[current.Name] = *current
 			continue
 		}
 
-		if inSync && indent == 8 && line == "excludes: []" {
+		if inSync && indent == 8 && (line == "includes: []" || line == "excludes: []") {
 			if syncDirection == "" {
-				return Config{}, fmt.Errorf("sync excludes before push or pull")
+				return Config{}, fmt.Errorf("sync list before push or pull")
 			}
-			inSyncExcludes = false
+			syncList = ""
 			cfg.Profiles[current.Name] = *current
 			continue
 		}
@@ -503,16 +504,24 @@ func ParseConfig(data string) (Config, error) {
 			continue
 		}
 
-		if inSync && inSyncExcludes && indent == 10 && strings.HasPrefix(line, "- ") {
+		if inSync && syncList != "" && indent == 10 && strings.HasPrefix(line, "- ") {
 			item := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "- ")), `"'`)
 			if item == "" {
-				return Config{}, fmt.Errorf("sync %s excludes item cannot be empty", syncDirection)
+				return Config{}, fmt.Errorf("sync %s %s item cannot be empty", syncDirection, syncList)
 			}
 			switch syncDirection {
 			case "push":
-				current.Sync.Push.Excludes = append(current.Sync.Push.Excludes, item)
+				if syncList == "includes" {
+					current.Sync.Push.Includes = append(current.Sync.Push.Includes, item)
+				} else {
+					current.Sync.Push.Excludes = append(current.Sync.Push.Excludes, item)
+				}
 			case "pull":
-				current.Sync.Pull.Excludes = append(current.Sync.Pull.Excludes, item)
+				if syncList == "includes" {
+					current.Sync.Pull.Includes = append(current.Sync.Pull.Includes, item)
+				} else {
+					current.Sync.Pull.Excludes = append(current.Sync.Pull.Excludes, item)
+				}
 			default:
 				return Config{}, fmt.Errorf("unsupported sync direction %q", syncDirection)
 			}
@@ -628,7 +637,7 @@ func ParseConfig(data string) (Config, error) {
 			inTunnels = false
 			inSync = false
 			syncDirection = ""
-			inSyncExcludes = false
+			syncList = ""
 			inVNC = false
 			inAWS = false
 			inAWSAMI = false

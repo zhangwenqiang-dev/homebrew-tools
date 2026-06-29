@@ -35,7 +35,12 @@ func NormalizeRemotePath(path string) string {
 	return path
 }
 
-func RsyncPullArgs(profile Profile, remotePath, localDir string, excludes []string) ([]string, error) {
+type SyncFilters struct {
+	Includes []string
+	Excludes []string
+}
+
+func RsyncPullArgs(profile Profile, remotePath, localDir string, filters SyncFilters) ([]string, error) {
 	keyPath, err := ExpandPath(profile.IdentityFile)
 	if err != nil {
 		return nil, err
@@ -44,14 +49,12 @@ func RsyncPullArgs(profile Profile, remotePath, localDir string, excludes []stri
 		"-avzP",
 		"-e", "ssh -i " + keyPath,
 	}
-	for _, exclude := range excludes {
-		args = append(args, "--exclude", exclude)
-	}
+	args = appendRsyncFilters(args, filters)
 	args = append(args, RemoteTarget(profile, remotePath), localDir)
 	return args, nil
 }
 
-func RsyncPushArgs(profile Profile, localPath, remoteDir string, excludes []string) ([]string, error) {
+func RsyncPushArgs(profile Profile, localPath, remoteDir string, filters SyncFilters) ([]string, error) {
 	keyPath, err := ExpandPath(profile.IdentityFile)
 	if err != nil {
 		return nil, err
@@ -61,9 +64,20 @@ func RsyncPushArgs(profile Profile, localPath, remoteDir string, excludes []stri
 		"-avzP",
 		"-e", "ssh -i " + keyPath,
 	}
-	for _, exclude := range excludes {
-		args = append(args, "--exclude", exclude)
-	}
+	args = appendRsyncFilters(args, filters)
 	args = append(args, localPath, RemoteTarget(profile, remoteDir))
 	return args, nil
+}
+
+func appendRsyncFilters(args []string, filters SyncFilters) []string {
+	for _, include := range filters.Includes {
+		args = append(args, "--include", include)
+	}
+	for _, exclude := range filters.Excludes {
+		args = append(args, "--exclude", exclude)
+	}
+	if len(filters.Includes) > 0 {
+		args = append(args, "--exclude", "*")
+	}
+	return args
 }
