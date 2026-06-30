@@ -86,7 +86,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 		if code != 0 {
 			return code
 		}
-		return a.runProfile(configPath, cfg, args[1:])
+		return a.runProfile(ctx, configPath, cfg, args[1:])
 	case "doctor":
 		return a.runDoctor(configPath, args[1:])
 	case "dashboard":
@@ -94,7 +94,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 		if code != 0 {
 			return code
 		}
-		return a.runDashboard(cfg)
+		return a.runDashboard(ctx, cfg, args[1:])
 	case "open":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -957,11 +957,7 @@ func (a App) runDoctor(configPath string, args []string) int {
 	} else {
 		checks = append(checks, check{"config parse", false, err.Error()})
 	}
-	if len(mcpTools()) == 17 {
-		checks = append(checks, check{"mcp tools", true, "17 tools"})
-	} else {
-		checks = append(checks, check{"mcp tools", false, fmt.Sprintf("%d tools", len(mcpTools()))})
-	}
+	checks = append(checks, check{"mcp tools", len(mcpTools()) > 0, fmt.Sprintf("%d tools", len(mcpTools()))})
 	rows := [][]string{{"CHECK", "STATUS", "DETAIL"}}
 	ok := true
 	for _, item := range checks {
@@ -991,25 +987,71 @@ func detectedCompletionScript() string {
 	return ""
 }
 
-func (a App) runDashboard(cfg Config) int {
+func (a App) runDashboard(ctx context.Context, cfg Config, args []string) int {
+	includeAWS := false
+	for _, arg := range args {
+		switch arg {
+		case "--aws":
+			includeAWS = true
+		default:
+			fmt.Fprintf(a.Err, "unknown dashboard option %q\n", arg)
+			return 2
+		}
+	}
 	states, _ := a.StateManager.List()
 	running := map[string]string{}
 	for _, state := range states {
 		running[state.Profile] = fmt.Sprintf("pid=%d", state.PID)
 	}
-	rows := [][]string{{"PROFILE", "APPLE ACCOUNT", "REGION", "HOST", "TUNNEL"}}
+	rows := [][]string{{"PROFILE", "APPLE ACCOUNT", "REGION", "HOST", "TUNNEL", "AWS"}}
+	if includeAWS {
+		rows[0] = append(rows[0], "INSTANCE", "READY", "EIP")
+	}
 	for _, name := range sortedProfileNames(cfg) {
 		profile, _ := cfg.Profile(name)
-		rows = append(rows, []string{
+		row := []string{
 			profile.Name,
 			emptyTableValue(profile.AWS.AccountEmail),
 			emptyTableValue(profile.AWS.Region),
 			emptyTableValue(profile.Host),
 			emptyTableValue(running[profile.Name]),
-		})
+			dashboardAWSConfigStatus(a.Validator.ValidateAWSProfile(profile)),
+		}
+		if includeAWS {
+			instance, ready, eip := "-", "-", "-"
+			if len(a.Validator.ValidateAWSProfile(profile)) > 0 {
+				ready = "config"
+			} else {
+				_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+				if err != nil {
+					ready = "error"
+				} else {
+					instance = dashboardInstanceSummary(status)
+					ready = fmt.Sprintf("%t", AWSStatusReady(status))
+					eip = emptyTableValue(status.ElasticIP.PublicIP)
+				}
+			}
+			row = append(row, instance, ready, eip)
+		}
+		rows = append(rows, row)
 	}
 	fmt.Fprint(a.Out, formatRows(rows))
 	return 0
+}
+
+func dashboardAWSConfigStatus(errs []error) string {
+	if len(errs) > 0 {
+		return "config"
+	}
+	return "ok"
+}
+
+func dashboardInstanceSummary(status AWSStatus) string {
+	if len(status.Instances) == 0 {
+		return "-"
+	}
+	instance := status.Instances[0]
+	return fmt.Sprintf("%s/%s", instance.InstanceID, emptyStatus(instance.State))
 }
 
 func (a App) runSetupVNC(cfg Config, args []string) int {
@@ -1082,7 +1124,7 @@ func (a App) runCompletion(configPath string, args []string) int {
 	}
 }
 
-func (a App) runProfile(configPath string, cfg Config, args []string) int {
+func (a App) runProfile(ctx context.Context, configPath string, cfg Config, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(a.Err, "usage: cm profile <accounts|find|show|add|remove|rename|edit|export|import|import-dir> ...")
 		return 2
@@ -1118,20 +1160,41 @@ func (a App) runProfile(configPath string, cfg Config, args []string) int {
 	case "add":
 		return a.runProfileAdd(configPath, cfg, args[1:])
 	case "remove":
-		if len(args) != 2 {
-			fmt.Fprintln(a.Err, "usage: cm profile remove <profile>")
+		forceLocal := false
+		values := make([]string, 0, len(args)-1)
+		for _, arg := range args[1:] {
+			switch arg {
+			case "--force-local":
+				forceLocal = true
+			default:
+				if strings.HasPrefix(arg, "--") {
+					fmt.Fprintf(a.Err, "unknown profile remove option %q\n", arg)
+					return 2
+				}
+				values = append(values, arg)
+			}
+		}
+		if len(values) != 1 {
+			fmt.Fprintln(a.Err, "usage: cm profile remove <profile> [--force-local]")
 			return 2
 		}
-		if _, ok := cfg.Profile(args[1]); !ok {
-			fmt.Fprintln(a.Err, unknownProfileError(cfg, args[1]))
+		profile, ok := cfg.Profile(values[0])
+		if !ok {
+			fmt.Fprintln(a.Err, unknownProfileError(cfg, values[0]))
 			return 2
 		}
-		path, err := RemoveProfileFile(configPath, args[1])
+		if !forceLocal {
+			if blocked, detail := a.profileRemoveBlockedByAWS(ctx, profile); blocked {
+				fmt.Fprint(a.Err, detail)
+				return 1
+			}
+		}
+		path, err := RemoveProfileFile(configPath, values[0])
 		if err != nil {
 			fmt.Fprintln(a.Err, err)
 			return 1
 		}
-		_ = a.StateManager.Remove(args[1])
+		_ = a.StateManager.Remove(values[0])
 		fmt.Fprintf(a.Out, "removed profile file: %s\n", path)
 		return 0
 	case "rename":
@@ -1188,11 +1251,16 @@ func (a App) runProfile(configPath string, cfg Config, args []string) int {
 		fmt.Fprint(a.Out, FormatProfileFile(profile))
 		return 0
 	case "import":
-		if len(args) != 2 {
-			fmt.Fprintln(a.Err, "usage: cm profile import <profile-file.yaml>")
+		overwrite, values, err := parseOverwriteArgs(args[1:])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
 			return 2
 		}
-		paths, err := ImportProfileFile(configPath, args[1])
+		if len(values) != 1 {
+			fmt.Fprintln(a.Err, "usage: cm profile import <profile-file.yaml> [--overwrite]")
+			return 2
+		}
+		paths, err := ImportProfileFileWithOptions(configPath, values[0], ProfileImportOptions{Overwrite: overwrite})
 		if err != nil {
 			fmt.Fprintln(a.Err, err)
 			return 1
@@ -1202,11 +1270,16 @@ func (a App) runProfile(configPath string, cfg Config, args []string) int {
 		}
 		return 0
 	case "import-dir":
-		if len(args) != 2 {
-			fmt.Fprintln(a.Err, "usage: cm profile import-dir <profiles-dir>")
+		overwrite, values, err := parseOverwriteArgs(args[1:])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
 			return 2
 		}
-		paths, err := ImportProfileDir(configPath, args[1])
+		if len(values) != 1 {
+			fmt.Fprintln(a.Err, "usage: cm profile import-dir <profiles-dir> [--overwrite]")
+			return 2
+		}
+		paths, err := ImportProfileDirWithOptions(configPath, values[0], ProfileImportOptions{Overwrite: overwrite})
 		if err != nil {
 			fmt.Fprintln(a.Err, err)
 			return 1
@@ -1221,7 +1294,44 @@ func (a App) runProfile(configPath string, cfg Config, args []string) int {
 	}
 }
 
+func parseOverwriteArgs(args []string) (bool, []string, error) {
+	overwrite := false
+	values := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "--overwrite":
+			overwrite = true
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return false, nil, fmt.Errorf("unknown import option %q", arg)
+			}
+			values = append(values, arg)
+		}
+	}
+	return overwrite, values, nil
+}
+
+func (a App) profileRemoveBlockedByAWS(ctx context.Context, profile Profile) (bool, string) {
+	if emptyAWSConfig(profile.AWS) {
+		return false, ""
+	}
+	if len(a.Validator.ValidateAWSProfile(profile)) > 0 {
+		return true, fmt.Sprintf("profile %s has AWS settings but cannot be checked safely. Fix AWS config or use --force-local to remove only the local profile file.\n", profile.Name)
+	}
+	_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+	if err != nil {
+		return true, fmt.Sprintf("profile %s AWS resources could not be checked: %v\nUse --force-local only if you are sure no AWS Mac resources need this profile.\n", profile.Name, err)
+	}
+	if len(status.Hosts) > 0 || len(status.Instances) > 0 {
+		return true, fmt.Sprintf("profile %s still has AWS Mac resources: hosts=%d instances=%d. Run cm close %s first; Elastic IP allocations are retained by close.\n", profile.Name, len(status.Hosts), len(status.Instances), profile.Name)
+	}
+	return false, ""
+}
+
 func (a App) runProfileAdd(configPath string, cfg Config, args []string) int {
+	if len(args) == 1 && args[0] == "--wizard" {
+		return a.runProfileAddWizard(configPath, cfg)
+	}
 	profile, err := parseProfileAddArgs(args)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -1233,6 +1343,57 @@ func (a App) runProfileAdd(configPath string, cfg Config, args []string) int {
 	}
 	if profile.Description == "" && profile.AWS.AccountEmail != "" {
 		profile.Description = "Apple account: " + profile.AWS.AccountEmail
+	}
+	if profile.AWS.ElasticIPOwnerTag.Key == "" && profile.AWS.AccountEmail != "" {
+		profile.AWS.ElasticIPOwnerTag = AWSTagConfig{Key: "Apple", Value: profile.AWS.AccountEmail}
+	}
+	path, err := WriteProfileFile(configPath, profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "created profile: %s\n", path)
+	return 0
+}
+
+func (a App) runProfileAddWizard(configPath string, cfg Config) int {
+	var profile Profile
+	profile.Name = a.promptLine("Profile name: ")
+	if profile.Name == "" {
+		fmt.Fprintln(a.Err, "profile name is required")
+		return 2
+	}
+	if _, ok := cfg.Profile(profile.Name); ok {
+		fmt.Fprintf(a.Err, "profile %q already exists\n", profile.Name)
+		return 1
+	}
+	profile.AWS.AccountEmail = a.promptLine("Apple account email: ")
+	profile.Description = a.promptDefault("Description", "Apple account: "+profile.AWS.AccountEmail)
+	profile.User = a.promptDefault("SSH user", cfg.Defaults.User)
+	profile.IdentityFile = NormalizeIdentityFileInput(a.promptDefault("PEM path or name", cfg.Defaults.IdentityFile))
+	profile.AWS.Profile = a.promptLine("AWS profile: ")
+	profile.AWS.Region = a.promptLine("AWS region: ")
+	profile.AWS.Creator = a.promptDefault("AWS creator", cfg.Defaults.AWS.Creator)
+	profile.AWS.KeyName = a.promptLine("AWS key pair name: ")
+	profile.AWS.SecurityGroupID = a.promptLine("Security group ID: ")
+	profile.AWS.ElasticIPAllocationID = a.promptLine("Elastic IP allocation ID: ")
+	profile.AWS.ElasticIPPublicIP = a.promptLine("Elastic IP public IP: ")
+	if profile.AWS.ElasticIPPublicIP != "" && profile.AWS.Region != "" {
+		profile.Host = fmt.Sprintf("ec2-%s.%s.compute.amazonaws.com", strings.ReplaceAll(profile.AWS.ElasticIPPublicIP, ".", "-"), profile.AWS.Region)
+	}
+	for {
+		az := a.promptLine("Availability zone ID (empty to finish): ")
+		if az == "" {
+			break
+		}
+		profile.AWS.AvailabilityZoneIDs = append(profile.AWS.AvailabilityZoneIDs, az)
+		subnet := a.promptLine("Subnet ID for " + az + " (optional): ")
+		if subnet != "" {
+			if profile.AWS.SubnetsByAZ == nil {
+				profile.AWS.SubnetsByAZ = map[string]string{}
+			}
+			profile.AWS.SubnetsByAZ[az] = subnet
+		}
 	}
 	if profile.AWS.ElasticIPOwnerTag.Key == "" && profile.AWS.AccountEmail != "" {
 		profile.AWS.ElasticIPOwnerTag = AWSTagConfig{Key: "Apple", Value: profile.AWS.AccountEmail}
@@ -1743,13 +1904,14 @@ func (a App) printUsage() {
   cm profile accounts [--config <path>]
   cm profile find <apple-email> [--config <path>]
   cm profile show <profile-or-apple-email> [--config <path>]
+  cm profile add --wizard [--config <path>]
   cm profile add --name <profile> [options] [--config <path>]
-  cm profile remove <profile> [--config <path>]
+  cm profile remove <profile> [--force-local] [--config <path>]
   cm profile rename <old> <new> [--config <path>]
   cm profile edit <profile> [--config <path>]
   cm profile export <profile-or-apple-email> [--config <path>]
-  cm profile import <profile-file.yaml> [--config <path>]
-  cm profile import-dir <profiles-dir> [--config <path>]
+  cm profile import <profile-file.yaml> [--overwrite] [--config <path>]
+  cm profile import-dir <profiles-dir> [--overwrite] [--config <path>]
   cm aws plan <profile-or-apple-email> [--config <path>]
   cm aws capacity <profile-or-apple-email> [--config <path>]
   cm aws open <profile-or-apple-email> [--confirm] [--config <path>]
@@ -1766,7 +1928,7 @@ func (a App) printUsage() {
   cm mcp [--config <path>]
   cm mcp tools [--json]
   cm doctor [--fix] [--config <path>]
-  cm dashboard [--config <path>]
+  cm dashboard [--aws] [--config <path>]
   cm stop <profile>
   cm status
 `)

@@ -78,7 +78,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.43",
+				"version": "0.1.44",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -126,6 +126,20 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 			return mcpText(formatErrors(errs)), nil
 		}
 		return mcpText("check passed\n" + profileSummaryText(profile)), nil
+	case "cm_profile_show":
+		return s.mcpProfileShow(cfg, call.Arguments)
+	case "cm_profile_add":
+		return s.mcpProfileAdd(cfg, call.Arguments)
+	case "cm_profile_remove":
+		return s.mcpProfileRemove(ctx, cfg, call.Arguments)
+	case "cm_profile_rename":
+		return s.mcpProfileRename(cfg, call.Arguments)
+	case "cm_profile_export":
+		return s.mcpProfileShow(cfg, call.Arguments)
+	case "cm_doctor":
+		return s.mcpDoctor(call.Arguments)
+	case "cm_dashboard":
+		return s.mcpDashboard(ctx, call.Arguments)
 	case "cm_push":
 		return s.mcpPush(ctx, cfg, call.Arguments)
 	case "cm_pull":
@@ -157,6 +171,167 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	default:
 		return nil, fmt.Errorf("unknown tool %q", call.Name)
 	}
+}
+
+func (s MCPServer) mcpProfileShow(cfg Config, args map[string]interface{}) (interface{}, error) {
+	ref, err := requiredString(args, "profile")
+	if err != nil {
+		return nil, err
+	}
+	profile, err := resolveProfileRef(cfg, ref)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(FormatProfileFile(profile)), nil
+}
+
+func (s MCPServer) mcpProfileAdd(cfg Config, args map[string]interface{}) (interface{}, error) {
+	profile, err := mcpProfileFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := cfg.Profile(profile.Name); ok {
+		return nil, fmt.Errorf("profile %q already exists", profile.Name)
+	}
+	if profile.Description == "" && profile.AWS.AccountEmail != "" {
+		profile.Description = "Apple account: " + profile.AWS.AccountEmail
+	}
+	if profile.AWS.ElasticIPOwnerTag.Key == "" && profile.AWS.AccountEmail != "" {
+		profile.AWS.ElasticIPOwnerTag = AWSTagConfig{Key: "Apple", Value: profile.AWS.AccountEmail}
+	}
+	text := fmt.Sprintf("Create local profile %s\n", profile.Name)
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true to write the profile file."), nil
+	}
+	path, err := WriteProfileFile(s.ConfigPath, profile)
+	if err != nil {
+		return nil, err
+	}
+	return mcpText(text + "Created profile file: " + path), nil
+}
+
+func (s MCPServer) mcpProfileRemove(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
+	name, err := requiredString(args, "profile")
+	if err != nil {
+		return nil, err
+	}
+	profile, ok := cfg.Profile(name)
+	if !ok {
+		return nil, unknownProfileError(cfg, name)
+	}
+	text := fmt.Sprintf("Remove local profile %s\n", profile.Name)
+	if !boolArg(args, "force_local") {
+		if blocked, detail := s.App.profileRemoveBlockedByAWS(ctx, profile); blocked {
+			return mcpText(text + detail), nil
+		}
+	}
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true to remove the local profile file."), nil
+	}
+	path, err := RemoveProfileFile(s.ConfigPath, profile.Name)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.App.StateManager.Remove(profile.Name)
+	return mcpText(text + "Removed profile file: " + path), nil
+}
+
+func (s MCPServer) mcpProfileRename(cfg Config, args map[string]interface{}) (interface{}, error) {
+	oldName, err := requiredString(args, "profile")
+	if err != nil {
+		return nil, err
+	}
+	newName, err := requiredString(args, "new_name")
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := cfg.Profile(oldName); !ok {
+		return nil, unknownProfileError(cfg, oldName)
+	}
+	if _, ok := cfg.Profile(newName); ok {
+		return nil, fmt.Errorf("profile %q already exists", newName)
+	}
+	text := fmt.Sprintf("Rename local profile %s -> %s\n", oldName, newName)
+	if !boolArg(args, "confirm") {
+		return mcpText(text + "Preview only. Call again with confirm=true to rename the profile file."), nil
+	}
+	oldPath, newPath, err := RenameProfileFile(s.ConfigPath, oldName, newName)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.App.StateManager.Remove(oldName)
+	return mcpText(fmt.Sprintf("%sRenamed profile file: %s -> %s", text, oldPath, newPath)), nil
+}
+
+func (s MCPServer) mcpDoctor(args map[string]interface{}) (interface{}, error) {
+	var out, errOut bytes.Buffer
+	app := s.App
+	app.Out = &out
+	app.Err = &errOut
+	var cliArgs []string
+	if boolArg(args, "fix") {
+		cliArgs = append(cliArgs, "--fix")
+	}
+	code := app.runDoctor(s.ConfigPath, cliArgs)
+	text := out.String()
+	if errOut.Len() > 0 {
+		text += errOut.String()
+	}
+	text += fmt.Sprintf("exit_code=%d\n", code)
+	return mcpText(text), nil
+}
+
+func (s MCPServer) mcpDashboard(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	cfg, err := LoadConfig(s.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	var out, errOut bytes.Buffer
+	app := s.App
+	app.Out = &out
+	app.Err = &errOut
+	var cliArgs []string
+	if boolArg(args, "aws") {
+		cliArgs = append(cliArgs, "--aws")
+	}
+	code := app.runDashboard(ctx, cfg, cliArgs)
+	text := out.String()
+	if errOut.Len() > 0 {
+		text += errOut.String()
+	}
+	text += fmt.Sprintf("exit_code=%d\n", code)
+	return mcpText(text), nil
+}
+
+func mcpProfileFromArgs(args map[string]interface{}) (Profile, error) {
+	name, err := requiredString(args, "name")
+	if err != nil {
+		return Profile{}, err
+	}
+	profile := Profile{
+		Name:         name,
+		Description:  stringArg(args, "description", ""),
+		User:         stringArg(args, "user", ""),
+		Host:         stringArg(args, "host", ""),
+		IdentityFile: NormalizeIdentityFileInput(stringArg(args, "identity_file", "")),
+	}
+	profile.AWS.Profile = stringArg(args, "aws_profile", "")
+	profile.AWS.Region = stringArg(args, "region", "")
+	profile.AWS.AccountEmail = stringArg(args, "apple_email", "")
+	profile.AWS.Creator = stringArg(args, "creator", "")
+	profile.AWS.KeyName = stringArg(args, "key_name", "")
+	profile.AWS.SecurityGroupID = stringArg(args, "security_group_id", "")
+	profile.AWS.ElasticIPAllocationID = stringArg(args, "elastic_ip_allocation_id", "")
+	profile.AWS.ElasticIPPublicIP = stringArg(args, "elastic_ip_public_ip", "")
+	profile.AWS.AvailabilityZoneIDs, err = optionalStringArrayArg(args, "availability_zone_ids")
+	if err != nil {
+		return Profile{}, err
+	}
+	profile.AWS.InstanceTypePriority, err = optionalStringArrayArg(args, "instance_type_priority")
+	if err != nil {
+		return Profile{}, err
+	}
+	return profile, nil
 }
 
 func (s MCPServer) mcpFindProfileByApple(cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -726,6 +901,41 @@ func mcpTools() []map[string]interface{} {
 		mcpTool("cm_list_profiles", "List configured cm profiles.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
 		mcpTool("cm_find_profile_by_apple", "Find the cm profile for an explicit Apple account email. If the user did not provide an email, ask them to choose from configured accounts.", appleEmailSchema()),
 		mcpTool("cm_check_profile", "Validate a profile without connecting.", profileSchema()),
+		mcpTool("cm_profile_show", "Show a profile file by profile name or Apple account email.", profileSchema()),
+		mcpTool("cm_profile_add", "Preview or create a local profile file. Requires confirm=true to write.", profileAddSchema()),
+		mcpTool("cm_profile_remove", "Preview or remove a local profile file. Blocks when AWS Mac resources are still active unless force_local=true. Requires confirm=true to remove.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"profile":     stringSchema(),
+				"force_local": map[string]string{"type": "boolean"},
+				"confirm":     map[string]string{"type": "boolean"},
+			},
+			"required": []string{"profile"},
+		}),
+		mcpTool("cm_profile_rename", "Preview or rename a local profile file. Requires confirm=true to write.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"profile":  stringSchema(),
+				"new_name": stringSchema(),
+				"confirm":  map[string]string{"type": "boolean"},
+			},
+			"required": []string{"profile", "new_name"},
+		}),
+		mcpTool("cm_profile_export", "Export a profile file by profile name or Apple account email.", profileSchema()),
+		mcpTool("cm_doctor", "Run local ConnectMac diagnostics. Set fix=true to create missing local support dirs.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"fix": map[string]string{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		}),
+		mcpTool("cm_dashboard", "Show local profile/tunnel dashboard. Set aws=true for read-only AWS status columns.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"aws": map[string]string{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		}),
 		mcpTool("cm_push", "Preview or execute rsync upload with optional includes/excludes filters. Requires confirm=true to execute.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -877,6 +1087,31 @@ func appleEmailSchema() map[string]interface{} {
 		"type":       "object",
 		"properties": map[string]interface{}{"apple_email": stringSchema()},
 		"required":   []string{"apple_email"},
+	}
+}
+
+func profileAddSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name":                     stringSchema(),
+			"description":              stringSchema(),
+			"user":                     stringSchema(),
+			"host":                     stringSchema(),
+			"identity_file":            stringSchema(),
+			"apple_email":              stringSchema(),
+			"aws_profile":              stringSchema(),
+			"region":                   stringSchema(),
+			"creator":                  stringSchema(),
+			"key_name":                 stringSchema(),
+			"security_group_id":        stringSchema(),
+			"elastic_ip_allocation_id": stringSchema(),
+			"elastic_ip_public_ip":     stringSchema(),
+			"availability_zone_ids":    stringArraySchema(),
+			"instance_type_priority":   stringArraySchema(),
+			"confirm":                  map[string]string{"type": "boolean"},
+		},
+		"required": []string{"name"},
 	}
 }
 

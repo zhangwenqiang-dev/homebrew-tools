@@ -38,6 +38,62 @@ func TestMCPCheckAsksForMissingIdentityFile(t *testing.T) {
 	}
 }
 
+func TestMCPProfileShow(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_profile_show", map[string]interface{}{
+		"profile": "user@example.com",
+	})
+	if !strings.Contains(out, "xcode-vnc") || !strings.Contains(out, "user@example.com") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestMCPProfileAddRequiresConfirm(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_profile_add", map[string]interface{}{
+		"name":        "new-profile",
+		"apple_email": "new@example.com",
+	})
+	if !strings.Contains(out, "Preview only") {
+		t.Fatalf("output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(config), "profiles", "new-profile.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("profile should not be written during preview, err=%v", err)
+	}
+}
+
+func TestMCPProfileAddConfirmWritesProfile(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out := runMCPCall(t, app, config, "cm_profile_add", map[string]interface{}{
+		"name":        "new-profile",
+		"apple_email": "new@example.com",
+		"confirm":     true,
+	})
+	if !strings.Contains(out, "Created profile file") {
+		t.Fatalf("output = %q", out)
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(config), "profiles", "new-profile.yaml"))
+	if err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	if !strings.Contains(string(data), "new@example.com") {
+		t.Fatalf("profile file = %s", data)
+	}
+}
+
+func TestMCPProfileRemoveBlocksWhenAWSResourcesExist(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "available"}}}}, nil
+	}
+	out := runMCPCall(t, app, config, "cm_profile_remove", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "still has AWS Mac resources") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
 func TestMCPAWSCreateAsksForMissingCreator(t *testing.T) {
 	configData := strings.ReplaceAll(sampleConfig, "  aws:\n    creator: Default Creator\n", "")
 	configData = strings.ReplaceAll(configData, "      creator: Xiao Chen\n", "")
@@ -263,7 +319,7 @@ func TestMCPAWSWaitReady(t *testing.T) {
 func TestMCPToolsIncludesAWSHostWorkflow(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
 	out := runMCPToolsList(t, app, config)
-	for _, want := range []string{"cm_find_profile_by_apple", "cm_aws_capacity", "cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
+	for _, want := range []string{"cm_profile_add", "cm_profile_remove", "cm_doctor", "cm_dashboard", "cm_find_profile_by_apple", "cm_aws_capacity", "cm_aws_wait_ready", "cm_aws_adopt_host", "cm_aws_launch_on_host", "cm_aws_open_mac_by_email", "cm_aws_destroy_mac_by_email"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("tools output missing %q: %q", want, out)
 		}

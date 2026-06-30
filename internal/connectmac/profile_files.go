@@ -117,7 +117,15 @@ func RenameProfileFile(configPath, oldName, newName string) (string, string, err
 	return oldPath, newPath, nil
 }
 
+type ProfileImportOptions struct {
+	Overwrite bool
+}
+
 func ImportProfileFile(configPath, sourcePath string) ([]string, error) {
+	return ImportProfileFileWithOptions(configPath, sourcePath, ProfileImportOptions{})
+}
+
+func ImportProfileFileWithOptions(configPath, sourcePath string, options ProfileImportOptions) ([]string, error) {
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return nil, err
@@ -133,7 +141,11 @@ func ImportProfileFile(configPath, sourcePath string) ([]string, error) {
 	var written []string
 	for _, name := range names {
 		profile := cfg.Profiles[name]
-		path, err := WriteProfileFile(configPath, profile)
+		write := WriteProfileFile
+		if options.Overwrite {
+			write = OverwriteProfileFile
+		}
+		path, err := write(configPath, profile)
 		if err != nil {
 			return written, err
 		}
@@ -143,6 +155,10 @@ func ImportProfileFile(configPath, sourcePath string) ([]string, error) {
 }
 
 func ImportProfileDir(configPath, sourceDir string) ([]string, error) {
+	return ImportProfileDirWithOptions(configPath, sourceDir, ProfileImportOptions{})
+}
+
+func ImportProfileDirWithOptions(configPath, sourceDir string, options ProfileImportOptions) ([]string, error) {
 	entries, err := os.ReadDir(sourceDir)
 	if err != nil {
 		return nil, err
@@ -160,7 +176,7 @@ func ImportProfileDir(configPath, sourceDir string) ([]string, error) {
 	sort.Strings(files)
 	var written []string
 	for _, file := range files {
-		paths, err := ImportProfileFile(configPath, file)
+		paths, err := ImportProfileFileWithOptions(configPath, file, options)
 		if err != nil {
 			return written, err
 		}

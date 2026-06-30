@@ -133,16 +133,19 @@ Manage profile files under `~/.connectmac/profiles/`:
 
 ```bash
 cm profile show xcode-vnc
+cm profile add --wizard
 cm profile add --name user-usw2 --apple-email user@example.com --aws-profile cm-xcode --region us-west-2 --eip 54.1.2.3 --eip-allocation-id eipalloc-example --key-name example-key --security-group-id sg-example --az usw2-az1 --subnet usw2-az1=subnet-example
 cm profile rename user-usw2 user-renamed-usw2
 cm profile edit user-renamed-usw2
 cm profile export user@example.com
 cm profile import ./profile.yaml
-cm profile import-dir ./profiles
+cm profile import ./profile.yaml --overwrite
+cm profile import-dir ./profiles --overwrite
 cm profile remove user-renamed-usw2
+cm profile remove user-renamed-usw2 --force-local
 ```
 
-`cm profile remove` only removes the local profile file and local tunnel state. It does not release AWS resources or Elastic IPs.
+`cm profile remove` only removes the local profile file and local tunnel state. It does not release AWS resources or Elastic IPs. By default it checks AWS first and blocks removal when active Mac hosts or instances still exist. Use `--force-local` only when you intentionally want to remove a local profile without checking or closing AWS resources.
 
 Check local installation, config, profile basics, MCP tools, and completion visibility:
 
@@ -150,6 +153,7 @@ Check local installation, config, profile basics, MCP tools, and completion visi
 cm doctor
 cm doctor --fix
 cm dashboard
+cm dashboard --aws
 ```
 
 Check a profile before connecting:

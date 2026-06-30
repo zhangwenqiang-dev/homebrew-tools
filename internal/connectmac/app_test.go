@@ -164,8 +164,8 @@ func TestAppMCPToolsJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
 		t.Fatalf("invalid json: %v\n%s", err, out.String())
 	}
-	if len(payload.Tools) != 17 {
-		t.Fatalf("tool count = %d, want 17", len(payload.Tools))
+	if len(payload.Tools) != len(mcpTools()) {
+		t.Fatalf("tool count = %d, want %d", len(payload.Tools), len(mcpTools()))
 	}
 	found := false
 	for _, tool := range payload.Tools {
@@ -241,11 +241,39 @@ func TestAppProfileAddShowRenameRemove(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	if code := app.Run(context.Background(), []string{"profile", "remove", "renamed-usw2", "--config", config}); code != 0 {
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"profile", "remove", "renamed-usw2", "--force-local", "--config", config}); code != 0 {
 		t.Fatalf("profile remove code = %d, err = %s", code, errOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "profiles", "renamed-usw2.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("expected removed profile file, err=%v", err)
+	}
+}
+
+func TestAppProfileRemoveBlocksWhenAWSResourcesExist(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available"}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running"}},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"profile", "remove", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("profile remove code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "still has AWS Mac resources") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles", "xcode-vnc.yaml")); err == nil {
+		t.Fatalf("profile should not have been removed")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat profile: %v", err)
 	}
 }
 
@@ -271,6 +299,16 @@ func TestAppProfileExportImport(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(otherDir, "profiles", "imported.yaml")); err != nil {
 		t.Fatalf("expected imported profile: %v", err)
 	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"profile", "import", exported, "--config", otherConfig}); code != 1 {
+		t.Fatalf("duplicate import code = %d, err = %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"profile", "import", exported, "--overwrite", "--config", otherConfig}); code != 0 {
+		t.Fatalf("overwrite import code = %d, err = %s", code, errOut.String())
+	}
 }
 
 func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
@@ -292,6 +330,20 @@ func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "PROFILE") || !strings.Contains(out.String(), "xcode-vnc") {
 		t.Fatalf("dashboard output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", SystemStatus: "ok", InstanceStatusCheck: "ok"}},
+			ElasticIP: ElasticIP{InstanceID: "i-1", PublicIP: "54.1.2.3"},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"dashboard", "--aws", "--config", config}); code != 0 {
+		t.Fatalf("dashboard --aws code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "READY") || !strings.Contains(out.String(), "54.1.2.3") {
+		t.Fatalf("dashboard --aws output = %s", out.String())
 	}
 	out.Reset()
 	errOut.Reset()
