@@ -244,9 +244,20 @@ func TestFormatAWSOpenPreviewWithCandidates(t *testing.T) {
 		Status:             "candidate",
 		Detail:             "ready for AllocateHost",
 	}})
-	for _, want := range []string{"Decision: create", "Next: cm aws open xcode-vnc --confirm", "Create candidates:", "use1-az6", "mac2-m2.metal", "candidate"} {
+	for _, want := range []string{"Decision: create", "Next: cm aws open xcode-vnc --confirm", "Guidance:", "billable Mac Dedicated Host", "Create candidates:", "use1-az6", "mac2-m2.metal", "candidate"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("open preview missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestFormatMacDestroyPreviewIncludesGuidance(t *testing.T) {
+	text := FormatMacDestroyPreviewWithStatus(validPlan(t), AWSStatus{
+		ElasticIP: ElasticIP{AllocationID: "eipalloc-1", PublicIP: "54.1.2.3"},
+	})
+	for _, want := range []string{"Elastic IP allocation", "retained=true", "Guidance:", "Elastic IP allocation is retained", "run the same destroy command again later"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy preview missing %q:\n%s", want, text)
 		}
 	}
 }

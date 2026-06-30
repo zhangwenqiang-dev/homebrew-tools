@@ -1002,6 +1002,25 @@ func FormatAWSOpenPreview(plan MacPlan, status AWSStatus) string {
 	}
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "Next: %s\n", AWSOpenDecisionNextStep(plan.ProfileName, action))
+	fmt.Fprintln(&b, "Guidance:")
+	switch action.Kind {
+	case "ready":
+		fmt.Fprintln(&b, "- The managed Mac is already usable; no AWS resource creation is needed.")
+		fmt.Fprintf(&b, "- Start the local tunnel with: cm start %s\n", plan.ProfileName)
+	case "wait-ready":
+		fmt.Fprintln(&b, "- A managed instance exists but AWS readiness checks are not complete.")
+		fmt.Fprintf(&b, "- Wait with: cm aws wait-ready %s\n", plan.ProfileName)
+	case "launch-on-host":
+		fmt.Fprintln(&b, "- An available managed Dedicated Host exists; confirmation launches EC2 on that host.")
+		fmt.Fprintln(&b, "- This can create billable EC2 usage on the existing Dedicated Host.")
+	case "create":
+		fmt.Fprintln(&b, "- Confirmation allocates a billable Mac Dedicated Host and launches EC2.")
+		fmt.Fprintln(&b, "- If EC2 launch fails after host allocation, stop and fix that host; do not allocate another host.")
+	case "blocked":
+		fmt.Fprintln(&b, "- Stop here and fix the blocking reason before continuing.")
+	default:
+		fmt.Fprintln(&b, "- Inspect AWS status before continuing.")
+	}
 	return b.String()
 }
 
@@ -1069,6 +1088,10 @@ func FormatMacDestroyPreviewWithStatus(plan MacPlan, status AWSStatus) string {
 	fmt.Fprintln(&b, "- Disassociate Elastic IP only if attached to the managed instance; retain the Elastic IP allocation")
 	fmt.Fprintln(&b, "- Terminate the managed EC2 instance")
 	fmt.Fprintln(&b, "- Release the managed Dedicated Host when AWS allows release")
+	fmt.Fprintln(&b, "Guidance:")
+	fmt.Fprintln(&b, "- Preview only unless --confirm is provided.")
+	fmt.Fprintln(&b, "- Elastic IP allocation is retained and must not be released by this workflow.")
+	fmt.Fprintln(&b, "- If host release is deferred, run the same destroy command again later.")
 	return b.String()
 }
 

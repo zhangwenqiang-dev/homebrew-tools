@@ -182,6 +182,29 @@ func TestAppMCPToolsJSON(t *testing.T) {
 	}
 }
 
+func TestAppGuideShowsStepByStepTopics(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"guide"}); code != 0 {
+		t.Fatalf("guide code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"ConnectMac guide", "cm profile wizard", "cm next <profile-or-apple-email>", "AWS mutations always preview first"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("guide output missing %q:\n%s", want, out.String())
+		}
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"guide", "open"}); code != 0 {
+		t.Fatalf("guide open code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"ConnectMac open-Mac guide", "cm aws open <apple-email>", "blocked: stop"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("guide open missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestAppCompletionProfiles(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -315,6 +338,39 @@ func TestAppProfileAddWizardPreviewsAndWrites(t *testing.T) {
 	}
 }
 
+func TestAppProfileWizardAliasPreviewsAndWrites(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.In = strings.NewReader(strings.Join([]string{
+		"alias-usw2",
+		"alias@example.com",
+		"",
+		"",
+		key,
+		"cm-xcode",
+		"us-west-2",
+		"",
+		"example-key",
+		"sg-example",
+		"eipalloc-example",
+		"54.1.2.4",
+		"",
+		"y",
+	}, "\n") + "\n")
+	if code := app.Run(context.Background(), []string{"profile", "wizard", "--config", config}); code != 0 {
+		t.Fatalf("profile wizard code = %d, err = %s, out = %s", code, errOut.String(), out.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles", "alias-usw2.yaml")); err != nil {
+		t.Fatalf("expected profile wizard alias file: %v", err)
+	}
+	if !strings.Contains(out.String(), "Profile preview") {
+		t.Fatalf("wizard alias output = %s", out.String())
+	}
+}
+
 func TestAppProfileAddWizardRejectsDuplicateAppleEmail(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -373,7 +429,7 @@ func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"doctor", "--fix", "--config", config}); code != 0 {
 		t.Fatalf("doctor code = %d, err = %s\nout=%s", code, errOut.String(), out.String())
 	}
-	if !strings.Contains(out.String(), "mcp tools") || !strings.Contains(out.String(), "config file") {
+	if !strings.Contains(out.String(), "mcp tools") || !strings.Contains(out.String(), "config file") || !strings.Contains(out.String(), "NEXT") {
 		t.Fatalf("doctor output = %s", out.String())
 	}
 	out.Reset()
@@ -408,6 +464,59 @@ func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
 	}
 }
 
+func TestAppDoctorSuggestsFixCommands(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "missing.yaml")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"doctor", "--config", config}); code != 1 {
+		t.Fatalf("doctor missing config code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	for _, want := range []string{"config file", "fail", "cm init", "profiles dir", "cm doctor --fix"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("doctor missing config output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestAppNextReportsReadyFlow(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", SystemStatus: "ok", InstanceStatusCheck: "ok"}},
+			ElasticIP: ElasticIP{InstanceID: "i-1", PublicIP: "54.1.2.3"},
+		}}, nil
+	}
+	if code := app.Run(context.Background(), []string{"next", "user@example.com", "--config", config}); code != 0 {
+		t.Fatalf("next code = %d, err = %s, out = %s", code, errOut.String(), out.String())
+	}
+	for _, want := range []string{"Next step for profile xcode-vnc", "Decision: ready", "Next: cm start xcode-vnc", "After tunnel: cm open-vnc xcode-vnc"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("next output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestAppNextReportsConfigFixes(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, "profiles:\n  broken:\n    description: broken\n")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"next", "broken", "--config", config}); code != 0 {
+		t.Fatalf("next broken code = %d, err = %s, out = %s", code, errOut.String(), out.String())
+	}
+	for _, want := range []string{"Decision: fix-config", "Local access issues", "AWS config issues", "Next: cm profile edit broken"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("next broken output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestAppCompletionZshScriptUsesDynamicProfiles(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
@@ -415,7 +524,7 @@ func TestAppCompletionZshScriptUsesDynamicProfiles(t *testing.T) {
 		t.Fatalf("completion zsh code = %d, err = %s", code, errOut.String())
 	}
 	text := out.String()
-	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands"} {
+	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands", "open|close|next", "guide topic"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("zsh completion missing %q: %q", want, text)
 		}

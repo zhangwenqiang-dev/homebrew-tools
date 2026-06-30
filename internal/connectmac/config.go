@@ -792,9 +792,6 @@ func (p *Profile) ApplyDefaults(defaults ProfileDefaults) {
 	if p.IdentityFile == "" {
 		p.IdentityFile = defaults.IdentityFile
 	}
-	if p.AWS.Creator == "" {
-		p.AWS.Creator = defaults.AWS.Creator
-	}
 	if p.AWS.AMI.MacX86 == "" {
 		p.AWS.AMI.MacX86 = defaultAMIForRegion(defaults.AWS, p.AWS.Region).MacX86
 	}

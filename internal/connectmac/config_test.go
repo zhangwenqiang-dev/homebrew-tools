@@ -240,8 +240,8 @@ profiles:
 	if extra.IdentityFile != "~/.ssh/shared.pem" {
 		t.Fatalf("extra identity_file = %q, want ~/.ssh/shared.pem", extra.IdentityFile)
 	}
-	if extra.AWS.Creator != "Shared Creator" {
-		t.Fatalf("extra aws creator = %q, want Shared Creator", extra.AWS.Creator)
+	if extra.AWS.Creator != "" {
+		t.Fatalf("extra aws creator = %q, want empty because defaults.aws.creator is not applied", extra.AWS.Creator)
 	}
 }
 
@@ -395,7 +395,7 @@ profiles:
 	}
 }
 
-func TestLoadConfigDefaultsAWSCreator(t *testing.T) {
+func TestLoadConfigDoesNotApplyDefaultAWSCreator(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(config, []byte(`
@@ -417,8 +417,11 @@ profiles:
 	if !ok {
 		t.Fatal("expected aws-only profile")
 	}
-	if profile.AWS.Creator != "Shared Creator" {
-		t.Fatalf("aws creator = %q, want Shared Creator", profile.AWS.Creator)
+	if cfg.Defaults.AWS.Creator != "Shared Creator" {
+		t.Fatalf("default aws creator = %q, want Shared Creator", cfg.Defaults.AWS.Creator)
+	}
+	if profile.AWS.Creator != "" {
+		t.Fatalf("aws creator = %q, want empty because creator must be explicit per profile or user input", profile.AWS.Creator)
 	}
 }
 

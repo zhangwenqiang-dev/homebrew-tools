@@ -70,6 +70,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runInit(configPath, args[1:])
 	case "init-rules":
 		return a.runInitRules(args[1:])
+	case "guide":
+		return a.runGuide(args[1:])
 	case "version":
 		a.printVersion()
 		return 0
@@ -95,6 +97,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 			return code
 		}
 		return a.runDashboard(ctx, cfg, args[1:])
+	case "next":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runNext(ctx, cfg, args[1:])
 	case "open":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -291,7 +299,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string) int {
 		var creatorOK bool
 		profile, creatorOK = a.promptMissingAWSCreator(profile)
 		if !creatorOK {
-			fmt.Fprintln(a.Err, "aws.creator is required for confirmed AWS mutations; set aws.creator in config or enter it when prompted")
+			fmt.Fprintln(a.Err, "aws.creator is required for confirmed AWS mutations; set aws.creator in the profile or enter it when prompted")
 			return 1
 		}
 	}
@@ -810,13 +818,9 @@ func (a App) runInitWizard(configPath string) int {
 	}
 	user := a.promptDefault("Default SSH user", DefaultAWSUser)
 	identity := NormalizeIdentityFileInput(a.promptLine("Default PEM path or name (for example example.pem): "))
-	creator := a.promptLine("Default AWS creator name: ")
 	config := strings.Replace(DefaultConfigTemplate(), "  user: ec2-user\n", "  user: "+quoteYAMLString(user)+"\n", 1)
 	if identity != "" {
 		config = strings.Replace(config, "  identity_file: ~/.ssh/example.pem\n", "  identity_file: "+quoteYAMLString(identity)+"\n", 1)
-	}
-	if creator != "" {
-		config = strings.Replace(config, "    creator: \"Xiao Chen\"\n", "    creator: "+quoteYAMLString(creator)+"\n", 1)
 	}
 	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -903,62 +907,57 @@ func (a App) runDoctor(configPath string, args []string) int {
 	}
 	configDir := filepathDir(configFile)
 	profilesDir := filepath.Join(configDir, "profiles")
-	type check struct {
-		Name   string
-		OK     bool
-		Detail string
-	}
-	var checks []check
+	var checks []doctorCheck
 	if _, err := os.Stat(configFile); err == nil {
-		checks = append(checks, check{"config file", true, configFile})
+		checks = append(checks, doctorCheck{"config file", true, configFile})
 	} else {
-		checks = append(checks, check{"config file", false, configFile})
+		checks = append(checks, doctorCheck{"config file", false, configFile})
 	}
 	if info, err := os.Stat(profilesDir); err == nil && info.IsDir() {
-		checks = append(checks, check{"profiles dir", true, profilesDir})
+		checks = append(checks, doctorCheck{"profiles dir", true, profilesDir})
 	} else {
 		if fix {
 			_ = os.MkdirAll(profilesDir, 0o700)
 		}
 		_, err := os.Stat(profilesDir)
-		checks = append(checks, check{"profiles dir", err == nil, profilesDir})
+		checks = append(checks, doctorCheck{"profiles dir", err == nil, profilesDir})
 	}
 	if _, err := exec.LookPath("ssh"); err == nil {
-		checks = append(checks, check{"ssh executable", true, "found"})
+		checks = append(checks, doctorCheck{"ssh executable", true, "found"})
 	} else {
-		checks = append(checks, check{"ssh executable", false, err.Error()})
+		checks = append(checks, doctorCheck{"ssh executable", false, err.Error()})
 	}
 	if _, err := exec.LookPath("rsync"); err == nil {
-		checks = append(checks, check{"rsync executable", true, "found"})
+		checks = append(checks, doctorCheck{"rsync executable", true, "found"})
 	} else {
-		checks = append(checks, check{"rsync executable", false, err.Error()})
+		checks = append(checks, doctorCheck{"rsync executable", false, err.Error()})
 	}
 	if path := detectedCompletionScript(); path != "" {
-		checks = append(checks, check{"zsh completion", true, path})
+		checks = append(checks, doctorCheck{"zsh completion", true, path})
 	} else {
-		checks = append(checks, check{"zsh completion", true, "not detected; run cm completion zsh or enable Homebrew completions"})
+		checks = append(checks, doctorCheck{"zsh completion", true, "not detected; run cm completion zsh or enable Homebrew completions"})
 	}
 	cfg, err := LoadConfig(configPath)
 	if err == nil {
-		checks = append(checks, check{"config parse", true, fmt.Sprintf("%d profiles", len(cfg.Profiles))})
+		checks = append(checks, doctorCheck{"config parse", true, fmt.Sprintf("%d profiles", len(cfg.Profiles))})
 		seenEmails := map[string]string{}
 		for _, name := range sortedProfileNames(cfg) {
 			profile, _ := cfg.Profile(name)
 			if profile.AWS.AccountEmail != "" {
 				if previous := seenEmails[strings.ToLower(profile.AWS.AccountEmail)]; previous != "" {
-					checks = append(checks, check{"duplicate Apple email", false, previous + " and " + profile.Name})
+					checks = append(checks, doctorCheck{"duplicate Apple email", false, previous + " and " + profile.Name})
 				}
 				seenEmails[strings.ToLower(profile.AWS.AccountEmail)] = profile.Name
 			}
 			for _, validationErr := range a.Validator.ValidateAccess(profile) {
-				checks = append(checks, check{"profile " + profile.Name, false, validationErr.Error()})
+				checks = append(checks, doctorCheck{"profile " + profile.Name, false, validationErr.Error()})
 			}
 		}
 	} else {
-		checks = append(checks, check{"config parse", false, err.Error()})
+		checks = append(checks, doctorCheck{"config parse", false, err.Error()})
 	}
-	checks = append(checks, check{"mcp tools", len(mcpTools()) > 0, fmt.Sprintf("%d tools", len(mcpTools()))})
-	rows := [][]string{{"CHECK", "STATUS", "DETAIL"}}
+	checks = append(checks, doctorCheck{"mcp tools", len(mcpTools()) > 0, fmt.Sprintf("%d tools", len(mcpTools()))})
+	rows := [][]string{{"CHECK", "STATUS", "DETAIL", "NEXT"}}
 	ok := true
 	for _, item := range checks {
 		status := "ok"
@@ -966,7 +965,7 @@ func (a App) runDoctor(configPath string, args []string) int {
 			status = "fail"
 			ok = false
 		}
-		rows = append(rows, []string{item.Name, status, item.Detail})
+		rows = append(rows, []string{item.Name, status, item.Detail, doctorAction(item)})
 	}
 	fmt.Fprint(a.Out, formatRows(rows))
 	if !ok {
@@ -1133,7 +1132,7 @@ func (a App) runCompletion(configPath string, args []string) int {
 
 func (a App) runProfile(ctx context.Context, configPath string, cfg Config, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.Err, "usage: cm profile <accounts|find|show|add|remove|rename|edit|export|import|import-dir> ...")
+		fmt.Fprintln(a.Err, "usage: cm profile <accounts|find|show|add|wizard|remove|rename|edit|export|import|import-dir> ...")
 		return 2
 	}
 	switch args[0] {
@@ -1166,6 +1165,12 @@ func (a App) runProfile(ctx context.Context, configPath string, cfg Config, args
 		return 0
 	case "add":
 		return a.runProfileAdd(configPath, cfg, args[1:])
+	case "wizard":
+		if len(args) != 1 {
+			fmt.Fprintln(a.Err, "usage: cm profile wizard")
+			return 2
+		}
+		return a.runProfileAddWizard(configPath, cfg)
 	case "remove":
 		forceLocal := false
 		values := make([]string, 0, len(args)-1)
@@ -1388,7 +1393,7 @@ func (a App) runProfileAddWizard(configPath string, cfg Config) int {
 	profile.IdentityFile = NormalizeIdentityFileInput(a.promptDefault("PEM path or name", cfg.Defaults.IdentityFile))
 	profile.AWS.Profile = a.promptLine("AWS profile: ")
 	profile.AWS.Region = a.promptLine("AWS region: ")
-	profile.AWS.Creator = a.promptDefault("AWS creator", cfg.Defaults.AWS.Creator)
+	profile.AWS.Creator = a.promptLine("AWS creator (required before confirmed AWS create/open): ")
 	profile.AWS.KeyName = a.promptLine("AWS key pair name: ")
 	profile.AWS.SecurityGroupID = a.promptLine("Security group ID: ")
 	profile.AWS.ElasticIPAllocationID = a.promptLine("Elastic IP allocation ID: ")
@@ -1441,6 +1446,9 @@ func profileWizardWarnings(profile Profile) []string {
 	}
 	if profile.IdentityFile == "" {
 		warnings = append(warnings, "identity_file is empty; SSH commands will ask for a PEM later")
+	}
+	if profile.AWS.Creator == "" {
+		warnings = append(warnings, "aws.creator is empty; confirmed AWS create/open/adopt commands will ask who is creating the Mac")
 	}
 	identityKey := identityFileKeyName(profile.IdentityFile)
 	if profile.AWS.KeyName != "" && identityKey != "" && profile.AWS.KeyName != identityKey {
@@ -1937,8 +1945,10 @@ func (a App) printUsage() {
   cm init wizard [--config <path>]
   cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
   cm init-rules --print-rules
+  cm guide [first-use|profile|open|close|sync|vnc|mcp]
   cm completion <zsh|bash|fish>
   cm list [--config <path>]
+  cm next <profile-or-apple-email> [--config <path>]
   cm check <profile> [--config <path>]
   cm connect <profile> [--config <path>]
   cm open <profile-or-apple-email> [--confirm] [--config <path>]
@@ -1954,6 +1964,7 @@ func (a App) printUsage() {
   cm profile accounts [--config <path>]
   cm profile find <apple-email> [--config <path>]
   cm profile show <profile-or-apple-email> [--config <path>]
+  cm profile wizard [--config <path>]
   cm profile add --wizard [--config <path>]
   cm profile add --name <profile> [options] [--config <path>]
   cm profile remove <profile> [--force-local] [--config <path>]
@@ -2076,7 +2087,6 @@ func DefaultConfigTemplate() string {
   user: ec2-user
   identity_file: ~/.ssh/example.pem
   aws:
-    creator: "Xiao Chen"
     amis_by_region:
       us-east-1:
         mac_x86: "<us-east-1-x86-mac-ami>"
@@ -2257,10 +2267,12 @@ func completionCommands() []string {
 	return []string{
 		"init",
 		"init-rules",
+		"guide",
 		"version",
 		"completion",
 		"list",
 		"profile",
+		"next",
 		"check",
 		"connect",
 		"open",
@@ -2283,7 +2295,7 @@ func completionCommands() []string {
 }
 
 func completionProfileCommands() []string {
-	return []string{"accounts", "find", "show", "add", "remove", "rename", "edit", "export", "import", "import-dir"}
+	return []string{"accounts", "find", "show", "add", "wizard", "remove", "rename", "edit", "export", "import", "import-dir"}
 }
 
 func completionAWSCommands() []string {
@@ -2360,8 +2372,11 @@ _cm() {
     check|connect|ssh|start|forget-host|open-vnc|setup-vnc|stop)
       (( CURRENT == 3 )) && _cm_profiles
       ;;
-    open|close)
+    open|close|next)
       (( CURRENT == 3 )) && _cm_profile_or_apple
+      ;;
+    guide)
+      (( CURRENT == 3 )) && _values 'guide topic' first-use profile open close sync vnc mcp
       ;;
     pull)
       if (( CURRENT == 3 )); then
@@ -2463,8 +2478,11 @@ func bashCompletionScript() string {
     check|connect|ssh|start|forget-host|open-vnc|setup-vnc|stop|exec)
       [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
       ;;
-    open|close)
+    open|close|next)
       [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      ;;
+    guide)
+      [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "first-use profile open close sync vnc mcp" -- "$cur") )
       ;;
     pull)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -2529,8 +2547,9 @@ func fishCompletionScript() string {
 	return `complete -c cm -f
 complete -c cm -n "not __fish_seen_subcommand_from (cm completion commands)" -a "(cm completion commands)"
 complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc setup-vnc stop exec" -a "(cm completion profiles)"
-complete -c cm -n "__fish_seen_subcommand_from open close" -a "(cm completion profiles)"
-complete -c cm -n "__fish_seen_subcommand_from open close" -a "(cm completion apple-emails)"
+complete -c cm -n "__fish_seen_subcommand_from open close next" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from open close next" -a "(cm completion apple-emails)"
+complete -c cm -n "__fish_seen_subcommand_from guide" -a "first-use profile open close sync vnc mcp"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "--include --exclude"

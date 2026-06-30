@@ -42,7 +42,7 @@ For many profiles, keep shared or important entries in `config.yaml` and put add
 ```
 
 Each file uses the same `profiles:` structure. `cm` loads `config.yaml` first, then all `.yaml` and `.yml` files in `profiles/` by filename. Duplicate profile names are rejected.
-Shared `user`, `identity_file`, `aws.creator`, and region-specific AMI values can be placed in top-level `defaults:`. Profile values override defaults.
+Shared `user`, `identity_file`, and region-specific AMI values can be placed in top-level `defaults:`. Profile values override defaults. `aws.creator` is intentionally not inherited from defaults; it must be supplied explicitly in the profile or by the user during confirmed AWS create/open/adopt/launch operations.
 
 Example profile:
 
@@ -51,7 +51,6 @@ defaults:
   user: ec2-user
   identity_file: ~/.ssh/example.pem
   aws:
-    creator: "Xiao Chen"
     amis_by_region:
       us-east-1:
         mac_x86: "<us-east-1-x86-mac-ami>"
@@ -83,6 +82,7 @@ profiles:
     aws:
       profile: cm-xcode
       region: us-west-2
+      creator: ""
       resource_name: ""
       account_email: user@example.com
       key_name: example-key
@@ -123,6 +123,19 @@ AMI defaults are resolved in this order: `profile.aws.ami`, then `defaults.aws.a
 
 ## Commands
 
+Show step-by-step guidance:
+
+```bash
+cm guide
+cm guide first-use
+cm guide profile
+cm guide open
+cm guide close
+cm guide sync
+cm guide vnc
+cm guide mcp
+```
+
 List configured profiles:
 
 ```bash
@@ -133,6 +146,7 @@ Manage profile files under `~/.connectmac/profiles/`:
 
 ```bash
 cm profile show xcode-vnc
+cm profile wizard
 cm profile add --wizard
 cm profile add --name user-usw2 --apple-email user@example.com --aws-profile cm-xcode --region us-west-2 --eip 54.1.2.3 --eip-allocation-id eipalloc-example --key-name example-key --security-group-id sg-example --az usw2-az1 --subnet usw2-az1=subnet-example
 cm profile rename user-usw2 user-renamed-usw2
@@ -147,7 +161,7 @@ cm profile remove user-renamed-usw2 --force-local
 
 `cm profile remove` only removes the local profile file and local tunnel state. It does not release AWS resources or Elastic IPs. By default it checks AWS first and blocks removal when active Mac hosts or instances still exist. Use `--force-local` only when you intentionally want to remove a local profile without checking or closing AWS resources.
 
-`cm profile add --wizard` collects the profile interactively, derives `host` from Elastic IP and region when possible, warns when `identity_file` and AWS `key_name` look mismatched, prints a YAML preview, and only writes after confirmation.
+`cm profile wizard` and `cm profile add --wizard` collect the profile interactively, derive `host` from Elastic IP and region when possible, warn when `identity_file` and AWS `key_name` look mismatched, print a YAML preview, and only write after confirmation.
 
 Check local installation, config, profile basics, MCP tools, and completion visibility:
 
@@ -156,9 +170,10 @@ cm doctor
 cm doctor --fix
 cm dashboard
 cm dashboard --aws
+cm next user@example.com
 ```
 
-`cm dashboard --aws` adds read-only AWS columns including readiness, the next open decision, and a suggested next command. Decisions include `ready`, `wait-ready`, `launch-on-host`, `create`, `blocked`, `config`, or `error`.
+`cm doctor` prints a `NEXT` column with suggested repair commands. `cm dashboard --aws` adds read-only AWS columns including readiness, the next open decision, and a suggested next command. `cm next <profile-or-apple-email>` turns the current config and AWS state into a single recommended next step. Decisions include `ready`, `wait-ready`, `launch-on-host`, `create`, `blocked`, `fix-config`, `config`, or `error`.
 
 Check a profile before connecting:
 
@@ -320,7 +335,7 @@ cm aws destroy-all --except operations@example.com
 
 Use `aws.creator` to tag who originally created the Mac. AWS already records resource creation and launch times, so `cm` does not write a separate creator-date tag. Use `aws.account_email` for the Apple account email. Leave `aws.resource_name` empty for new resources so `cm` generates `xcode-<account-email>`. Set `aws.resource_name` only when adopting resources that were created before `cm` managed them.
 
-Confirmed AWS create/adopt/launch commands require `aws.creator`; if it is missing, the CLI prompts and stops when no value is entered. `cm` does not create missing key pairs or change security group ingress automatically; those actions require explicit user confirmation in separate AWS setup steps.
+Confirmed AWS create/open/adopt/launch commands require `aws.creator`; if it is missing, the CLI prompts and stops when no value is entered. MCP tools return a user-input-required result instead; the AI must ask the user for creator and must not infer it from old conversation context or defaults. `cm` does not create missing key pairs or change security group ingress automatically; those actions require explicit user confirmation in separate AWS setup steps.
 
 AWS credentials are read through the normal AWS SDK credential chain. Keep access keys in `~/.aws/credentials`, AWS SSO, environment variables, or IAM roles. Do not put AWS secret keys in `~/.connectmac/config.yaml`.
 

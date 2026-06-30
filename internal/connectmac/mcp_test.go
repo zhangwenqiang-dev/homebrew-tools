@@ -133,11 +133,65 @@ func TestMCPAWSCreateAsksForMissingCreator(t *testing.T) {
 	configData := strings.ReplaceAll(sampleConfig, "  aws:\n    creator: Default Creator\n", "")
 	configData = strings.ReplaceAll(configData, "      creator: Xiao Chen\n", "")
 	app, config, _ := mcpTestAppWithConfig(t, configData)
-	out := runMCPCall(t, app, config, "cm_aws_create_mac", map[string]interface{}{
+	out, data := runMCPCallResult(t, app, config, "cm_aws_create_mac", map[string]interface{}{
 		"profile": "xcode-vnc",
 	})
 	if !strings.Contains(out, "missing required input: aws.creator") {
 		t.Fatalf("output = %q", out)
+	}
+	if data["requires_user_input"] != true {
+		t.Fatalf("data = %#v", data)
+	}
+}
+
+func TestMCPAWSCreateDoesNotUseDefaultCreator(t *testing.T) {
+	configData := strings.ReplaceAll(sampleConfig, "      creator: Xiao Chen\n", "")
+	app, config, _ := mcpTestAppWithConfig(t, configData)
+	out, data := runMCPCallResult(t, app, config, "cm_aws_create_mac", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "missing required input: aws.creator") {
+		t.Fatalf("output = %q", out)
+	}
+	missing, _ := data["missing"].([]interface{})
+	if len(missing) != 1 || missing[0] != "aws.creator" {
+		t.Fatalf("data = %#v", data)
+	}
+}
+
+func TestMCPAWSCreateAcceptsExplicitCreatorParameter(t *testing.T) {
+	configData := strings.ReplaceAll(sampleConfig, "      creator: Xiao Chen\n", "")
+	app, config, _ := mcpTestAppWithConfig(t, configData)
+	out := runMCPCall(t, app, config, "cm_aws_create_mac", map[string]interface{}{
+		"profile": "xcode-vnc",
+		"creator": "Wang Henghui",
+	})
+	for _, want := range []string{"AWS Mac plan", "cm-creator=Wang Henghui", "Preview only"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestMCPGuideAndNext(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out, data := runMCPCallResult(t, app, filepath.Join(t.TempDir(), "missing.yaml"), "cm_guide", map[string]interface{}{
+		"topic": "open",
+	})
+	if !strings.Contains(out, "ConnectMac open-Mac guide") || data["topic"] != "open" {
+		t.Fatalf("guide out=%q data=%#v", out, data)
+	}
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", SystemStatus: "ok", InstanceStatusCheck: "ok"}},
+			ElasticIP: ElasticIP{InstanceID: "i-1", PublicIP: "54.1.2.3"},
+		}}, nil
+	}
+	out, data = runMCPCallResult(t, app, config, "cm_next", map[string]interface{}{
+		"profile": "user@example.com",
+	})
+	if !strings.Contains(out, "Decision: ready") || data["decision"] != "ready" || data["next"] != "cm start xcode-vnc" {
+		t.Fatalf("next out=%q data=%#v", out, data)
 	}
 }
 
