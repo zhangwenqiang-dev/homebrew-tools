@@ -26,6 +26,14 @@ func TestMCPListProfiles(t *testing.T) {
 	}
 }
 
+func TestMCPConfigLoadErrorReturnsToolResult(t *testing.T) {
+	app, _, _ := mcpTestApp(t)
+	out, data := runMCPCallResult(t, app, filepath.Join(t.TempDir(), "missing.yaml"), "cm_list_profiles", map[string]interface{}{})
+	if !strings.Contains(out, "open") || data["ok"] != false || data["kind"] != "config" {
+		t.Fatalf("out=%q structuredContent=%#v", out, data)
+	}
+}
+
 func TestMCPGuideDoesNotRequireConfig(t *testing.T) {
 	app, _, _ := mcpTestApp(t)
 	out, data := runMCPCallResult(t, app, filepath.Join(t.TempDir(), "missing.yaml"), "cm_mcp_guide", map[string]interface{}{})
@@ -41,11 +49,27 @@ func TestMCPCheckAsksForMissingIdentityFile(t *testing.T) {
 	app, config, _ := mcpTestAppWithConfig(t, strings.ReplaceAll(strings.ReplaceAll(sampleConfig,
 		"  identity_file: ~/.ssh/default.pem\n", ""),
 		"    identity_file: ~/.ssh/example.pem\n", ""))
-	out := runMCPCall(t, app, config, "cm_check_profile", map[string]interface{}{
+	out, data := runMCPCallResult(t, app, config, "cm_check_profile", map[string]interface{}{
 		"profile": "xcode-vnc",
 	})
 	if !strings.Contains(out, "missing required input: identity_file") {
 		t.Fatalf("output = %q", out)
+	}
+	if data["ok"] != false || data["profile"] != "xcode-vnc" {
+		t.Fatalf("structuredContent = %#v", data)
+	}
+}
+
+func TestMCPCheckReturnsStructuredSuccess(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out, data := runMCPCallResult(t, app, config, "cm_check_profile", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "check passed") {
+		t.Fatalf("output = %q", out)
+	}
+	if data["ok"] != true || data["profile"] != "xcode-vnc" || data["apple_email"] != "user@example.com" {
+		t.Fatalf("structuredContent = %#v", data)
 	}
 }
 
@@ -121,7 +145,7 @@ func TestMCPPushRequiresConfirm(t *testing.T) {
 	app, config, runner := mcpTestApp(t)
 	localPath := filepath.Join(t.TempDir(), "file.txt")
 	writeFile(t, localPath, "data")
-	out := runMCPCall(t, app, config, "cm_push", map[string]interface{}{
+	out, data := runMCPCallResult(t, app, config, "cm_push", map[string]interface{}{
 		"profile":    "xcode-vnc",
 		"local_path": localPath,
 		"remote_dir": "~/Documents/",
@@ -131,6 +155,9 @@ func TestMCPPushRequiresConfirm(t *testing.T) {
 	}
 	if len(runner.rsync) != 0 {
 		t.Fatal("preview must not run rsync")
+	}
+	if data["direction"] != "push" || data["confirmed"] != false || data["local_path"] != localPath || data["remote_dir"] != "~/Documents/" {
+		t.Fatalf("structuredContent = %#v", data)
 	}
 }
 
@@ -176,7 +203,7 @@ func TestMCPPushAcceptsSyncFilters(t *testing.T) {
 
 func TestMCPPullAcceptsSyncFilters(t *testing.T) {
 	app, config, runner := mcpTestApp(t)
-	out := runMCPCall(t, app, config, "cm_pull", map[string]interface{}{
+	out, data := runMCPCallResult(t, app, config, "cm_pull", map[string]interface{}{
 		"profile":     "xcode-vnc",
 		"remote_path": "~/Desktop/a.zip",
 		"includes":    []interface{}{"*.zip"},
@@ -185,6 +212,9 @@ func TestMCPPullAcceptsSyncFilters(t *testing.T) {
 	})
 	if !strings.Contains(out, "Executed") {
 		t.Fatalf("output = %q", out)
+	}
+	if data["direction"] != "pull" || data["confirmed"] != true || data["remote_path"] != "~/Desktop/a.zip" {
+		t.Fatalf("structuredContent = %#v", data)
 	}
 	for _, want := range []string{"--include", "*.zip", "--exclude", ".DS_Store", "--exclude", "*.tmp", "--exclude", "*"} {
 		if !containsString(runner.rsync, want) {
@@ -254,19 +284,55 @@ func TestMCPAWSCapacity(t *testing.T) {
 
 func TestMCPFindProfileByAppleEmail(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
-	out := runMCPCall(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{
+	out, data := runMCPCallResult(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{
 		"apple_email": "user@example.com",
 	})
 	if !strings.Contains(out, "Profile: xcode-vnc") {
 		t.Fatalf("output = %q", out)
 	}
+	if data["found"] != true || data["profile"] != "xcode-vnc" || data["apple_email"] != "user@example.com" {
+		t.Fatalf("structuredContent = %#v", data)
+	}
 }
 
 func TestMCPFindProfileByAppleEmailAsksWhenMissing(t *testing.T) {
 	app, config, _ := mcpTestApp(t)
-	out := runMCPCall(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{})
+	out, data := runMCPCallResult(t, app, config, "cm_find_profile_by_apple", map[string]interface{}{})
 	if !strings.Contains(out, "Apple account email is required") || !strings.Contains(out, "xcode-vnc: user@example.com") {
 		t.Fatalf("output = %q", out)
+	}
+	if data["ok"] != false || data["found"] != false {
+		t.Fatalf("structuredContent = %#v", data)
+	}
+}
+
+func TestMCPDashboardReturnsStructuredProfiles(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", SystemStatus: "ok", InstanceStatusCheck: "ok"}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", InstanceID: "i-1", PublicIP: "54.1.2.3"},
+		}}, nil
+	}
+	out, data := runMCPCallResult(t, app, config, "cm_dashboard", map[string]interface{}{"aws": true})
+	if !strings.Contains(out, "PROFILE") || data["ok"] != true || data["aws"] != true {
+		t.Fatalf("out=%q structuredContent=%#v", out, data)
+	}
+	profiles, ok := data["profiles"].([]interface{})
+	if !ok || len(profiles) != 1 {
+		t.Fatalf("profiles = %#v", data["profiles"])
+	}
+	first, ok := profiles[0].(map[string]interface{})
+	if !ok || first["profile"] != "xcode-vnc" || first["decision"] != "ready" || first["next"] != "cm start xcode-vnc" {
+		t.Fatalf("profile item = %#v", profiles[0])
+	}
+}
+
+func TestMCPMissingProfileReturnsToolResult(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out, data := runMCPCallResult(t, app, config, "cm_check_profile", map[string]interface{}{})
+	if !strings.Contains(out, "profile is required") || data["ok"] != false || data["kind"] != "profile" {
+		t.Fatalf("out=%q structuredContent=%#v", out, data)
 	}
 }
 

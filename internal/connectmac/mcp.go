@@ -78,7 +78,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.47",
+				"version": "0.1.48",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -114,7 +114,7 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	}
 	cfg, err := LoadConfig(s.ConfigPath)
 	if err != nil {
-		return nil, err
+		return mcpUserError("config", err), nil
 	}
 	switch call.Name {
 	case "cm_list_profiles":
@@ -124,16 +124,16 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	case "cm_check_profile":
 		profile, err := requireMCPProfile(cfg, call.Arguments)
 		if err != nil {
-			return nil, err
+			return mcpUserError("profile", err), nil
 		}
 		if text := missingMCPInputText(profile, false); text != "" {
-			return mcpText(text), nil
+			return mcpTextData(text, mcpCheckData(profile, false, []string{text})), nil
 		}
 		errs := s.App.Validator.ValidateProfile(profile)
 		if len(errs) > 0 {
-			return mcpText(formatErrors(errs)), nil
+			return mcpTextData(formatErrors(errs), mcpCheckData(profile, false, errorStrings(errs))), nil
 		}
-		return mcpText("check passed\n" + profileSummaryText(profile)), nil
+		return mcpTextData("check passed\n"+profileSummaryText(profile), mcpCheckData(profile, true, nil)), nil
 	case "cm_profile_show":
 		return s.mcpProfileShow(cfg, call.Arguments)
 	case "cm_profile_add":
@@ -184,11 +184,11 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 func (s MCPServer) mcpProfileShow(cfg Config, args map[string]interface{}) (interface{}, error) {
 	ref, err := requiredString(args, "profile")
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	profile, err := resolveProfileRef(cfg, ref)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	return mcpText(FormatProfileFile(profile)), nil
 }
@@ -196,10 +196,10 @@ func (s MCPServer) mcpProfileShow(cfg Config, args map[string]interface{}) (inte
 func (s MCPServer) mcpProfileAdd(cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, err := mcpProfileFromArgs(args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	if _, ok := cfg.Profile(profile.Name); ok {
-		return nil, fmt.Errorf("profile %q already exists", profile.Name)
+		return mcpUserError("profile", fmt.Errorf("profile %q already exists", profile.Name)), nil
 	}
 	if profile.Description == "" && profile.AWS.AccountEmail != "" {
 		profile.Description = "Apple account: " + profile.AWS.AccountEmail
@@ -213,7 +213,7 @@ func (s MCPServer) mcpProfileAdd(cfg Config, args map[string]interface{}) (inter
 	}
 	path, err := WriteProfileFile(s.ConfigPath, profile)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile_file", err), nil
 	}
 	return mcpText(text + "Created profile file: " + path), nil
 }
@@ -221,11 +221,11 @@ func (s MCPServer) mcpProfileAdd(cfg Config, args map[string]interface{}) (inter
 func (s MCPServer) mcpProfileRemove(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	name, err := requiredString(args, "profile")
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	profile, ok := cfg.Profile(name)
 	if !ok {
-		return nil, unknownProfileError(cfg, name)
+		return mcpUserError("profile", unknownProfileError(cfg, name)), nil
 	}
 	text := fmt.Sprintf("Remove local profile %s\n", profile.Name)
 	if !boolArg(args, "force_local") {
@@ -238,7 +238,7 @@ func (s MCPServer) mcpProfileRemove(ctx context.Context, cfg Config, args map[st
 	}
 	path, err := RemoveProfileFile(s.ConfigPath, profile.Name)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile_file", err), nil
 	}
 	_ = s.App.StateManager.Remove(profile.Name)
 	return mcpText(text + "Removed profile file: " + path), nil
@@ -247,17 +247,17 @@ func (s MCPServer) mcpProfileRemove(ctx context.Context, cfg Config, args map[st
 func (s MCPServer) mcpProfileRename(cfg Config, args map[string]interface{}) (interface{}, error) {
 	oldName, err := requiredString(args, "profile")
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	newName, err := requiredString(args, "new_name")
 	if err != nil {
-		return nil, err
+		return mcpUserError("new_name", err), nil
 	}
 	if _, ok := cfg.Profile(oldName); !ok {
-		return nil, unknownProfileError(cfg, oldName)
+		return mcpUserError("profile", unknownProfileError(cfg, oldName)), nil
 	}
 	if _, ok := cfg.Profile(newName); ok {
-		return nil, fmt.Errorf("profile %q already exists", newName)
+		return mcpUserError("profile", fmt.Errorf("profile %q already exists", newName)), nil
 	}
 	text := fmt.Sprintf("Rename local profile %s -> %s\n", oldName, newName)
 	if !boolArg(args, "confirm") {
@@ -265,7 +265,7 @@ func (s MCPServer) mcpProfileRename(cfg Config, args map[string]interface{}) (in
 	}
 	oldPath, newPath, err := RenameProfileFile(s.ConfigPath, oldName, newName)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile_file", err), nil
 	}
 	_ = s.App.StateManager.Remove(oldName)
 	return mcpText(fmt.Sprintf("%sRenamed profile file: %s -> %s", text, oldPath, newPath)), nil
@@ -292,7 +292,7 @@ func (s MCPServer) mcpDoctor(args map[string]interface{}) (interface{}, error) {
 func (s MCPServer) mcpDashboard(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	cfg, err := LoadConfig(s.ConfigPath)
 	if err != nil {
-		return nil, err
+		return mcpUserError("config", err), nil
 	}
 	var out, errOut bytes.Buffer
 	app := s.App
@@ -308,7 +308,59 @@ func (s MCPServer) mcpDashboard(ctx context.Context, args map[string]interface{}
 		text += errOut.String()
 	}
 	text += fmt.Sprintf("exit_code=%d\n", code)
-	return mcpText(text), nil
+	data := map[string]interface{}{
+		"ok":        code == 0,
+		"exit_code": code,
+		"aws":       boolArg(args, "aws"),
+		"profiles":  s.mcpDashboardProfiles(ctx, cfg, boolArg(args, "aws")),
+	}
+	return mcpTextData(text, data), nil
+}
+
+func (s MCPServer) mcpDashboardProfiles(ctx context.Context, cfg Config, includeAWS bool) []map[string]interface{} {
+	states, _ := s.App.StateManager.List()
+	running := map[string]string{}
+	for _, state := range states {
+		running[state.Profile] = fmt.Sprintf("pid=%d", state.PID)
+	}
+	items := make([]map[string]interface{}, 0, len(cfg.Profiles))
+	for _, name := range sortedProfileNames(cfg) {
+		profile, _ := cfg.Profile(name)
+		item := map[string]interface{}{
+			"profile":     profile.Name,
+			"apple_email": profile.AWS.AccountEmail,
+			"region":      profile.AWS.Region,
+			"host":        profile.Host,
+			"tunnel":      running[profile.Name],
+			"aws":         dashboardAWSConfigStatus(s.App.Validator.ValidateAWSProfile(profile)),
+		}
+		if includeAWS {
+			item["ready"] = false
+			item["decision"] = "config"
+			item["next"] = "fix config"
+			if len(s.App.Validator.ValidateAWSProfile(profile)) == 0 {
+				_, status, err := s.App.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+				if err != nil {
+					item["decision"] = "error"
+					item["next"] = "cm aws status " + profile.Name
+					item["error"] = err.Error()
+				} else {
+					action := AWSOpenAction(status)
+					item["ready"] = AWSStatusReady(status)
+					item["decision"] = action.Kind
+					item["next"] = AWSOpenDecisionNextStep(profile.Name, action)
+					item["eip_public_ip"] = status.ElasticIP.PublicIP
+					item["eip_allocation"] = status.ElasticIP.AllocationID
+					if len(status.Instances) > 0 {
+						item["instance_id"] = status.Instances[0].InstanceID
+						item["instance_state"] = status.Instances[0].State
+					}
+				}
+			}
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 func mcpProfileFromArgs(args map[string]interface{}) (Profile, error) {
@@ -345,101 +397,119 @@ func mcpProfileFromArgs(args map[string]interface{}) (Profile, error) {
 func (s MCPServer) mcpFindProfileByApple(cfg Config, args map[string]interface{}) (interface{}, error) {
 	email, err := requiredString(args, "apple_email")
 	if err != nil {
-		return mcpText("Apple account email is required. Ask the user to choose one.\n" + FormatAppleAccountChoices(cfg)), nil
+		return mcpTextData("Apple account email is required. Ask the user to choose one.\n"+FormatAppleAccountChoices(cfg), map[string]interface{}{
+			"ok":          false,
+			"found":       false,
+			"error":       err.Error(),
+			"apple_email": "",
+		}), nil
 	}
 	profile, err := cfg.ProfileByAppleEmail(email)
 	if err != nil {
-		return mcpText(err.Error()), nil
+		return mcpTextData(err.Error(), map[string]interface{}{
+			"ok":          false,
+			"found":       false,
+			"error":       err.Error(),
+			"apple_email": email,
+		}), nil
 	}
-	return mcpText(fmt.Sprintf("Apple account: %s\nProfile: %s\nDescription: %s\n", email, profile.Name, profile.Description)), nil
+	return mcpTextData(fmt.Sprintf("Apple account: %s\nProfile: %s\nDescription: %s\n", email, profile.Name, profile.Description), map[string]interface{}{
+		"ok":          true,
+		"found":       true,
+		"profile":     profile.Name,
+		"apple_email": email,
+		"description": profile.Description,
+	}), nil
 }
 
 func (s MCPServer) mcpPush(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, err := requireMCPProfile(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	if text := missingMCPInputText(profile, false); text != "" {
-		return mcpText(text), nil
+		return mcpTextData(text, mcpSyncData(profile, "push", false, "", "", SyncFilters{}, text)), nil
 	}
 	localPath, err := requiredString(args, "local_path")
 	if err != nil {
-		return nil, err
+		return mcpUserError("local_path", err), nil
 	}
 	remoteDir, err := requiredString(args, "remote_dir")
 	if err != nil {
-		return nil, err
+		return mcpUserError("remote_dir", err), nil
 	}
 	remoteDir = NormalizeRemotePath(remoteDir)
 	extraFilters, err := mcpSyncFilters(args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("sync_filters", err), nil
 	}
+	filters := mergeSyncFilters(profile.Sync.Push, extraFilters)
 	preview := fmt.Sprintf("Push %s -> %s\n", localPath, RemoteTarget(profile, remoteDir))
 	if !boolArg(args, "confirm") {
-		return mcpText(preview + "Preview only. Call again with confirm=true to execute."), nil
+		return mcpTextData(preview+"Preview only. Call again with confirm=true to execute.", mcpSyncData(profile, "push", false, localPath, remoteDir, filters, "")), nil
 	}
 	if _, err := os.Stat(localPath); err != nil {
-		return nil, fmt.Errorf("read local path %s: %w", localPath, err)
+		return mcpUserError("local_path", fmt.Errorf("read local path %s: %w", localPath, err)), nil
 	}
 	if !s.validateMCPRsync(profile) {
-		return nil, fmt.Errorf("profile validation failed")
+		return mcpTextData("profile validation failed", mcpSyncData(profile, "push", true, localPath, remoteDir, filters, "profile validation failed")), nil
 	}
-	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, mergeSyncFilters(profile.Sync.Push, extraFilters))
+	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, filters)
 	if err != nil {
-		return nil, err
+		return mcpUserError("rsync_args", err), nil
 	}
 	if err := s.App.Runner.RunRsync(ctx, rsyncArgs); err != nil {
 		return nil, err
 	}
-	return mcpText(preview + "Executed."), nil
+	return mcpTextData(preview+"Executed.", mcpSyncData(profile, "push", true, localPath, remoteDir, filters, "")), nil
 }
 
 func (s MCPServer) mcpPull(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, err := requireMCPProfile(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	if text := missingMCPInputText(profile, false); text != "" {
-		return mcpText(text), nil
+		return mcpTextData(text, mcpSyncData(profile, "pull", false, "", "", SyncFilters{}, text)), nil
 	}
 	remotePath, err := requiredString(args, "remote_path")
 	if err != nil {
-		return nil, err
+		return mcpUserError("remote_path", err), nil
 	}
 	localDir := stringArg(args, "local_dir", ".")
 	extraFilters, err := mcpSyncFilters(args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("sync_filters", err), nil
 	}
+	filters := mergeSyncFilters(profile.Sync.Pull, extraFilters)
 	preview := fmt.Sprintf("Pull %s -> %s\n", RemoteTarget(profile, remotePath), localDir)
 	if !boolArg(args, "confirm") {
-		return mcpText(preview + "Preview only. Call again with confirm=true to execute."), nil
+		return mcpTextData(preview+"Preview only. Call again with confirm=true to execute.", mcpSyncData(profile, "pull", false, remotePath, localDir, filters, "")), nil
 	}
 	if !s.validateMCPRsync(profile) {
-		return nil, fmt.Errorf("profile validation failed")
+		return mcpTextData("profile validation failed", mcpSyncData(profile, "pull", true, remotePath, localDir, filters, "profile validation failed")), nil
 	}
-	rsyncArgs, err := RsyncPullArgs(profile, remotePath, localDir, mergeSyncFilters(profile.Sync.Pull, extraFilters))
+	rsyncArgs, err := RsyncPullArgs(profile, remotePath, localDir, filters)
 	if err != nil {
-		return nil, err
+		return mcpUserError("rsync_args", err), nil
 	}
 	if err := s.App.Runner.RunRsync(ctx, rsyncArgs); err != nil {
 		return nil, err
 	}
-	return mcpText(preview + "Executed."), nil
+	return mcpTextData(preview+"Executed.", mcpSyncData(profile, "pull", true, remotePath, localDir, filters, "")), nil
 }
 
 func (s MCPServer) mcpForgetHost(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, err := requireMCPProfile(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("profile", err), nil
 	}
 	preview := fmt.Sprintf("Remove known_hosts entries for %s\n", profile.Host)
 	if !boolArg(args, "confirm") {
 		return mcpText(preview + "Preview only. Call again with confirm=true to execute."), nil
 	}
 	if profile.Host == "" {
-		return nil, fmt.Errorf("host is required")
+		return mcpUserError("host", fmt.Errorf("host is required")), nil
 	}
 	if err := s.App.Runner.ForgetHost(ctx, profile.Host); err != nil {
 		return nil, err
@@ -460,7 +530,7 @@ func (s MCPServer) validateMCPRsync(profile Profile) bool {
 func (s MCPServer) mcpAWSPlan(cfg Config, args map[string]interface{}) (interface{}, error) {
 	plan, err := s.mcpMacPlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_plan", err), nil
 	}
 	return mcpText(FormatMacPlan(plan)), nil
 }
@@ -468,7 +538,7 @@ func (s MCPServer) mcpAWSPlan(cfg Config, args map[string]interface{}) (interfac
 func (s MCPServer) mcpAWSCapacity(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	_, capacity, err := s.App.AWSService.Capacity(ctx, profile)
 	if err != nil {
@@ -480,7 +550,7 @@ func (s MCPServer) mcpAWSCapacity(ctx context.Context, cfg Config, args map[stri
 func (s MCPServer) mcpAWSStatus(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	_, status, err := s.App.AWSService.Status(ctx, profile)
 	if err != nil {
@@ -492,7 +562,7 @@ func (s MCPServer) mcpAWSStatus(ctx context.Context, cfg Config, args map[string
 func (s MCPServer) mcpAWSWaitReady(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	_, status, err := s.App.AWSService.WaitReady(ctx, profile)
 	if err != nil {
@@ -504,7 +574,7 @@ func (s MCPServer) mcpAWSWaitReady(ctx context.Context, cfg Config, args map[str
 func (s MCPServer) mcpAWSCreateMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	if text := missingMCPInputText(profile, true); text != "" {
 		return mcpText(text), nil
@@ -528,11 +598,11 @@ func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args ma
 	email, _ := args["apple_email"].(string)
 	profile, err := requireMCPAppleProfile(cfg, args)
 	if err != nil {
-		return mcpText(err.Error()), nil
+		return mcpUserError("apple_email", err), nil
 	}
 	plan, err := s.App.AWSService.Plan(profile)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_plan", err), nil
 	}
 	if text := missingMCPInputText(profile, true); text != "" {
 		return mcpText(text), nil
@@ -601,7 +671,7 @@ func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args ma
 func (s MCPServer) mcpAWSAdoptMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	if text := missingMCPInputText(profile, true); text != "" {
 		return mcpText(text), nil
@@ -624,14 +694,14 @@ func (s MCPServer) mcpAWSAdoptMac(ctx context.Context, cfg Config, args map[stri
 func (s MCPServer) mcpAWSAdoptHost(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	if text := missingMCPInputText(profile, true); text != "" {
 		return mcpText(text), nil
 	}
 	hostID, err := requiredString(args, "host_id")
 	if err != nil {
-		return nil, err
+		return mcpUserError("host_id", err), nil
 	}
 	_, host, err := s.App.AWSService.AdoptHostPreview(ctx, profile, hostID)
 	if err != nil {
@@ -651,14 +721,14 @@ func (s MCPServer) mcpAWSAdoptHost(ctx context.Context, cfg Config, args map[str
 func (s MCPServer) mcpAWSLaunchOnHost(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	if text := missingMCPInputText(profile, true); text != "" {
 		return mcpText(text), nil
 	}
 	hostID, err := requiredString(args, "host_id")
 	if err != nil {
-		return nil, err
+		return mcpUserError("host_id", err), nil
 	}
 	_, preview, err := s.App.AWSService.LaunchOnHostPreview(ctx, profile, hostID)
 	if err != nil {
@@ -682,7 +752,7 @@ func (s MCPServer) mcpAWSLaunchOnHost(ctx context.Context, cfg Config, args map[
 func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, plan, err := s.mcpMacProfilePlan(cfg, args)
 	if err != nil {
-		return nil, err
+		return mcpUserError("aws_profile", err), nil
 	}
 	text := FormatMacDestroyPreview(plan)
 	if !boolArg(args, "confirm") {
@@ -704,7 +774,7 @@ func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[st
 func (s MCPServer) mcpAWSDestroyMacByEmail(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
 	profile, err := requireMCPAppleProfile(cfg, args)
 	if err != nil {
-		return mcpText(err.Error()), nil
+		return mcpUserError("apple_email", err), nil
 	}
 	args = cloneArgs(args)
 	args["profile"] = profile.Name
@@ -829,6 +899,54 @@ func mcpTextData(text string, data map[string]interface{}) map[string]interface{
 		result["structuredContent"] = data
 	}
 	return result
+}
+
+func mcpUserError(kind string, err error) map[string]interface{} {
+	return mcpTextData(err.Error(), map[string]interface{}{
+		"ok":    false,
+		"kind":  kind,
+		"error": err.Error(),
+	})
+}
+
+func mcpCheckData(profile Profile, ok bool, errs []string) map[string]interface{} {
+	return map[string]interface{}{
+		"ok":          ok,
+		"profile":     profile.Name,
+		"apple_email": profile.AWS.AccountEmail,
+		"errors":      append([]string(nil), errs...),
+	}
+}
+
+func mcpSyncData(profile Profile, direction string, confirmed bool, source, target string, filters SyncFilters, errorText string) map[string]interface{} {
+	data := map[string]interface{}{
+		"ok":          errorText == "",
+		"profile":     profile.Name,
+		"apple_email": profile.AWS.AccountEmail,
+		"direction":   direction,
+		"confirmed":   confirmed,
+		"includes":    append([]string(nil), filters.Includes...),
+		"excludes":    append([]string(nil), filters.Excludes...),
+	}
+	if direction == "push" {
+		data["local_path"] = source
+		data["remote_dir"] = target
+	} else {
+		data["remote_path"] = source
+		data["local_dir"] = target
+	}
+	if errorText != "" {
+		data["error"] = errorText
+	}
+	return data
+}
+
+func errorStrings(errs []error) []string {
+	out := make([]string, 0, len(errs))
+	for _, err := range errs {
+		out = append(out, err.Error())
+	}
+	return out
 }
 
 func FormatMCPGuideText() string {
@@ -1008,8 +1126,8 @@ func mcpTools() []map[string]interface{} {
 	return []map[string]interface{}{
 		mcpTool("cm_mcp_guide", "Read this first when using cm MCP. Explains stable tool flows, main parameters, preview/confirm rules, and safe AWS Mac handling.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
 		mcpTool("cm_list_profiles", "List configured cm profiles. Use when the user has not provided an Apple account email or profile and must choose.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
-		mcpTool("cm_find_profile_by_apple", "Resolve apple_email to the local profile. apple_email is required for AI-driven open/create/destroy requests; never infer it from old context.", appleEmailSchema()),
-		mcpTool("cm_check_profile", "Validate profile without connecting. Main parameter: profile.", profileSchema()),
+		mcpTool("cm_find_profile_by_apple", "Resolve apple_email to the local profile. apple_email is required for AI-driven open/create/destroy requests; never infer it from old context. Returns structuredContent.", appleEmailSchema()),
+		mcpTool("cm_check_profile", "Validate profile without connecting. Main parameter: profile. Returns structuredContent with ok and errors.", profileSchema()),
 		mcpTool("cm_profile_show", "Show a profile file by profile name or Apple account email. Main parameter: profile.", profileSchema()),
 		mcpTool("cm_profile_add", "Preview or create a local profile file. Main parameter: name. confirm=false previews; confirm=true writes after user approval.", profileAddSchema()),
 		mcpTool("cm_profile_remove", "Preview or remove a local profile file only; this does not close AWS Mac resources. Blocks when AWS resources are active unless force_local=true. confirm=true removes after approval.", map[string]interface{}{
@@ -1038,14 +1156,14 @@ func mcpTools() []map[string]interface{} {
 			},
 			"additionalProperties": false,
 		}),
-		mcpTool("cm_dashboard", "Show local profile/tunnel dashboard. Set aws=true for read-only AWS status, decision, and next-step columns.", map[string]interface{}{
+		mcpTool("cm_dashboard", "Show local profile/tunnel dashboard. Set aws=true for read-only AWS status, decision, and next-step columns. Returns structuredContent profiles array.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"aws": map[string]string{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		}),
-		mcpTool("cm_push", "Preview or execute rsync upload. Main parameters: profile, local_path, remote_dir. Optional includes/excludes. confirm=true executes after preview approval.", map[string]interface{}{
+		mcpTool("cm_push", "Preview or execute rsync upload. Main parameters: profile, local_path, remote_dir. Optional includes/excludes. confirm=true executes after preview approval. Returns structuredContent.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":    stringSchema(),
@@ -1057,7 +1175,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile", "local_path", "remote_dir"},
 		}),
-		mcpTool("cm_pull", "Preview or execute rsync download. Main parameters: profile, remote_path, optional local_dir/includes/excludes. confirm=true executes after preview approval.", map[string]interface{}{
+		mcpTool("cm_pull", "Preview or execute rsync download. Main parameters: profile, remote_path, optional local_dir/includes/excludes. confirm=true executes after preview approval. Returns structuredContent.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":     stringSchema(),
