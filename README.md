@@ -129,6 +129,29 @@ List configured profiles:
 cm list
 ```
 
+Manage profile files under `~/.connectmac/profiles/`:
+
+```bash
+cm profile show xcode-vnc
+cm profile add --name user-usw2 --apple-email user@example.com --aws-profile cm-xcode --region us-west-2 --eip 54.1.2.3 --eip-allocation-id eipalloc-example --key-name example-key --security-group-id sg-example --az usw2-az1 --subnet usw2-az1=subnet-example
+cm profile rename user-usw2 user-renamed-usw2
+cm profile edit user-renamed-usw2
+cm profile export user@example.com
+cm profile import ./profile.yaml
+cm profile import-dir ./profiles
+cm profile remove user-renamed-usw2
+```
+
+`cm profile remove` only removes the local profile file and local tunnel state. It does not release AWS resources or Elastic IPs.
+
+Check local installation, config, profile basics, MCP tools, and completion visibility:
+
+```bash
+cm doctor
+cm doctor --fix
+cm dashboard
+```
+
 Check a profile before connecting:
 
 ```bash
@@ -181,6 +204,7 @@ Open macOS Screen Sharing for a VNC tunnel:
 
 ```bash
 cm open-vnc xcode-vnc
+cm setup-vnc xcode-vnc
 ```
 
 Pull a remote file or directory into the current directory:
@@ -260,6 +284,8 @@ Preview AWS Mac Dedicated Host automation:
 ```bash
 cm profile accounts
 cm profile find user@example.com
+cm open user@example.com
+cm close user@example.com
 cm aws plan xcode-vnc
 cm aws capacity user@example.com
 cm aws running

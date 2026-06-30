@@ -196,6 +196,113 @@ func TestAppCompletionProfiles(t *testing.T) {
 	}
 }
 
+func TestAppProfileAddShowRenameRemove(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	code := app.Run(context.Background(), []string{
+		"profile", "add",
+		"--name", "new-user-usw2",
+		"--apple-email", "new@example.com",
+		"--aws-profile", "cm-xcode",
+		"--region", "us-west-2",
+		"--eip", "54.1.2.3",
+		"--eip-allocation-id", "eipalloc-new",
+		"--key-name", "new-key",
+		"--security-group-id", "sg-new",
+		"--az", "usw2-az1",
+		"--subnet", "usw2-az1=subnet-new",
+		"--config", config,
+	})
+	if code != 0 {
+		t.Fatalf("profile add code = %d, err = %s", code, errOut.String())
+	}
+	profilePath := filepath.Join(dir, "profiles", "new-user-usw2.yaml")
+	if _, err := os.Stat(profilePath); err != nil {
+		t.Fatalf("expected profile file: %v", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"profile", "show", "new@example.com", "--config", config}); code != 0 {
+		t.Fatalf("profile show code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "new-user-usw2") || !strings.Contains(out.String(), "new@example.com") {
+		t.Fatalf("profile show output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"profile", "rename", "new-user-usw2", "renamed-usw2", "--config", config}); code != 0 {
+		t.Fatalf("profile rename code = %d, err = %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles", "renamed-usw2.yaml")); err != nil {
+		t.Fatalf("expected renamed profile file: %v", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"profile", "remove", "renamed-usw2", "--config", config}); code != 0 {
+		t.Fatalf("profile remove code = %d, err = %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles", "renamed-usw2.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("expected removed profile file, err=%v", err)
+	}
+}
+
+func TestAppProfileExportImport(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"profile", "export", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("profile export code = %d, err = %s", code, errOut.String())
+	}
+	exported := filepath.Join(t.TempDir(), "export.yaml")
+	writeFile(t, exported, strings.Replace(out.String(), "xcode-vnc:", "imported:", 1))
+	otherDir := t.TempDir()
+	otherConfig := filepath.Join(otherDir, "config.yaml")
+	writeFile(t, otherConfig, "profiles:\n")
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"profile", "import", exported, "--config", otherConfig}); code != 0 {
+		t.Fatalf("profile import code = %d, err = %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(otherDir, "profiles", "imported.yaml")); err != nil {
+		t.Fatalf("expected imported profile: %v", err)
+	}
+}
+
+func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"doctor", "--fix", "--config", config}); code != 0 {
+		t.Fatalf("doctor code = %d, err = %s\nout=%s", code, errOut.String(), out.String())
+	}
+	if !strings.Contains(out.String(), "mcp tools") || !strings.Contains(out.String(), "config file") {
+		t.Fatalf("doctor output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"dashboard", "--config", config}); code != 0 {
+		t.Fatalf("dashboard code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "PROFILE") || !strings.Contains(out.String(), "xcode-vnc") {
+		t.Fatalf("dashboard output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"setup-vnc", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("setup-vnc code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "sudo passwd ec2-user") || !strings.Contains(out.String(), "cm open-vnc xcode-vnc") {
+		t.Fatalf("setup-vnc output = %s", out.String())
+	}
+}
+
 func TestAppCompletionZshScriptUsesDynamicProfiles(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())

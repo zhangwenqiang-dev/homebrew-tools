@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -85,7 +86,33 @@ func (a App) Run(ctx context.Context, args []string) int {
 		if code != 0 {
 			return code
 		}
-		return a.runProfile(cfg, args[1:])
+		return a.runProfile(configPath, cfg, args[1:])
+	case "doctor":
+		return a.runDoctor(configPath, args[1:])
+	case "dashboard":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runDashboard(cfg)
+	case "open":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runAWS(ctx, cfg, append([]string{"open"}, args[1:]...))
+	case "close":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runAWS(ctx, cfg, append([]string{"destroy"}, args[1:]...))
+	case "setup-vnc":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runSetupVNC(cfg, args[1:])
 	case "check":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {
@@ -574,6 +601,130 @@ func parseDestroyAllArgs(args []string) ([]string, bool, error) {
 	return exceptRefs, confirm, nil
 }
 
+func parseProfileAddArgs(args []string) (Profile, error) {
+	var profile Profile
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--name":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--name requires a value")
+			}
+			profile.Name = args[i]
+		case "--description":
+			i++
+			if i >= len(args) {
+				return profile, fmt.Errorf("--description requires a value")
+			}
+			profile.Description = args[i]
+		case "--user":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--user requires a value")
+			}
+			profile.User = args[i]
+		case "--host":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--host requires a value")
+			}
+			profile.Host = args[i]
+		case "--identity-file":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--identity-file requires a value")
+			}
+			profile.IdentityFile = NormalizeIdentityFileInput(args[i])
+		case "--apple-email":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--apple-email requires a value")
+			}
+			profile.AWS.AccountEmail = args[i]
+		case "--aws-profile":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--aws-profile requires a value")
+			}
+			profile.AWS.Profile = args[i]
+		case "--region":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--region requires a value")
+			}
+			profile.AWS.Region = args[i]
+		case "--creator":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--creator requires a value")
+			}
+			profile.AWS.Creator = args[i]
+		case "--key-name":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--key-name requires a value")
+			}
+			profile.AWS.KeyName = args[i]
+		case "--security-group-id":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--security-group-id requires a value")
+			}
+			profile.AWS.SecurityGroupID = args[i]
+		case "--eip-allocation-id":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--eip-allocation-id requires a value")
+			}
+			profile.AWS.ElasticIPAllocationID = args[i]
+		case "--eip":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--eip requires a value")
+			}
+			profile.AWS.ElasticIPPublicIP = args[i]
+		case "--az":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--az requires a value")
+			}
+			profile.AWS.AvailabilityZoneIDs = append(profile.AWS.AvailabilityZoneIDs, args[i])
+		case "--instance-type":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--instance-type requires a value")
+			}
+			profile.AWS.InstanceTypePriority = append(profile.AWS.InstanceTypePriority, args[i])
+		case "--subnet-id":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--subnet-id requires a value")
+			}
+			profile.AWS.SubnetID = args[i]
+		case "--subnet":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return profile, fmt.Errorf("--subnet requires <az-id>=<subnet-id>")
+			}
+			az, subnet, ok := strings.Cut(args[i], "=")
+			if !ok || az == "" || subnet == "" {
+				return profile, fmt.Errorf("--subnet requires <az-id>=<subnet-id>")
+			}
+			if profile.AWS.SubnetsByAZ == nil {
+				profile.AWS.SubnetsByAZ = map[string]string{}
+			}
+			profile.AWS.SubnetsByAZ[az] = subnet
+		default:
+			return profile, fmt.Errorf("unknown profile add option %q", arg)
+		}
+	}
+	if profile.Name == "" {
+		return profile, fmt.Errorf("usage: cm profile add --name <profile> [--apple-email <email>] [--region <region>] ...")
+	}
+	return profile, nil
+}
+
 func (a App) runAWSDestroyProfiles(ctx context.Context, cfg Config, refs []string, confirm bool, command string) int {
 	matched := 0
 	for _, ref := range refs {
@@ -616,6 +767,9 @@ func (a App) runAWSDestroyProfiles(ctx context.Context, cfg Config, refs []strin
 }
 
 func (a App) runInit(configPath string, args []string) int {
+	if len(args) == 1 && args[0] == "wizard" {
+		return a.runInitWizard(configPath)
+	}
 	if len(args) > 0 {
 		fmt.Fprintf(a.Err, "unknown init option %q\n", args[0])
 		return 2
@@ -641,6 +795,44 @@ func (a App) runInit(configPath string, args []string) int {
 	if strings.EqualFold(a.promptLine("Initialize AI rules now? [y/N]: "), "y") {
 		return a.runInitRules(nil)
 	}
+	return 0
+}
+
+func (a App) runInitWizard(configPath string) int {
+	path, err := ExpandPath(configPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if _, err := os.Stat(path); err == nil {
+		fmt.Fprintf(a.Err, "config already exists: %s\n", path)
+		return 1
+	}
+	user := a.promptDefault("Default SSH user", DefaultAWSUser)
+	identity := NormalizeIdentityFileInput(a.promptLine("Default PEM path or name (for example example.pem): "))
+	creator := a.promptLine("Default AWS creator name: ")
+	config := strings.Replace(DefaultConfigTemplate(), "  user: ec2-user\n", "  user: "+quoteYAMLString(user)+"\n", 1)
+	if identity != "" {
+		config = strings.Replace(config, "  identity_file: ~/.ssh/example.pem\n", "  identity_file: "+quoteYAMLString(identity)+"\n", 1)
+	}
+	if creator != "" {
+		config = strings.Replace(config, "    creator: \"Xiao Chen\"\n", "    creator: "+quoteYAMLString(creator)+"\n", 1)
+	}
+	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		fmt.Fprintf(a.Err, "write config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "created config: %s\n", path)
+	if strings.EqualFold(a.promptLine("Initialize AI rules now? [y/N]: "), "y") {
+		if code := a.runInitRules(nil); code != 0 {
+			return code
+		}
+	}
+	fmt.Fprintln(a.Out, "Next: run cm profile add or edit ~/.connectmac/profiles/<name>.yaml")
 	return 0
 }
 
@@ -693,6 +885,156 @@ func (a App) runList(cfg Config) int {
 	return 0
 }
 
+func (a App) runDoctor(configPath string, args []string) int {
+	fix := false
+	for _, arg := range args {
+		switch arg {
+		case "--fix":
+			fix = true
+		default:
+			fmt.Fprintf(a.Err, "unknown doctor option %q\n", arg)
+			return 2
+		}
+	}
+	configFile, err := ExpandPath(configPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	configDir := filepathDir(configFile)
+	profilesDir := filepath.Join(configDir, "profiles")
+	type check struct {
+		Name   string
+		OK     bool
+		Detail string
+	}
+	var checks []check
+	if _, err := os.Stat(configFile); err == nil {
+		checks = append(checks, check{"config file", true, configFile})
+	} else {
+		checks = append(checks, check{"config file", false, configFile})
+	}
+	if info, err := os.Stat(profilesDir); err == nil && info.IsDir() {
+		checks = append(checks, check{"profiles dir", true, profilesDir})
+	} else {
+		if fix {
+			_ = os.MkdirAll(profilesDir, 0o700)
+		}
+		_, err := os.Stat(profilesDir)
+		checks = append(checks, check{"profiles dir", err == nil, profilesDir})
+	}
+	if _, err := exec.LookPath("ssh"); err == nil {
+		checks = append(checks, check{"ssh executable", true, "found"})
+	} else {
+		checks = append(checks, check{"ssh executable", false, err.Error()})
+	}
+	if _, err := exec.LookPath("rsync"); err == nil {
+		checks = append(checks, check{"rsync executable", true, "found"})
+	} else {
+		checks = append(checks, check{"rsync executable", false, err.Error()})
+	}
+	if path := detectedCompletionScript(); path != "" {
+		checks = append(checks, check{"zsh completion", true, path})
+	} else {
+		checks = append(checks, check{"zsh completion", true, "not detected; run cm completion zsh or enable Homebrew completions"})
+	}
+	cfg, err := LoadConfig(configPath)
+	if err == nil {
+		checks = append(checks, check{"config parse", true, fmt.Sprintf("%d profiles", len(cfg.Profiles))})
+		seenEmails := map[string]string{}
+		for _, name := range sortedProfileNames(cfg) {
+			profile, _ := cfg.Profile(name)
+			if profile.AWS.AccountEmail != "" {
+				if previous := seenEmails[strings.ToLower(profile.AWS.AccountEmail)]; previous != "" {
+					checks = append(checks, check{"duplicate Apple email", false, previous + " and " + profile.Name})
+				}
+				seenEmails[strings.ToLower(profile.AWS.AccountEmail)] = profile.Name
+			}
+			for _, validationErr := range a.Validator.ValidateAccess(profile) {
+				checks = append(checks, check{"profile " + profile.Name, false, validationErr.Error()})
+			}
+		}
+	} else {
+		checks = append(checks, check{"config parse", false, err.Error()})
+	}
+	if len(mcpTools()) == 17 {
+		checks = append(checks, check{"mcp tools", true, "17 tools"})
+	} else {
+		checks = append(checks, check{"mcp tools", false, fmt.Sprintf("%d tools", len(mcpTools()))})
+	}
+	rows := [][]string{{"CHECK", "STATUS", "DETAIL"}}
+	ok := true
+	for _, item := range checks {
+		status := "ok"
+		if !item.OK {
+			status = "fail"
+			ok = false
+		}
+		rows = append(rows, []string{item.Name, status, item.Detail})
+	}
+	fmt.Fprint(a.Out, formatRows(rows))
+	if !ok {
+		return 1
+	}
+	return 0
+}
+
+func detectedCompletionScript() string {
+	for _, path := range []string{
+		"/usr/local/share/zsh/site-functions/_cm",
+		"/opt/homebrew/share/zsh/site-functions/_cm",
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+func (a App) runDashboard(cfg Config) int {
+	states, _ := a.StateManager.List()
+	running := map[string]string{}
+	for _, state := range states {
+		running[state.Profile] = fmt.Sprintf("pid=%d", state.PID)
+	}
+	rows := [][]string{{"PROFILE", "APPLE ACCOUNT", "REGION", "HOST", "TUNNEL"}}
+	for _, name := range sortedProfileNames(cfg) {
+		profile, _ := cfg.Profile(name)
+		rows = append(rows, []string{
+			profile.Name,
+			emptyTableValue(profile.AWS.AccountEmail),
+			emptyTableValue(profile.AWS.Region),
+			emptyTableValue(profile.Host),
+			emptyTableValue(running[profile.Name]),
+		})
+	}
+	fmt.Fprint(a.Out, formatRows(rows))
+	return 0
+}
+
+func (a App) runSetupVNC(cfg Config, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(a.Err, "usage: cm setup-vnc <profile>")
+		return 2
+	}
+	profile, ok := cfg.Profile(args[0])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
+		return 2
+	}
+	fmt.Fprintf(a.Out, "Manual GUI setup:\n")
+	fmt.Fprintf(a.Out, "  cm ssh %s\n", profile.Name)
+	fmt.Fprintf(a.Out, "  sudo passwd ec2-user\n")
+	fmt.Fprintf(a.Out, "  # 输入你要设置的密码，例如：12345678\n")
+	fmt.Fprintf(a.Out, "  # 再次输入你要设置的密码，例如：12345678\n")
+	fmt.Fprintf(a.Out, "  sudo launchctl enable system/com.apple.screensharing\n")
+	fmt.Fprintf(a.Out, "  sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist\n")
+	fmt.Fprintf(a.Out, "  exit\n")
+	fmt.Fprintf(a.Out, "  cm start %s\n", profile.Name)
+	fmt.Fprintf(a.Out, "  cm open-vnc %s\n", profile.Name)
+	return 0
+}
+
 func (a App) runCompletion(configPath string, args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands>")
@@ -740,9 +1082,9 @@ func (a App) runCompletion(configPath string, args []string) int {
 	}
 }
 
-func (a App) runProfile(cfg Config, args []string) int {
+func (a App) runProfile(configPath string, cfg Config, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.Err, "usage: cm profile <find|accounts> [apple-email]")
+		fmt.Fprintln(a.Err, "usage: cm profile <accounts|find|show|add|remove|rename|edit|export|import|import-dir> ...")
 		return 2
 	}
 	switch args[0] {
@@ -761,10 +1103,147 @@ func (a App) runProfile(cfg Config, args []string) int {
 		}
 		fmt.Fprintf(a.Out, "Apple account: %s\nProfile: %s\nDescription: %s\n", args[1], profile.Name, profile.Description)
 		return 0
+	case "show":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile show <profile-or-apple-email>")
+			return 2
+		}
+		profile, err := resolveProfileRef(cfg, args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatProfileFile(profile))
+		return 0
+	case "add":
+		return a.runProfileAdd(configPath, cfg, args[1:])
+	case "remove":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile remove <profile>")
+			return 2
+		}
+		if _, ok := cfg.Profile(args[1]); !ok {
+			fmt.Fprintln(a.Err, unknownProfileError(cfg, args[1]))
+			return 2
+		}
+		path, err := RemoveProfileFile(configPath, args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		_ = a.StateManager.Remove(args[1])
+		fmt.Fprintf(a.Out, "removed profile file: %s\n", path)
+		return 0
+	case "rename":
+		if len(args) != 3 {
+			fmt.Fprintln(a.Err, "usage: cm profile rename <old> <new>")
+			return 2
+		}
+		if _, ok := cfg.Profile(args[1]); !ok {
+			fmt.Fprintln(a.Err, unknownProfileError(cfg, args[1]))
+			return 2
+		}
+		if _, ok := cfg.Profile(args[2]); ok {
+			fmt.Fprintf(a.Err, "profile %q already exists\n", args[2])
+			return 1
+		}
+		oldPath, newPath, err := RenameProfileFile(configPath, args[1], args[2])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		_ = a.StateManager.Remove(args[1])
+		fmt.Fprintf(a.Out, "renamed profile file: %s -> %s\n", oldPath, newPath)
+		return 0
+	case "edit":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile edit <profile>")
+			return 2
+		}
+		path, err := ProfileFilePath(configPath, args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		if _, err := os.Stat(path); err != nil {
+			fmt.Fprintf(a.Err, "profile %q is not managed as %s\n", args[1], path)
+			return 1
+		}
+		if err := OpenProfileInEditor(path); err != nil {
+			fmt.Fprintf(a.Out, "Profile file: %s\n", path)
+			fmt.Fprintf(a.Err, "open editor failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "export":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile export <profile-or-apple-email>")
+			return 2
+		}
+		profile, err := resolveProfileRef(cfg, args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		fmt.Fprint(a.Out, FormatProfileFile(profile))
+		return 0
+	case "import":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile import <profile-file.yaml>")
+			return 2
+		}
+		paths, err := ImportProfileFile(configPath, args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		for _, path := range paths {
+			fmt.Fprintf(a.Out, "imported profile: %s\n", path)
+		}
+		return 0
+	case "import-dir":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm profile import-dir <profiles-dir>")
+			return 2
+		}
+		paths, err := ImportProfileDir(configPath, args[1])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		for _, path := range paths {
+			fmt.Fprintf(a.Out, "imported profile: %s\n", path)
+		}
+		return 0
 	default:
 		fmt.Fprintf(a.Err, "unknown profile command %q\n", args[0])
 		return 2
 	}
+}
+
+func (a App) runProfileAdd(configPath string, cfg Config, args []string) int {
+	profile, err := parseProfileAddArgs(args)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 2
+	}
+	if _, ok := cfg.Profile(profile.Name); ok {
+		fmt.Fprintf(a.Err, "profile %q already exists\n", profile.Name)
+		return 1
+	}
+	if profile.Description == "" && profile.AWS.AccountEmail != "" {
+		profile.Description = "Apple account: " + profile.AWS.AccountEmail
+	}
+	if profile.AWS.ElasticIPOwnerTag.Key == "" && profile.AWS.AccountEmail != "" {
+		profile.AWS.ElasticIPOwnerTag = AWSTagConfig{Key: "Apple", Value: profile.AWS.AccountEmail}
+	}
+	path, err := WriteProfileFile(configPath, profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "created profile: %s\n", path)
+	return 0
 }
 
 func (a App) runCheck(cfg Config, args []string) int {
@@ -1203,6 +1682,14 @@ func (a App) promptLine(prompt string) string {
 	return strings.TrimSpace(line)
 }
 
+func (a App) promptDefault(label, fallback string) string {
+	value := a.promptLine(fmt.Sprintf("%s [%s]: ", label, fallback))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
 func readInputLine(r io.Reader) (string, error) {
 	if byteReader, ok := r.(interface {
 		ReadByte() (byte, error)
@@ -1236,12 +1723,15 @@ func (a App) printUsage() {
 	fmt.Fprint(a.Out, `Usage:
   cm version
   cm init [--config <path>]
+  cm init wizard [--config <path>]
   cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
   cm init-rules --print-rules
   cm completion <zsh|bash|fish>
   cm list [--config <path>]
   cm check <profile> [--config <path>]
   cm connect <profile> [--config <path>]
+  cm open <profile-or-apple-email> [--confirm] [--config <path>]
+  cm close <profile-or-apple-email> [--confirm] [--config <path>]
   cm ssh <profile> [--config <path>]
   cm exec <profile> [--config <path>] -- <command>
   cm start <profile> [--config <path>]
@@ -1249,8 +1739,17 @@ func (a App) printUsage() {
   cm push <profile-or-apple-email> <local-path> <remote-dir> [--include <pattern>] [--exclude <pattern>] [--config <path>]
   cm forget-host <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
+  cm setup-vnc <profile> [--config <path>]
   cm profile accounts [--config <path>]
   cm profile find <apple-email> [--config <path>]
+  cm profile show <profile-or-apple-email> [--config <path>]
+  cm profile add --name <profile> [options] [--config <path>]
+  cm profile remove <profile> [--config <path>]
+  cm profile rename <old> <new> [--config <path>]
+  cm profile edit <profile> [--config <path>]
+  cm profile export <profile-or-apple-email> [--config <path>]
+  cm profile import <profile-file.yaml> [--config <path>]
+  cm profile import-dir <profiles-dir> [--config <path>]
   cm aws plan <profile-or-apple-email> [--config <path>]
   cm aws capacity <profile-or-apple-email> [--config <path>]
   cm aws open <profile-or-apple-email> [--confirm] [--config <path>]
@@ -1266,6 +1765,8 @@ func (a App) printUsage() {
   cm aws running [--config <path>]
   cm mcp [--config <path>]
   cm mcp tools [--json]
+  cm doctor [--fix] [--config <path>]
+  cm dashboard [--config <path>]
   cm stop <profile>
   cm status
 `)
@@ -1550,6 +2051,8 @@ func completionCommands() []string {
 		"profile",
 		"check",
 		"connect",
+		"open",
+		"close",
 		"ssh",
 		"exec",
 		"start",
@@ -1557,15 +2060,18 @@ func completionCommands() []string {
 		"push",
 		"forget-host",
 		"open-vnc",
+		"setup-vnc",
 		"stop",
 		"status",
+		"doctor",
+		"dashboard",
 		"mcp",
 		"aws",
 	}
 }
 
 func completionProfileCommands() []string {
-	return []string{"accounts", "find"}
+	return []string{"accounts", "find", "show", "add", "remove", "rename", "edit", "export", "import", "import-dir"}
 }
 
 func completionAWSCommands() []string {
@@ -1639,8 +2145,11 @@ _cm() {
   fi
 
   case "${words[2]}" in
-    check|connect|ssh|start|forget-host|open-vnc|stop)
+    check|connect|ssh|start|forget-host|open-vnc|setup-vnc|stop)
       (( CURRENT == 3 )) && _cm_profiles
+      ;;
+    open|close)
+      (( CURRENT == 3 )) && _cm_profile_or_apple
       ;;
     pull)
       if (( CURRENT == 3 )); then
@@ -1668,11 +2177,17 @@ _cm() {
     profile)
       if (( CURRENT == 3 )); then
         compadd -- "${profile_commands[@]}"
-      elif [[ "${words[3]}" == "find" ]]; then
+      elif [[ "${words[3]}" == "find" || "${words[3]}" == "show" || "${words[3]}" == "export" ]]; then
         local -a config_args apple_emails
         config_args=(${(z)$(_cm_config_args)})
         apple_emails=("${(@f)$(command cm completion apple-emails "${config_args[@]}" 2>/dev/null)}")
-        compadd -- "${apple_emails[@]}"
+        values=("${(@f)$(command cm completion profiles "${config_args[@]}" 2>/dev/null)}")
+        values+=("${apple_emails[@]}")
+        compadd -- "${values[@]}"
+      elif [[ "${words[3]}" == "remove" || "${words[3]}" == "rename" || "${words[3]}" == "edit" ]]; then
+        _cm_profiles
+      elif [[ "${words[3]}" == "import" || "${words[3]}" == "import-dir" ]]; then
+        _files
       fi
       ;;
     aws)
@@ -1733,8 +2248,11 @@ func bashCompletionScript() string {
   fi
 
   case "$cmd" in
-    check|connect|ssh|start|forget-host|open-vnc|stop|exec)
+    check|connect|ssh|start|forget-host|open-vnc|setup-vnc|stop|exec)
       [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      ;;
+    open|close)
+      [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
       ;;
     pull)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -1757,8 +2275,12 @@ func bashCompletionScript() string {
     profile)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion profile-commands 2>/dev/null)" -- "$cur") )
-      elif [[ "${COMP_WORDS[2]}" == "find" ]]; then
-        COMPREPLY=( $(compgen -W "$(cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      elif [[ "${COMP_WORDS[2]}" == "find" || "${COMP_WORDS[2]}" == "show" || "${COMP_WORDS[2]}" == "export" ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null; cm completion apple-emails "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      elif [[ "${COMP_WORDS[2]}" == "remove" || "${COMP_WORDS[2]}" == "rename" || "${COMP_WORDS[2]}" == "edit" ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
+      elif [[ "${COMP_WORDS[2]}" == "import" || "${COMP_WORDS[2]}" == "import-dir" ]]; then
+        COMPREPLY=( $(compgen -f -- "$cur") )
       fi
       ;;
     aws)
@@ -1794,7 +2316,9 @@ complete -F _cm_completion cm
 func fishCompletionScript() string {
 	return `complete -c cm -f
 complete -c cm -n "not __fish_seen_subcommand_from (cm completion commands)" -a "(cm completion commands)"
-complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc stop exec" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc setup-vnc stop exec" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from open close" -a "(cm completion profiles)"
+complete -c cm -n "__fish_seen_subcommand_from open close" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "--include --exclude"
