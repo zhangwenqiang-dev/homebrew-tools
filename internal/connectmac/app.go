@@ -1005,7 +1005,7 @@ func (a App) runDashboard(ctx context.Context, cfg Config, args []string) int {
 	}
 	rows := [][]string{{"PROFILE", "APPLE ACCOUNT", "REGION", "HOST", "TUNNEL", "AWS"}}
 	if includeAWS {
-		rows[0] = append(rows[0], "INSTANCE", "READY", "DECISION", "EIP")
+		rows[0] = append(rows[0], "INSTANCE", "READY", "DECISION", "NEXT", "EIP")
 	}
 	for _, name := range sortedProfileNames(cfg) {
 		profile, _ := cfg.Profile(name)
@@ -1018,23 +1018,27 @@ func (a App) runDashboard(ctx context.Context, cfg Config, args []string) int {
 			dashboardAWSConfigStatus(a.Validator.ValidateAWSProfile(profile)),
 		}
 		if includeAWS {
-			instance, ready, decision, eip := "-", "-", "-", "-"
+			instance, ready, decision, next, eip := "-", "-", "-", "-", "-"
 			if len(a.Validator.ValidateAWSProfile(profile)) > 0 {
 				ready = "config"
 				decision = "config"
+				next = "fix config"
 			} else {
 				_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
 				if err != nil {
 					ready = "error"
 					decision = "error"
+					next = "cm aws status " + profile.Name
 				} else {
 					instance = dashboardInstanceSummary(status)
 					ready = fmt.Sprintf("%t", AWSStatusReady(status))
-					decision = AWSOpenAction(status).Kind
+					action := AWSOpenAction(status)
+					decision = action.Kind
+					next = AWSOpenDecisionNextStep(profile.Name, action)
 					eip = emptyTableValue(status.ElasticIP.PublicIP)
 				}
 			}
-			row = append(row, instance, ready, decision, eip)
+			row = append(row, instance, ready, decision, next, eip)
 		}
 		rows = append(rows, row)
 	}

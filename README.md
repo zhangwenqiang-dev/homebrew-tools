@@ -158,7 +158,7 @@ cm dashboard
 cm dashboard --aws
 ```
 
-`cm dashboard --aws` adds read-only AWS columns including readiness and the next open decision: `ready`, `wait-ready`, `launch-on-host`, `create`, `blocked`, `config`, or `error`.
+`cm dashboard --aws` adds read-only AWS columns including readiness, the next open decision, and a suggested next command. Decisions include `ready`, `wait-ready`, `launch-on-host`, `create`, `blocked`, `config`, or `error`.
 
 Check a profile before connecting:
 

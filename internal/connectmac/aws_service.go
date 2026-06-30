@@ -1001,7 +1001,26 @@ func FormatAWSOpenPreview(plan MacPlan, status AWSStatus) string {
 		fmt.Fprintf(&b, " (%s)", action.Detail)
 	}
 	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "Next: %s\n", AWSOpenDecisionNextStep(plan.ProfileName, action))
 	return b.String()
+}
+
+func AWSOpenDecisionNextStep(profileName string, action AWSOpenDecision) string {
+	switch action.Kind {
+	case "ready":
+		return "cm start " + profileName
+	case "wait-ready":
+		return "cm aws wait-ready " + profileName
+	case "launch-on-host", "create":
+		return "cm aws open " + profileName + " --confirm"
+	case "blocked":
+		if action.Detail != "" {
+			return "stop: " + action.Detail
+		}
+		return "stop and inspect status"
+	default:
+		return "cm aws status " + profileName
+	}
 }
 
 func FormatAWSOpenPreviewWithCandidates(plan MacPlan, status AWSStatus, candidates []AWSCreateAttempt) string {

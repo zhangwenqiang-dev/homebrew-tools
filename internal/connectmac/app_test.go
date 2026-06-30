@@ -395,7 +395,7 @@ func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"dashboard", "--aws", "--config", config}); code != 0 {
 		t.Fatalf("dashboard --aws code = %d, err = %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "READY") || !strings.Contains(out.String(), "DECISION") || !strings.Contains(out.String(), "ready") || !strings.Contains(out.String(), "54.1.2.3") {
+	if !strings.Contains(out.String(), "READY") || !strings.Contains(out.String(), "DECISION") || !strings.Contains(out.String(), "NEXT") || !strings.Contains(out.String(), "cm start xcode-vnc") || !strings.Contains(out.String(), "ready") || !strings.Contains(out.String(), "54.1.2.3") {
 		t.Fatalf("dashboard --aws output = %s", out.String())
 	}
 	out.Reset()

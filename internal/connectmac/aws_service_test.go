@@ -244,9 +244,27 @@ func TestFormatAWSOpenPreviewWithCandidates(t *testing.T) {
 		Status:             "candidate",
 		Detail:             "ready for AllocateHost",
 	}})
-	for _, want := range []string{"Decision: create", "Create candidates:", "use1-az6", "mac2-m2.metal", "candidate"} {
+	for _, want := range []string{"Decision: create", "Next: cm aws open xcode-vnc --confirm", "Create candidates:", "use1-az6", "mac2-m2.metal", "candidate"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("open preview missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAWSOpenDecisionNextStep(t *testing.T) {
+	cases := []struct {
+		action AWSOpenDecision
+		want   string
+	}{
+		{AWSOpenDecision{Kind: "ready"}, "cm start xcode-vnc"},
+		{AWSOpenDecision{Kind: "wait-ready"}, "cm aws wait-ready xcode-vnc"},
+		{AWSOpenDecision{Kind: "launch-on-host"}, "cm aws open xcode-vnc --confirm"},
+		{AWSOpenDecision{Kind: "create"}, "cm aws open xcode-vnc --confirm"},
+		{AWSOpenDecision{Kind: "blocked", Detail: "host h-1 is pending"}, "stop: host h-1 is pending"},
+	}
+	for _, tc := range cases {
+		if got := AWSOpenDecisionNextStep("xcode-vnc", tc.action); got != tc.want {
+			t.Fatalf("next step for %+v = %q, want %q", tc.action, got, tc.want)
 		}
 	}
 }
