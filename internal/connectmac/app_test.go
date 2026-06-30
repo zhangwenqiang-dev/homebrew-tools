@@ -267,13 +267,66 @@ func TestAppProfileRemoveBlocksWhenAWSResourcesExist(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"profile", "remove", "xcode-vnc", "--config", config}); code != 1 {
 		t.Fatalf("profile remove code = %d, out = %s, err = %s", code, out.String(), errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "still has AWS Mac resources") {
-		t.Fatalf("err = %q", errOut.String())
+	for _, want := range []string{"still has AWS Mac resources", "never releases Elastic IP", "cm close xcode-vnc", "--force-local"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("err missing %q: %q", want, errOut.String())
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "profiles", "xcode-vnc.yaml")); err == nil {
-		t.Fatalf("profile should not have been removed")
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat profile: %v", err)
+}
+
+func TestAppProfileAddWizardPreviewsAndWrites(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.In = strings.NewReader(strings.Join([]string{
+		"wizard-usw2",
+		"wizard@example.com",
+		"",
+		"",
+		key,
+		"cm-xcode",
+		"us-west-2",
+		"",
+		"example-key",
+		"sg-example",
+		"eipalloc-example",
+		"54.1.2.3",
+		"usw2-az1",
+		"subnet-example",
+		"",
+		"y",
+	}, "\n") + "\n")
+	if code := app.Run(context.Background(), []string{"profile", "add", "--wizard", "--config", config}); code != 0 {
+		t.Fatalf("profile add wizard code = %d, err = %s, out = %s", code, errOut.String(), out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "profiles", "wizard-usw2.yaml"))
+	if err != nil {
+		t.Fatalf("read wizard profile: %v", err)
+	}
+	for _, want := range []string{"Profile preview", "Warnings", "ec2-54-1-2-3.us-west-2.compute.amazonaws.com"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("wizard output missing %q: %s", want, out.String())
+		}
+	}
+	if !strings.Contains(string(data), "wizard@example.com") || !strings.Contains(string(data), "subnet-example") {
+		t.Fatalf("wizard profile = %s", data)
+	}
+}
+
+func TestAppProfileAddWizardRejectsDuplicateAppleEmail(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.In = strings.NewReader("duplicate-usw2\nuser@example.com\n")
+	if code := app.Run(context.Background(), []string{"profile", "add", "--wizard", "--config", config}); code != 1 {
+		t.Fatalf("profile add wizard code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "already configured") {
+		t.Fatalf("err = %q", errOut.String())
 	}
 }
 
@@ -342,7 +395,7 @@ func TestAppDoctorDashboardAndSetupVNC(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"dashboard", "--aws", "--config", config}); code != 0 {
 		t.Fatalf("dashboard --aws code = %d, err = %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "READY") || !strings.Contains(out.String(), "54.1.2.3") {
+	if !strings.Contains(out.String(), "READY") || !strings.Contains(out.String(), "DECISION") || !strings.Contains(out.String(), "ready") || !strings.Contains(out.String(), "54.1.2.3") {
 		t.Fatalf("dashboard --aws output = %s", out.String())
 	}
 	out.Reset()

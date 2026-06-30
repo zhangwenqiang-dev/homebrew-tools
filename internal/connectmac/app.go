@@ -1005,7 +1005,7 @@ func (a App) runDashboard(ctx context.Context, cfg Config, args []string) int {
 	}
 	rows := [][]string{{"PROFILE", "APPLE ACCOUNT", "REGION", "HOST", "TUNNEL", "AWS"}}
 	if includeAWS {
-		rows[0] = append(rows[0], "INSTANCE", "READY", "EIP")
+		rows[0] = append(rows[0], "INSTANCE", "READY", "DECISION", "EIP")
 	}
 	for _, name := range sortedProfileNames(cfg) {
 		profile, _ := cfg.Profile(name)
@@ -1018,20 +1018,23 @@ func (a App) runDashboard(ctx context.Context, cfg Config, args []string) int {
 			dashboardAWSConfigStatus(a.Validator.ValidateAWSProfile(profile)),
 		}
 		if includeAWS {
-			instance, ready, eip := "-", "-", "-"
+			instance, ready, decision, eip := "-", "-", "-", "-"
 			if len(a.Validator.ValidateAWSProfile(profile)) > 0 {
 				ready = "config"
+				decision = "config"
 			} else {
 				_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
 				if err != nil {
 					ready = "error"
+					decision = "error"
 				} else {
 					instance = dashboardInstanceSummary(status)
 					ready = fmt.Sprintf("%t", AWSStatusReady(status))
+					decision = AWSOpenAction(status).Kind
 					eip = emptyTableValue(status.ElasticIP.PublicIP)
 				}
 			}
-			row = append(row, instance, ready, eip)
+			row = append(row, instance, ready, decision, eip)
 		}
 		rows = append(rows, row)
 	}
@@ -1323,7 +1326,7 @@ func (a App) profileRemoveBlockedByAWS(ctx context.Context, profile Profile) (bo
 		return true, fmt.Sprintf("profile %s AWS resources could not be checked: %v\nUse --force-local only if you are sure no AWS Mac resources need this profile.\n", profile.Name, err)
 	}
 	if len(status.Hosts) > 0 || len(status.Instances) > 0 {
-		return true, fmt.Sprintf("profile %s still has AWS Mac resources: hosts=%d instances=%d. Run cm close %s first; Elastic IP allocations are retained by close.\n", profile.Name, len(status.Hosts), len(status.Instances), profile.Name)
+		return true, fmt.Sprintf("profile %s still has AWS Mac resources: hosts=%d instances=%d.\nThis command only removes local config; it never releases Elastic IP allocations.\nRun cm close %s first to release managed EC2/Dedicated Host resources, then remove the profile.\nUse --force-local only when you intentionally want to remove the local profile without closing AWS resources.\n", profile.Name, len(status.Hosts), len(status.Instances), profile.Name)
 	}
 	return false, ""
 }
@@ -1368,6 +1371,14 @@ func (a App) runProfileAddWizard(configPath string, cfg Config) int {
 		return 1
 	}
 	profile.AWS.AccountEmail = a.promptLine("Apple account email: ")
+	if profile.AWS.AccountEmail == "" {
+		fmt.Fprintln(a.Err, "apple account email is required")
+		return 2
+	}
+	if _, err := cfg.ProfileByAppleEmail(profile.AWS.AccountEmail); err == nil {
+		fmt.Fprintf(a.Err, "Apple account %s is already configured\n", profile.AWS.AccountEmail)
+		return 1
+	}
 	profile.Description = a.promptDefault("Description", "Apple account: "+profile.AWS.AccountEmail)
 	profile.User = a.promptDefault("SSH user", cfg.Defaults.User)
 	profile.IdentityFile = NormalizeIdentityFileInput(a.promptDefault("PEM path or name", cfg.Defaults.IdentityFile))
@@ -1398,6 +1409,18 @@ func (a App) runProfileAddWizard(configPath string, cfg Config) int {
 	if profile.AWS.ElasticIPOwnerTag.Key == "" && profile.AWS.AccountEmail != "" {
 		profile.AWS.ElasticIPOwnerTag = AWSTagConfig{Key: "Apple", Value: profile.AWS.AccountEmail}
 	}
+	if warnings := profileWizardWarnings(profile); len(warnings) > 0 {
+		fmt.Fprintln(a.Out, "Warnings:")
+		for _, warning := range warnings {
+			fmt.Fprintf(a.Out, "- %s\n", warning)
+		}
+	}
+	fmt.Fprintln(a.Out, "Profile preview:")
+	fmt.Fprint(a.Out, FormatProfileFile(profile))
+	if !strings.EqualFold(a.promptLine("Write this profile? [y/N]: "), "y") {
+		fmt.Fprintln(a.Out, "cancelled")
+		return 0
+	}
 	path, err := WriteProfileFile(configPath, profile)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -1405,6 +1428,29 @@ func (a App) runProfileAddWizard(configPath string, cfg Config) int {
 	}
 	fmt.Fprintf(a.Out, "created profile: %s\n", path)
 	return 0
+}
+
+func profileWizardWarnings(profile Profile) []string {
+	var warnings []string
+	if profile.Host == "" && profile.AWS.ElasticIPPublicIP == "" {
+		warnings = append(warnings, "host could not be derived because Elastic IP public IP is empty")
+	}
+	if profile.IdentityFile == "" {
+		warnings = append(warnings, "identity_file is empty; SSH commands will ask for a PEM later")
+	}
+	identityKey := identityFileKeyName(profile.IdentityFile)
+	if profile.AWS.KeyName != "" && identityKey != "" && profile.AWS.KeyName != identityKey {
+		warnings = append(warnings, fmt.Sprintf("identity_file basename %q differs from AWS key_name %q", identityKey, profile.AWS.KeyName))
+	}
+	return warnings
+}
+
+func identityFileKeyName(identityFile string) string {
+	if identityFile == "" {
+		return ""
+	}
+	base := filepath.Base(identityFile)
+	return strings.TrimSuffix(base, ".pem")
 }
 
 func (a App) runCheck(cfg Config, args []string) int {

@@ -147,6 +147,8 @@ cm profile remove user-renamed-usw2 --force-local
 
 `cm profile remove` only removes the local profile file and local tunnel state. It does not release AWS resources or Elastic IPs. By default it checks AWS first and blocks removal when active Mac hosts or instances still exist. Use `--force-local` only when you intentionally want to remove a local profile without checking or closing AWS resources.
 
+`cm profile add --wizard` collects the profile interactively, derives `host` from Elastic IP and region when possible, warns when `identity_file` and AWS `key_name` look mismatched, prints a YAML preview, and only writes after confirmation.
+
 Check local installation, config, profile basics, MCP tools, and completion visibility:
 
 ```bash
@@ -155,6 +157,8 @@ cm doctor --fix
 cm dashboard
 cm dashboard --aws
 ```
+
+`cm dashboard --aws` adds read-only AWS columns including readiness and the next open decision: `ready`, `wait-ready`, `launch-on-host`, `create`, `blocked`, `config`, or `error`.
 
 Check a profile before connecting:
 
