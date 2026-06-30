@@ -78,7 +78,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.46",
+				"version": "0.1.47",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
@@ -103,6 +103,14 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	var call mcpCallParams
 	if err := json.Unmarshal(params, &call); err != nil {
 		return nil, err
+	}
+	switch call.Name {
+	case "cm_mcp_guide":
+		return mcpTextData(FormatMCPGuideText(), map[string]interface{}{
+			"preview_rule":     "confirm missing or false means preview only; confirm=true executes mutations after explicit user approval",
+			"primary_identity": "apple_email for open/create/destroy; profile for local profile, status, sync, and check tools",
+			"safe_destroy":     "destroy tools never release Elastic IP allocations",
+		}), nil
 	}
 	cfg, err := LoadConfig(s.ConfigPath)
 	if err != nil {
@@ -478,7 +486,7 @@ func (s MCPServer) mcpAWSStatus(ctx context.Context, cfg Config, args map[string
 	if err != nil {
 		return nil, err
 	}
-	return mcpText(FormatAWSStatus(plan, status)), nil
+	return mcpTextData(FormatAWSStatus(plan, status), mcpAWSStatusData(profile, plan, status, false)), nil
 }
 
 func (s MCPServer) mcpAWSWaitReady(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -544,39 +552,49 @@ func (s MCPServer) mcpAWSOpenMacByEmail(ctx context.Context, cfg Config, args ma
 	}
 	text := fmt.Sprintf("Resolved Apple account %s -> profile %s\n", email, profile.Name) + FormatAWSOpenPreviewWithCandidates(plan, status, candidates)
 	if !boolArg(args, "confirm") {
-		return mcpText(text + "Preview only. Call again with confirm=true to open or wait for this Mac."), nil
+		return mcpTextData(text+"Preview only. Call again with confirm=true to open or wait for this Mac.", mcpAWSStatusData(profile, plan, status, false)), nil
 	}
 	switch action.Kind {
 	case "ready":
-		return mcpText(text + FormatAWSReadyStatus(plan, status)), nil
+		return mcpTextData(text+FormatAWSReadyStatus(plan, status), mcpAWSStatusData(profile, plan, status, true)), nil
 	case "wait-ready":
 		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
 		if err != nil {
-			return mcpText(text + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+			data := mcpAWSStatusData(profile, plan, status, true)
+			data["error"] = err.Error()
+			return mcpTextData(text+fmt.Sprintf("AWS wait-ready failed: %v\n", err), data), nil
 		}
-		return mcpText(text + FormatAWSReadyStatus(plan, readyStatus)), nil
+		return mcpTextData(text+FormatAWSReadyStatus(plan, readyStatus), mcpAWSStatusData(profile, plan, readyStatus, true)), nil
 	case "launch-on-host":
 		_, result, err := s.App.AWSService.LaunchOnHost(ctx, profile, action.HostID)
 		if err != nil {
-			return mcpText(text + awsStoppedMessage("AWS launch-on-host", err)), nil
+			data := mcpAWSStatusData(profile, plan, status, true)
+			data["error"] = err.Error()
+			return mcpTextData(text+awsStoppedMessage("AWS launch-on-host", err), data), nil
 		}
 		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
 		if err != nil {
-			return mcpText(text + FormatAWSCreateResult(plan, result) + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+			data := mcpAWSStatusData(profile, plan, status, true)
+			data["error"] = err.Error()
+			return mcpTextData(text+FormatAWSCreateResult(plan, result)+fmt.Sprintf("AWS wait-ready failed: %v\n", err), data), nil
 		}
-		return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, readyStatus)), nil
+		return mcpTextData(text+FormatAWSCreateResult(plan, result)+FormatAWSReadyStatus(plan, readyStatus), mcpAWSStatusData(profile, plan, readyStatus, true)), nil
 	case "create":
 		_, result, err := s.App.AWSService.Create(ctx, profile)
 		if err != nil {
-			return mcpText(text + awsStoppedMessage("AWS create", err)), nil
+			data := mcpAWSStatusData(profile, plan, status, true)
+			data["error"] = err.Error()
+			return mcpTextData(text+awsStoppedMessage("AWS create", err), data), nil
 		}
 		_, readyStatus, err := s.App.AWSService.WaitReady(ctx, profile)
 		if err != nil {
-			return mcpText(text + FormatAWSCreateResult(plan, result) + fmt.Sprintf("AWS wait-ready failed: %v\n", err)), nil
+			data := mcpAWSStatusData(profile, plan, status, true)
+			data["error"] = err.Error()
+			return mcpTextData(text+FormatAWSCreateResult(plan, result)+fmt.Sprintf("AWS wait-ready failed: %v\n", err), data), nil
 		}
-		return mcpText(text + FormatAWSCreateResult(plan, result) + FormatAWSReadyStatus(plan, readyStatus)), nil
+		return mcpTextData(text+FormatAWSCreateResult(plan, result)+FormatAWSReadyStatus(plan, readyStatus), mcpAWSStatusData(profile, plan, readyStatus, true)), nil
 	default:
-		return mcpText(text + fmt.Sprintf("Cannot continue automatically: %s\n", action.Detail)), nil
+		return mcpTextData(text+fmt.Sprintf("Cannot continue automatically: %s\n", action.Detail), mcpAWSStatusData(profile, plan, status, true)), nil
 	}
 }
 
@@ -668,17 +686,19 @@ func (s MCPServer) mcpAWSDestroyMac(ctx context.Context, cfg Config, args map[st
 	}
 	text := FormatMacDestroyPreview(plan)
 	if !boolArg(args, "confirm") {
-		return mcpText(text + "Preview only. Call again with confirm=true to execute AWS destruction."), nil
+		return mcpTextData(text+"Preview only. Call again with confirm=true to execute AWS destruction.", mcpAWSDestroyData(profile, plan, false, nil)), nil
 	}
 	_, result, err := s.App.AWSService.Destroy(ctx, profile)
 	if err != nil {
 		var partial AWSDestroyPartialError
 		if errors.As(err, &partial) {
-			return mcpText(text + FormatAWSDestroyResult(plan, partial.Result) + fmt.Sprintf("AWS destroy partially completed: %v\n", err)), nil
+			data := mcpAWSDestroyData(profile, plan, true, &partial.Result)
+			data["error"] = err.Error()
+			return mcpTextData(text+FormatAWSDestroyResult(plan, partial.Result)+fmt.Sprintf("AWS destroy partially completed: %v\n", err), data), nil
 		}
 		return nil, err
 	}
-	return mcpText(text + FormatAWSDestroyResult(plan, result)), nil
+	return mcpTextData(text+FormatAWSDestroyResult(plan, result), mcpAWSDestroyData(profile, plan, true, &result)), nil
 }
 
 func (s MCPServer) mcpAWSDestroyMacByEmail(ctx context.Context, cfg Config, args map[string]interface{}) (interface{}, error) {
@@ -689,6 +709,57 @@ func (s MCPServer) mcpAWSDestroyMacByEmail(ctx context.Context, cfg Config, args
 	args = cloneArgs(args)
 	args["profile"] = profile.Name
 	return s.mcpAWSDestroyMac(ctx, cfg, args)
+}
+
+func mcpAWSStatusData(profile Profile, plan MacPlan, status AWSStatus, confirmed bool) map[string]interface{} {
+	action := AWSOpenAction(status)
+	data := map[string]interface{}{
+		"profile":         profile.Name,
+		"apple_email":     profile.AWS.AccountEmail,
+		"region":          plan.Region,
+		"decision":        action.Kind,
+		"decision_detail": action.Detail,
+		"next":            AWSOpenDecisionNextStep(profile.Name, action),
+		"confirmed":       confirmed,
+		"ready":           AWSStatusReady(status),
+		"host_count":      len(status.Hosts),
+		"instance_count":  len(status.Instances),
+		"eip_allocation":  status.ElasticIP.AllocationID,
+		"eip_public_ip":   status.ElasticIP.PublicIP,
+	}
+	if action.HostID != "" {
+		data["host_id"] = action.HostID
+	}
+	if len(status.Instances) > 0 {
+		instance := status.Instances[0]
+		data["instance_id"] = instance.InstanceID
+		data["instance_state"] = instance.State
+		data["instance_ready"] = InstanceReady(instance, status.ElasticIP)
+	}
+	return data
+}
+
+func mcpAWSDestroyData(profile Profile, plan MacPlan, confirmed bool, result *AWSDestroyResult) map[string]interface{} {
+	data := map[string]interface{}{
+		"profile":        profile.Name,
+		"apple_email":    profile.AWS.AccountEmail,
+		"region":         plan.Region,
+		"confirmed":      confirmed,
+		"eip_retained":   true,
+		"eip_allocation": plan.ElasticIPAllocationID,
+		"next":           "run cm aws destroy " + profile.Name + " again later if the Dedicated Host is still pending release",
+	}
+	if !confirmed {
+		data["next"] = "call again with confirm=true after explicit user approval"
+	}
+	if result != nil {
+		data["terminated_instances"] = append([]string(nil), result.TerminatedInstances...)
+		data["released_hosts"] = append([]string(nil), result.ReleasedHosts...)
+		data["disassociated_elastic_ip"] = result.DisassociatedElasticIP
+		data["retained_elastic_ip"] = result.RetainedElasticIP.AllocationID
+		data["deferred_hosts"] = append([]AWSDeferredHost(nil), result.DeferredHosts...)
+	}
+	return data
 }
 
 func (s MCPServer) mcpMacPlan(cfg Config, args map[string]interface{}) (MacPlan, error) {
@@ -750,6 +821,43 @@ func mcpText(text string) map[string]interface{} {
 	return map[string]interface{}{
 		"content": []map[string]string{{"type": "text", "text": text}},
 	}
+}
+
+func mcpTextData(text string, data map[string]interface{}) map[string]interface{} {
+	result := mcpText(text)
+	if data != nil {
+		result["structuredContent"] = data
+	}
+	return result
+}
+
+func FormatMCPGuideText() string {
+	return strings.Join([]string{
+		"ConnectMac MCP guide",
+		"",
+		"Core parameters:",
+		"- apple_email: Apple account email. Required for AI-driven open/create/destroy requests. Never infer it from old context.",
+		"- profile: Local cm profile name. Use for check, status, dashboard, push, pull, and profile management.",
+		"- confirm: Missing or false means preview only. Set confirm=true only after the user explicitly approves that exact operation.",
+		"- force_local: Only for cm_profile_remove. It removes local profile config without AWS safety checks.",
+		"- includes/excludes: Optional rsync filters for cm_push and cm_pull.",
+		"",
+		"Common flows:",
+		"- List accounts: cm_list_profiles or cm_find_profile_by_apple without an email to ask the user to choose.",
+		"- Open/create/start Mac: cm_aws_open_mac_by_email with apple_email, preview first, then confirm=true after approval.",
+		"- Release/close Mac: cm_aws_destroy_mac_by_email with apple_email, preview first, then confirm=true after approval. Elastic IP allocations are retained.",
+		"- Check current state: cm_dashboard with aws=true for a table, or cm_aws_status for one profile.",
+		"- Upload: cm_push with profile, local_path, remote_dir, optional includes/excludes, confirm=true only after preview.",
+		"- Download: cm_pull with profile, remote_path, optional local_dir/includes/excludes, confirm=true only after preview.",
+		"- Remove stale SSH fingerprint: cm_forget_host with profile, preview first, then confirm=true.",
+		"",
+		"Decision handling:",
+		"- ready: Mac is already usable; next usually cm start <profile>.",
+		"- wait-ready: use cm_aws_wait_ready or wait before SSH/VNC.",
+		"- launch-on-host or create: only execute with confirm=true after user approval.",
+		"- blocked/error/config: stop, report the reason, and ask for user instruction.",
+		"",
+	}, "\n")
 }
 
 func listProfilesText(cfg Config) string {
@@ -898,12 +1006,13 @@ func optionalStringArrayArg(args map[string]interface{}, name string) ([]string,
 
 func mcpTools() []map[string]interface{} {
 	return []map[string]interface{}{
-		mcpTool("cm_list_profiles", "List configured cm profiles.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
-		mcpTool("cm_find_profile_by_apple", "Find the cm profile for an explicit Apple account email. If the user did not provide an email, ask them to choose from configured accounts.", appleEmailSchema()),
-		mcpTool("cm_check_profile", "Validate a profile without connecting.", profileSchema()),
-		mcpTool("cm_profile_show", "Show a profile file by profile name or Apple account email.", profileSchema()),
-		mcpTool("cm_profile_add", "Preview or create a local profile file. Requires confirm=true to write.", profileAddSchema()),
-		mcpTool("cm_profile_remove", "Preview or remove a local profile file. Blocks when AWS Mac resources are still active unless force_local=true. Requires confirm=true to remove.", map[string]interface{}{
+		mcpTool("cm_mcp_guide", "Read this first when using cm MCP. Explains stable tool flows, main parameters, preview/confirm rules, and safe AWS Mac handling.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
+		mcpTool("cm_list_profiles", "List configured cm profiles. Use when the user has not provided an Apple account email or profile and must choose.", map[string]interface{}{"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false}),
+		mcpTool("cm_find_profile_by_apple", "Resolve apple_email to the local profile. apple_email is required for AI-driven open/create/destroy requests; never infer it from old context.", appleEmailSchema()),
+		mcpTool("cm_check_profile", "Validate profile without connecting. Main parameter: profile.", profileSchema()),
+		mcpTool("cm_profile_show", "Show a profile file by profile name or Apple account email. Main parameter: profile.", profileSchema()),
+		mcpTool("cm_profile_add", "Preview or create a local profile file. Main parameter: name. confirm=false previews; confirm=true writes after user approval.", profileAddSchema()),
+		mcpTool("cm_profile_remove", "Preview or remove a local profile file only; this does not close AWS Mac resources. Blocks when AWS resources are active unless force_local=true. confirm=true removes after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":     stringSchema(),
@@ -912,7 +1021,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
-		mcpTool("cm_profile_rename", "Preview or rename a local profile file. Requires confirm=true to write.", map[string]interface{}{
+		mcpTool("cm_profile_rename", "Preview or rename a local profile file. Main parameters: profile, new_name. confirm=true writes after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":  stringSchema(),
@@ -921,22 +1030,22 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile", "new_name"},
 		}),
-		mcpTool("cm_profile_export", "Export a profile file by profile name or Apple account email.", profileSchema()),
-		mcpTool("cm_doctor", "Run local ConnectMac diagnostics. Set fix=true to create missing local support dirs.", map[string]interface{}{
+		mcpTool("cm_profile_export", "Export a profile file by profile name or Apple account email. Main parameter: profile.", profileSchema()),
+		mcpTool("cm_doctor", "Run local ConnectMac diagnostics. Optional fix=true creates missing local support dirs.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"fix": map[string]string{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		}),
-		mcpTool("cm_dashboard", "Show local profile/tunnel dashboard. Set aws=true for read-only AWS status columns.", map[string]interface{}{
+		mcpTool("cm_dashboard", "Show local profile/tunnel dashboard. Set aws=true for read-only AWS status, decision, and next-step columns.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"aws": map[string]string{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		}),
-		mcpTool("cm_push", "Preview or execute rsync upload with optional includes/excludes filters. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_push", "Preview or execute rsync upload. Main parameters: profile, local_path, remote_dir. Optional includes/excludes. confirm=true executes after preview approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":    stringSchema(),
@@ -948,7 +1057,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile", "local_path", "remote_dir"},
 		}),
-		mcpTool("cm_pull", "Preview or execute rsync download with optional includes/excludes filters. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_pull", "Preview or execute rsync download. Main parameters: profile, remote_path, optional local_dir/includes/excludes. confirm=true executes after preview approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile":     stringSchema(),
@@ -960,7 +1069,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile", "remote_path"},
 		}),
-		mcpTool("cm_forget_host", "Preview or remove known_hosts entries for a profile host. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_forget_host", "Preview or remove known_hosts entries for a profile host after rebuild/IP reuse. Main parameter: profile. confirm=true executes after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -968,11 +1077,11 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
-		mcpTool("cm_aws_plan", "Preview AWS Mac Dedicated Host, EC2, and EIP operations for a profile.", profileSchema()),
-		mcpTool("cm_aws_capacity", "Read-only AWS Mac capacity report: Dedicated Host quotas, active host usage, remaining capacity, and offering AZs for a profile.", profileSchema()),
-		mcpTool("cm_aws_status", "Describe managed AWS Mac Dedicated Hosts, EC2 instances, Elastic IP association, and EC2 status checks for a profile.", profileSchema()),
-		mcpTool("cm_aws_wait_ready", "Wait until the managed AWS Mac EC2 instance is running, EIP-bound, and system, instance, and EBS status checks are ok.", profileSchema()),
-		mcpTool("cm_aws_create_mac", "Preview or execute AWS Mac creation. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_aws_plan", "Read-only local plan for AWS Mac Dedicated Host, EC2, and EIP operations. Main parameter: profile.", profileSchema()),
+		mcpTool("cm_aws_capacity", "Read-only AWS Mac capacity report: Dedicated Host quotas, active host usage, remaining capacity, and offering AZs. Main parameter: profile.", profileSchema()),
+		mcpTool("cm_aws_status", "Read-only status for one profile. Returns text plus structuredContent with profile, apple_email, decision, next, ready, EIP, hosts, and instances.", profileSchema()),
+		mcpTool("cm_aws_wait_ready", "Wait until the managed AWS Mac EC2 instance is running, EIP-bound, and AWS status checks are ok. Use only after a confirmed create/open/launch.", profileSchema()),
+		mcpTool("cm_aws_create_mac", "Preview or execute AWS Mac creation by profile. Prefer cm_aws_open_mac_by_email for user requests. confirm=true mutates AWS after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -980,7 +1089,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
-		mcpTool("cm_aws_open_mac_by_email", "Preview or open an AWS Mac for an explicit Apple account email. Never infer the email from context; ask the user if missing. Requires confirm=true to mutate AWS.", map[string]interface{}{
+		mcpTool("cm_aws_open_mac_by_email", "Use for 'open/create/start Mac' requests. Requires explicit apple_email. confirm=false previews decision; confirm=true may create/launch/wait after user approval. Returns structuredContent.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"apple_email": stringSchema(),
@@ -988,7 +1097,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"apple_email"},
 		}),
-		mcpTool("cm_aws_adopt_mac", "Preview or tag existing AWS Mac resources as cm-managed. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_aws_adopt_mac", "Preview or tag existing AWS Mac resources as cm-managed. Main parameter: profile. confirm=true mutates tags after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -996,7 +1105,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
-		mcpTool("cm_aws_adopt_host", "Preview or tag an existing empty AWS Mac Dedicated Host as cm-managed. Requires confirm=true to mutate tags.", map[string]interface{}{
+		mcpTool("cm_aws_adopt_host", "Preview or tag an existing empty AWS Mac Dedicated Host as cm-managed. Main parameters: profile, host_id. confirm=true mutates tags after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -1005,7 +1114,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile", "host_id"},
 		}),
-		mcpTool("cm_aws_launch_on_host", "Preview or launch AWS Mac EC2 on an existing Dedicated Host. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_aws_launch_on_host", "Preview or launch AWS Mac EC2 on an explicit existing Dedicated Host. Main parameters: profile, host_id. confirm=true mutates AWS after approval.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -1014,7 +1123,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile", "host_id"},
 		}),
-		mcpTool("cm_aws_destroy_mac", "Preview or execute AWS Mac destruction. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_aws_destroy_mac", "Preview or execute AWS Mac destruction by profile. Never releases Elastic IP allocations. confirm=true mutates AWS after approval. Returns structuredContent.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"profile": stringSchema(),
@@ -1022,7 +1131,7 @@ func mcpTools() []map[string]interface{} {
 			},
 			"required": []string{"profile"},
 		}),
-		mcpTool("cm_aws_destroy_mac_by_email", "Preview or release AWS Mac compute resources for an explicit Apple account email. This never releases Elastic IP allocations. Requires confirm=true to execute.", map[string]interface{}{
+		mcpTool("cm_aws_destroy_mac_by_email", "Use for 'release/close Mac' requests. Requires explicit apple_email. Never releases Elastic IP allocations. confirm=false previews; confirm=true mutates AWS after approval. Returns structuredContent.", map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"apple_email": stringSchema(),
@@ -1039,12 +1148,13 @@ func FormatMCPToolsText() string {
 		return fmt.Sprint(tools[i]["name"]) < fmt.Sprint(tools[j]["name"])
 	})
 	rows := make([][]string, 0, len(tools)+1)
-	rows = append(rows, []string{"TOOL", "DESCRIPTION", "REQUIRED"})
+	rows = append(rows, []string{"TOOL", "DESCRIPTION", "REQUIRED", "KEY PARAMS"})
 	for _, tool := range tools {
 		rows = append(rows, []string{
 			fmt.Sprint(tool["name"]),
 			fmt.Sprint(tool["description"]),
 			strings.Join(mcpToolRequiredParams(tool), ", "),
+			strings.Join(mcpToolParamNames(tool), ", "),
 		})
 	}
 	return formatRows(rows)
@@ -1068,6 +1178,17 @@ func mcpToolRequiredParams(tool map[string]interface{}) []string {
 		required = append(required, fmt.Sprint(value))
 	}
 	return required
+}
+
+func mcpToolParamNames(tool map[string]interface{}) []string {
+	schema, _ := tool["inputSchema"].(map[string]interface{})
+	properties, _ := schema["properties"].(map[string]interface{})
+	params := make([]string, 0, len(properties))
+	for key := range properties {
+		params = append(params, key)
+	}
+	sort.Strings(params)
+	return params
 }
 
 func mcpTool(name, description string, schema map[string]interface{}) map[string]interface{} {

@@ -141,7 +141,7 @@ func TestAppMCPToolsHumanReadable(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"mcp", "tools"}); code != 0 {
 		t.Fatalf("mcp tools code = %d, err = %s", code, errOut.String())
 	}
-	for _, want := range []string{"TOOL", "DESCRIPTION", "REQUIRED", "cm_list_profiles", "cm_aws_destroy_mac_by_email", "apple_email"} {
+	for _, want := range []string{"TOOL", "DESCRIPTION", "REQUIRED", "KEY PARAMS", "cm_mcp_guide", "cm_list_profiles", "cm_aws_destroy_mac_by_email", "apple_email"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("mcp tools missing %q:\n%s", want, out.String())
 		}

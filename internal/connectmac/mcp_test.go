@@ -26,6 +26,17 @@ func TestMCPListProfiles(t *testing.T) {
 	}
 }
 
+func TestMCPGuideDoesNotRequireConfig(t *testing.T) {
+	app, _, _ := mcpTestApp(t)
+	out, data := runMCPCallResult(t, app, filepath.Join(t.TempDir(), "missing.yaml"), "cm_mcp_guide", map[string]interface{}{})
+	if !strings.Contains(out, "ConnectMac MCP guide") || !strings.Contains(out, "confirm=true") {
+		t.Fatalf("output = %q", out)
+	}
+	if data["primary_identity"] == "" || data["safe_destroy"] == "" {
+		t.Fatalf("structuredContent = %#v", data)
+	}
+}
+
 func TestMCPCheckAsksForMissingIdentityFile(t *testing.T) {
 	app, config, _ := mcpTestAppWithConfig(t, strings.ReplaceAll(strings.ReplaceAll(sampleConfig,
 		"  identity_file: ~/.ssh/default.pem\n", ""),
@@ -264,11 +275,48 @@ func TestMCPAWSOpenMacByEmailPreview(t *testing.T) {
 	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
 		return &fakeAWSClient{status: AWSStatus{}}, nil
 	}
-	out := runMCPCall(t, app, config, "cm_aws_open_mac_by_email", map[string]interface{}{
+	out, data := runMCPCallResult(t, app, config, "cm_aws_open_mac_by_email", map[string]interface{}{
 		"apple_email": "user@example.com",
 	})
 	if !strings.Contains(out, "Resolved Apple account user@example.com -> profile xcode-vnc") || !strings.Contains(out, "AWS Mac open preview") {
 		t.Fatalf("output = %q", out)
+	}
+	if data["profile"] != "xcode-vnc" || data["apple_email"] != "user@example.com" || data["decision"] != "create" || data["confirmed"] != false {
+		t.Fatalf("structuredContent = %#v", data)
+	}
+	if data["next"] != "cm aws open xcode-vnc --confirm" {
+		t.Fatalf("next = %#v", data["next"])
+	}
+}
+
+func TestMCPAWSStatusReturnsStructuredDecision(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Hosts: []DedicatedHostStatus{{HostID: "h-empty", State: "available"}},
+		}}, nil
+	}
+	out, data := runMCPCallResult(t, app, config, "cm_aws_status", map[string]interface{}{
+		"profile": "xcode-vnc",
+	})
+	if !strings.Contains(out, "AWS Mac status") {
+		t.Fatalf("output = %q", out)
+	}
+	if data["decision"] != "launch-on-host" || data["host_id"] != "h-empty" {
+		t.Fatalf("structuredContent = %#v", data)
+	}
+}
+
+func TestMCPAWSDestroyByEmailPreviewReturnsStructuredSafety(t *testing.T) {
+	app, config, _ := mcpTestApp(t)
+	out, data := runMCPCallResult(t, app, config, "cm_aws_destroy_mac_by_email", map[string]interface{}{
+		"apple_email": "user@example.com",
+	})
+	if !strings.Contains(out, "Preview only") || !strings.Contains(out, "retain the Elastic IP allocation") {
+		t.Fatalf("output = %q", out)
+	}
+	if data["profile"] != "xcode-vnc" || data["apple_email"] != "user@example.com" || data["eip_retained"] != true || data["confirmed"] != false {
+		t.Fatalf("structuredContent = %#v", data)
 	}
 }
 
@@ -387,6 +435,12 @@ func mcpTestAppWithPath(t *testing.T, dir, config string) (App, string, *fakeRun
 
 func runMCPCall(t *testing.T, app App, config, tool string, args map[string]interface{}) string {
 	t.Helper()
+	text, _ := runMCPCallResult(t, app, config, tool, args)
+	return text
+}
+
+func runMCPCallResult(t *testing.T, app App, config, tool string, args map[string]interface{}) (string, map[string]interface{}) {
+	t.Helper()
 	body, err := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -408,10 +462,16 @@ func runMCPCall(t *testing.T, app App, config, tool string, args map[string]inte
 	if err := server.Serve(context.Background(), &in, &out); err != nil {
 		t.Fatal(err)
 	}
-	return decodeMCPText(t, out.Bytes())
+	return decodeMCPResult(t, out.Bytes())
 }
 
 func decodeMCPText(t *testing.T, data []byte) string {
+	t.Helper()
+	text, _ := decodeMCPResult(t, data)
+	return text
+}
+
+func decodeMCPResult(t *testing.T, data []byte) (string, map[string]interface{}) {
 	t.Helper()
 	reader := bytes.NewReader(data)
 	br := make([]byte, len(data))
@@ -429,6 +489,7 @@ func decodeMCPText(t *testing.T, data []byte) string {
 			Content []struct {
 				Text string `json:"text"`
 			} `json:"content"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
 		} `json:"result"`
 		Error *mcpError `json:"error"`
 	}
@@ -439,9 +500,9 @@ func decodeMCPText(t *testing.T, data []byte) string {
 		t.Fatalf("mcp error: %v", resp.Error.Message)
 	}
 	if len(resp.Result.Content) == 0 {
-		return ""
+		return "", resp.Result.StructuredContent
 	}
-	return resp.Result.Content[0].Text
+	return resp.Result.Content[0].Text, resp.Result.StructuredContent
 }
 
 func TestMCPMessageRoundTrip(t *testing.T) {

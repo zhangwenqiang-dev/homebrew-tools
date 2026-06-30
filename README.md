@@ -285,7 +285,9 @@ cm mcp tools
 cm mcp tools --json
 ```
 
-`cm mcp` is a stdio MCP server and waits for JSON-RPC messages on stdin. It does not print tools when run directly. Use `cm mcp tools` for a human-readable list, `cm mcp tools --json` for the MCP `tools/list` result JSON, or `scripts/cm-mcp-tools` as a small local probe.
+`cm mcp` is a stdio MCP server and waits for JSON-RPC messages on stdin. It does not print tools when run directly. Use `cm mcp tools` for a human-readable list with required and key parameters, `cm mcp tools --json` for the MCP `tools/list` result JSON, or `scripts/cm-mcp-tools` as a small local probe.
+
+For AI clients, call `cm_mcp_guide` first when the workflow is unclear. It explains stable flows, main parameters, and preview/confirm rules without requiring a valid local config. AWS status/open/destroy tools return both readable text and `structuredContent` fields such as `profile`, `apple_email`, `decision`, `next`, `confirmed`, `ready`, and `eip_retained`.
 
 Preview AWS Mac Dedicated Host automation:
 
