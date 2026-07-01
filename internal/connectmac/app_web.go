@@ -39,6 +39,45 @@ type webProfile struct {
 	Host        string `json:"host"`
 }
 
+type webAWSStatus struct {
+	Profile    string             `json:"profile"`
+	AppleEmail string             `json:"apple_email"`
+	Region     string             `json:"region"`
+	Decision   string             `json:"decision"`
+	Detail     string             `json:"detail"`
+	Next       string             `json:"next"`
+	Ready      bool               `json:"ready"`
+	Hosts      []webDedicatedHost `json:"hosts"`
+	Instances  []webInstance      `json:"instances"`
+	ElasticIP  webElasticIP       `json:"elastic_ip"`
+}
+
+type webDedicatedHost struct {
+	HostID       string `json:"host_id"`
+	State        string `json:"state"`
+	InstanceType string `json:"instance_type"`
+	ZoneID       string `json:"zone_id"`
+}
+
+type webInstance struct {
+	InstanceID     string `json:"instance_id"`
+	State          string `json:"state"`
+	InstanceType   string `json:"instance_type"`
+	HostID         string `json:"host_id"`
+	PublicIP       string `json:"public_ip"`
+	SystemStatus   string `json:"system_status"`
+	InstanceStatus string `json:"instance_status"`
+	EBSStatus      string `json:"ebs_status"`
+	Ready          bool   `json:"ready"`
+}
+
+type webElasticIP struct {
+	AllocationID  string `json:"allocation_id"`
+	AssociationID string `json:"association_id"`
+	InstanceID    string `json:"instance_id"`
+	PublicIP      string `json:"public_ip"`
+}
+
 func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	opts, err := parseWebArgs(args)
 	if err != nil {
@@ -119,6 +158,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	})
 	mux.HandleFunc("/api/profiles", a.webProfilesHandler(configPath))
 	mux.HandleFunc("/api/jobs", a.webJobsHandler())
+	mux.HandleFunc("/api/job/log", a.webJobLogHandler())
 	mux.HandleFunc("/api/aws/status", a.webAWSStatusHandler(configPath))
 	mux.HandleFunc("/api/aws/open", a.webAWSActionHandler(configPath, "open"))
 	mux.HandleFunc("/api/aws/destroy", a.webAWSActionHandler(configPath, "destroy"))
@@ -219,8 +259,31 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
-		resp := a.webRunCommand(r.Context(), configPath, []string{"aws", "status", ref})
-		writeWebJSON(w, resp)
+		cfg, err := LoadConfig(configPath)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		profile, err := resolveProfileRef(cfg, ref)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: strings.Join(validationMessages(errs), "\n")})
+			return
+		}
+		plan, status, err := a.AWSService.StatusWithOptions(r.Context(), profile, AWSStatusOptions{IncludeTerminal: false})
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("aws status failed: %v", err)})
+			return
+		}
+		writeWebJSON(w, webAPIResponse{
+			OK:     true,
+			Code:   0,
+			Output: FormatAWSStatus(plan, status),
+			Data:   webAWSStatusData(profile, plan, status),
+		})
 	}
 }
 
@@ -249,6 +312,11 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		if req.Confirm {
 			args = append(args, "--confirm")
 		}
+		if req.Confirm && req.Background {
+			resp := a.startWebAWSJob(r.Context(), configPath, command, req.Profile, req.Notify)
+			writeWebJSON(w, resp)
+			return
+		}
 		if command == "destroy" && req.Confirm {
 			args = append(args, "--background")
 			if req.Notify {
@@ -257,6 +325,31 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		}
 		resp := a.webRunCommand(r.Context(), configPath, args)
 		writeWebJSON(w, resp)
+	}
+}
+
+func (a App) webJobLogHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			writeWebError(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		job, err := a.JobManager.Load(id)
+		if err != nil {
+			writeWebError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		var out bytes.Buffer
+		if err := copyTail(&out, job.Log, 128*1024); err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"job": job}, Output: out.String()})
 	}
 }
 
@@ -269,6 +362,110 @@ func (a App) webRunCommand(ctx context.Context, configPath string, args []string
 	code := sub.Run(ctx, append(args, "--config", configPath))
 	resp := webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
 	return resp
+}
+
+func (a App) startWebAWSJob(ctx context.Context, configPath, command, profileRef string, notify bool) webAPIResponse {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	profile, err := resolveProfileRef(cfg, profileRef)
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 2, Error: err.Error()}
+	}
+	if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
+		return webAPIResponse{OK: false, Code: 1, Error: strings.Join(validationMessages(errs), "\n")}
+	}
+	plan, err := a.AWSService.Plan(profile)
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	jobType := "aws-" + command
+	job, err := a.JobManager.Create(Job{
+		Type:       jobType,
+		Profile:    profile.Name,
+		AppleEmail: plan.AccountEmail,
+		Command:    []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath},
+		Notify:     notify,
+	})
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	job, err = a.JobManager.StartRunner(ctx, job)
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "Started background AWS %s job: %s\n", command, job.ID)
+	fmt.Fprintf(&out, "Profile: %s\n", profile.Name)
+	if plan.AccountEmail != "" {
+		fmt.Fprintf(&out, "Apple account: %s\n", plan.AccountEmail)
+	}
+	fmt.Fprintf(&out, "PID: %d\n", job.PID)
+	fmt.Fprintf(&out, "Log: %s\n", job.Log)
+	if command == "destroy" {
+		fmt.Fprintln(&out, "Elastic IP allocation will be retained.")
+	}
+	return webAPIResponse{OK: true, Code: 0, Output: out.String(), Data: map[string]interface{}{"job": job}}
+}
+
+func webAWSStatusData(profile Profile, plan MacPlan, status AWSStatus) webAWSStatus {
+	action := AWSOpenAction(status)
+	data := webAWSStatus{
+		Profile:    profile.Name,
+		AppleEmail: profile.AWS.AccountEmail,
+		Region:     plan.Region,
+		Decision:   action.Kind,
+		Detail:     action.Detail,
+		Next:       AWSOpenDecisionNextStep(profile.Name, action),
+		Ready:      AWSStatusReady(status),
+		ElasticIP: webElasticIP{
+			AllocationID:  status.ElasticIP.AllocationID,
+			AssociationID: status.ElasticIP.AssociationID,
+			InstanceID:    status.ElasticIP.InstanceID,
+			PublicIP:      status.ElasticIP.PublicIP,
+		},
+	}
+	for _, host := range status.Hosts {
+		data.Hosts = append(data.Hosts, webDedicatedHost{
+			HostID:       host.HostID,
+			State:        host.State,
+			InstanceType: host.InstanceType,
+			ZoneID:       host.ZoneID,
+		})
+	}
+	for _, instance := range status.Instances {
+		data.Instances = append(data.Instances, webInstance{
+			InstanceID:     instance.InstanceID,
+			State:          instance.State,
+			InstanceType:   instance.InstanceType,
+			HostID:         instance.HostID,
+			PublicIP:       instance.PublicIP,
+			SystemStatus:   emptyStatus(instance.SystemStatus),
+			InstanceStatus: emptyStatus(instance.InstanceStatusCheck),
+			EBSStatus:      emptyStatus(instance.EBSStatus),
+			Ready:          InstanceReady(instance, status.ElasticIP),
+		})
+	}
+	if data.Hosts == nil {
+		data.Hosts = []webDedicatedHost{}
+	}
+	if data.Instances == nil {
+		data.Instances = []webInstance{}
+	}
+	return data
+}
+
+func validationMessages(errs []error) []string {
+	messages := make([]string, 0, len(errs))
+	for _, err := range errs {
+		messages = append(messages, err.Error())
+	}
+	return messages
 }
 
 func writeWebJSON(w http.ResponseWriter, resp webAPIResponse) {
