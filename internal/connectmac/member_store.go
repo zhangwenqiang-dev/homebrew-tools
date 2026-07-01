@@ -1,6 +1,10 @@
 package connectmac
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,16 +26,20 @@ type MemberData struct {
 	Members     []Member             `json:"members"`
 	Assignments []AppleAccountMember `json:"assignments"`
 	Events      []OperationEvent     `json:"events"`
+	Settings    WebSettings          `json:"settings"`
 }
 
 type Member struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Email     string `json:"email"`
-	Role      string `json:"role"`
-	Enabled   bool   `json:"enabled"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Email        string `json:"email"`
+	Username     string `json:"username,omitempty"`
+	Role         string `json:"role"`
+	Enabled      bool   `json:"enabled"`
+	PasswordHash string `json:"password_hash,omitempty"`
+	PasswordSalt string `json:"password_salt,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 type AppleAccountMember struct {
@@ -53,8 +61,28 @@ type OperationEvent struct {
 	CreatedAt  string `json:"created_at"`
 }
 
+type WebSettings struct {
+	AuthSecret          string `json:"auth_secret,omitempty"`
+	DefaultOwnerEmail   string `json:"default_owner_email,omitempty"`
+	DefaultStatusFilter string `json:"default_status_filter,omitempty"`
+	BackgroundConfirm   bool   `json:"background_confirm"`
+	ShowReleased        bool   `json:"show_released"`
+}
+
+type PublicMember struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Email       string `json:"email"`
+	Username    string `json:"username,omitempty"`
+	Role        string `json:"role"`
+	Enabled     bool   `json:"enabled"`
+	HasPassword bool   `json:"has_password"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
 type MemberWithAssignments struct {
-	Member
+	PublicMember
 	Assignments []AppleAccountMember `json:"assignments"`
 }
 
@@ -81,7 +109,7 @@ func (s MemberStore) Load() (MemberData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, Events: []OperationEvent{}}, nil
+			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
 		}
 		return MemberData{}, err
 	}
@@ -121,7 +149,7 @@ func (s MemberStore) ListMembers() ([]MemberWithAssignments, error) {
 	}
 	out := make([]MemberWithAssignments, 0, len(db.Members))
 	for _, member := range db.Members {
-		item := MemberWithAssignments{Member: member}
+		item := MemberWithAssignments{PublicMember: publicMember(member)}
 		for _, assignment := range db.Assignments {
 			if assignment.MemberID == member.ID {
 				item.Assignments = append(item.Assignments, assignment)
@@ -163,6 +191,7 @@ func (s MemberStore) AddMember(name, email, role string) (Member, error) {
 		ID:        "member-" + slugPart(email),
 		Name:      name,
 		Email:     email,
+		Username:  email,
 		Role:      role,
 		Enabled:   true,
 		CreatedAt: now,
@@ -170,6 +199,127 @@ func (s MemberStore) AddMember(name, email, role string) (Member, error) {
 	}
 	db.Members = append(db.Members, member)
 	return member, s.Save(db)
+}
+
+func (s MemberStore) AddMemberWithPassword(name, email, role, password string) (Member, error) {
+	member, err := s.AddMember(name, email, role)
+	if err != nil {
+		return Member{}, err
+	}
+	if err := s.SetMemberPassword(member.Email, password); err != nil {
+		return Member{}, err
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	member, _ = findMemberByEmailOrUsername(db, member.Email)
+	return member, nil
+}
+
+func (s MemberStore) SetupAdmin(name, email, password string) (Member, error) {
+	name = strings.TrimSpace(name)
+	email = normalizeEmail(email)
+	if name == "" {
+		return Member{}, errors.New("name is required")
+	}
+	if email == "" || !strings.Contains(email, "@") {
+		return Member{}, errors.New("valid email is required")
+	}
+	if len(password) < 8 {
+		return Member{}, errors.New("password must be at least 8 characters")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	now := s.normalize().Now().Format(time.RFC3339)
+	member, ok := findMemberByEmailOrUsername(db, email)
+	if ok {
+		idx, _ := findMemberIndexByEmailOrUsername(db, email)
+		db.Members[idx].Name = name
+		db.Members[idx].Email = email
+		db.Members[idx].Username = email
+		db.Members[idx].Role = "admin"
+		db.Members[idx].Enabled = true
+		db.Members[idx].UpdatedAt = now
+		member = db.Members[idx]
+	} else {
+		member = Member{
+			ID:        "member-" + slugPart(email),
+			Name:      name,
+			Email:     email,
+			Username:  email,
+			Role:      "admin",
+			Enabled:   true,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		db.Members = append(db.Members, member)
+	}
+	if err := s.Save(db); err != nil {
+		return Member{}, err
+	}
+	if err := s.SetMemberPassword(email, password); err != nil {
+		return Member{}, err
+	}
+	db, err = s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	member, _ = findMemberByEmailOrUsername(db, email)
+	return member, nil
+}
+
+func (s MemberStore) SetMemberPassword(emailOrUsername, password string) error {
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return err
+	}
+	idx, ok := findMemberIndexByEmailOrUsername(db, emailOrUsername)
+	if !ok {
+		return fmt.Errorf("member %s not found", emailOrUsername)
+	}
+	salt, err := randomToken(24)
+	if err != nil {
+		return err
+	}
+	db.Members[idx].PasswordSalt = salt
+	db.Members[idx].PasswordHash = hashPassword(password, salt)
+	db.Members[idx].UpdatedAt = s.normalize().Now().Format(time.RFC3339)
+	return s.Save(db)
+}
+
+func (s MemberStore) VerifyMemberPassword(emailOrUsername, password string) (Member, bool, error) {
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, false, err
+	}
+	member, ok := findMemberByEmailOrUsername(db, emailOrUsername)
+	if !ok || !member.Enabled || member.PasswordHash == "" || member.PasswordSalt == "" {
+		return Member{}, false, nil
+	}
+	got := hashPassword(password, member.PasswordSalt)
+	if subtle.ConstantTimeCompare([]byte(got), []byte(member.PasswordHash)) != 1 {
+		return Member{}, false, nil
+	}
+	return member, true, nil
+}
+
+func (s MemberStore) HasPasswordMembers() (bool, error) {
+	db, err := s.Load()
+	if err != nil {
+		return false, err
+	}
+	for _, member := range db.Members {
+		if member.Enabled && member.PasswordHash != "" && member.PasswordSalt != "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s MemberStore) SetMemberEnabled(email string, enabled bool) (Member, error) {
@@ -247,22 +397,63 @@ func (s MemberStore) UnassignMember(appleEmail, memberEmail string) error {
 	return s.Save(db)
 }
 
-func (s MemberStore) MembersForApple(appleEmail string) ([]Member, error) {
+func (s MemberStore) MembersForApple(appleEmail string) ([]PublicMember, error) {
 	appleEmail = normalizeEmail(appleEmail)
 	db, err := s.Load()
 	if err != nil {
 		return nil, err
 	}
-	var members []Member
+	var members []PublicMember
 	for _, assignment := range db.Assignments {
 		if !strings.EqualFold(assignment.AppleEmail, appleEmail) {
 			continue
 		}
 		if member, ok := findMemberByID(db, assignment.MemberID); ok {
-			members = append(members, member)
+			members = append(members, publicMember(member))
 		}
 	}
 	return members, nil
+}
+
+func (s MemberStore) WebSettings() (WebSettings, error) {
+	db, err := s.Load()
+	if err != nil {
+		return WebSettings{}, err
+	}
+	return publicWebSettings(db.Settings), nil
+}
+
+func (s MemberStore) UpdateWebSettings(update WebSettings) (WebSettings, error) {
+	db, err := s.Load()
+	if err != nil {
+		return WebSettings{}, err
+	}
+	db.Settings.DefaultOwnerEmail = normalizeEmail(update.DefaultOwnerEmail)
+	db.Settings.DefaultStatusFilter = strings.TrimSpace(update.DefaultStatusFilter)
+	db.Settings.BackgroundConfirm = update.BackgroundConfirm
+	db.Settings.ShowReleased = update.ShowReleased
+	if err := s.Save(db); err != nil {
+		return WebSettings{}, err
+	}
+	return publicWebSettings(db.Settings), nil
+}
+
+func (s MemberStore) EnsureAuthSecret() (string, error) {
+	db, err := s.Load()
+	if err != nil {
+		return "", err
+	}
+	if db.Settings.AuthSecret == "" {
+		secret, err := randomToken(32)
+		if err != nil {
+			return "", err
+		}
+		db.Settings.AuthSecret = secret
+		if err := s.Save(db); err != nil {
+			return "", err
+		}
+	}
+	return db.Settings.AuthSecret, nil
 }
 
 func (s MemberStore) RecordEvent(event OperationEvent) error {
@@ -314,6 +505,14 @@ func normalizeMemberData(db *MemberData) {
 	if db.Events == nil {
 		db.Events = []OperationEvent{}
 	}
+	if db.Settings.AuthSecret == "" {
+		db.Settings.BackgroundConfirm = true
+	}
+	for i := range db.Members {
+		if db.Members[i].Username == "" {
+			db.Members[i].Username = db.Members[i].Email
+		}
+	}
 }
 
 func normalizeEmail(email string) string {
@@ -338,6 +537,24 @@ func findMemberByEmail(db MemberData, email string) (Member, bool) {
 	return db.Members[idx], true
 }
 
+func findMemberByEmailOrUsername(db MemberData, emailOrUsername string) (Member, bool) {
+	idx, ok := findMemberIndexByEmailOrUsername(db, emailOrUsername)
+	if !ok {
+		return Member{}, false
+	}
+	return db.Members[idx], true
+}
+
+func findMemberIndexByEmailOrUsername(db MemberData, emailOrUsername string) (int, bool) {
+	value := normalizeEmail(emailOrUsername)
+	for i, member := range db.Members {
+		if strings.EqualFold(member.Email, value) || strings.EqualFold(member.Username, value) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
 func findMemberIndexByEmail(db MemberData, email string) (int, bool) {
 	email = normalizeEmail(email)
 	for i, member := range db.Members {
@@ -355,4 +572,44 @@ func findMemberByID(db MemberData, id string) (Member, bool) {
 		}
 	}
 	return Member{}, false
+}
+
+func publicMember(member Member) PublicMember {
+	return PublicMember{
+		ID:          member.ID,
+		Name:        member.Name,
+		Email:       member.Email,
+		Username:    member.Username,
+		Role:        member.Role,
+		Enabled:     member.Enabled,
+		HasPassword: member.PasswordHash != "" && member.PasswordSalt != "",
+		CreatedAt:   member.CreatedAt,
+		UpdatedAt:   member.UpdatedAt,
+	}
+}
+
+func defaultWebSettings() WebSettings {
+	return WebSettings{BackgroundConfirm: true}
+}
+
+func publicWebSettings(settings WebSettings) WebSettings {
+	settings.AuthSecret = ""
+	return settings
+}
+
+func randomToken(bytesLen int) (string, error) {
+	buf := make([]byte, bytesLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func hashPassword(password, salt string) string {
+	sum := []byte(salt + "\x00" + password)
+	for i := 0; i < 120000; i++ {
+		hash := sha256.Sum256(sum)
+		sum = hash[:]
+	}
+	return base64.RawURLEncoding.EncodeToString(sum)
 }

@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -258,6 +259,7 @@ func TestAppWebProfilesAPI(t *testing.T) {
 		t.Fatalf("assign member: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/profiles", nil)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -284,6 +286,7 @@ func TestAppWebMemberAPIs(t *testing.T) {
 
 	body := strings.NewReader(`{"name":"王恒辉","email":"whh@example.com","role":"operator"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/member/add", body)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -292,6 +295,7 @@ func TestAppWebMemberAPIs(t *testing.T) {
 
 	body = strings.NewReader(`{"apple_email":"user@example.com","member_email":"whh@example.com","relation":"owner"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/member/assign", body)
+	addWebAuth(t, &app, req, "admin")
 	rec = httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -299,6 +303,7 @@ func TestAppWebMemberAPIs(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/members", nil)
+	addWebAuth(t, &app, req, "admin")
 	rec = httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -308,6 +313,52 @@ func TestAppWebMemberAPIs(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("members body missing %q:\n%s", want, rec.Body.String())
 		}
+	}
+}
+
+func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+
+	challenge := webChallengeForTest(t, app)
+	body := strings.NewReader(`{"name":"管理员","email":"admin@example.com","password":"password123","challenge_token":"` + challenge["token"] + `","challenge_answer":"` + challenge["answer"] + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", body)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(rec.Result().Cookies()) == 0 {
+		t.Fatalf("expected setup to set session cookie")
+	}
+
+	challenge = webChallengeForTest(t, app)
+	body = strings.NewReader(`{"username":"admin@example.com","password":"password123","challenge_token":"` + challenge["token"] + `","challenge_answer":"` + challenge["answer"] + `"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	rec = httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("expected login to set session cookie")
+	}
+
+	body = strings.NewReader(`{"default_owner_email":"admin@example.com","default_status_filter":"ready","background_confirm":true,"show_released":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/settings", body)
+	req.AddCookie(cookies[0])
+	rec = httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "auth_secret") {
+		t.Fatalf("settings leaked auth secret: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "admin@example.com") || !strings.Contains(rec.Body.String(), "ready") {
+		t.Fatalf("settings body = %s", rec.Body.String())
 	}
 }
 
@@ -343,6 +394,7 @@ func TestAppWebAWSStatusAPI(t *testing.T) {
 		}}, nil
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/aws/status?profile=xcode-vnc", nil)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -372,6 +424,7 @@ func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 	app := testApp(&out, &errOut, dir)
 	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"notify":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/aws/destroy", body)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -400,6 +453,7 @@ func TestAppWebOpenConfirmStartsBackgroundJobWhenRequested(t *testing.T) {
 	app := testApp(&out, &errOut, dir)
 	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/aws/open", body)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -421,6 +475,7 @@ func TestAppWebJobsAPI(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -443,6 +498,7 @@ func TestAppWebJobLogAPI(t *testing.T) {
 		t.Fatalf("write log: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/job/log?id="+job.ID, nil)
+	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
 	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1480,6 +1536,56 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		WebDir:      filepath.Join("..", "..", "web"),
 		MemberStore: NewMemberStore(filepath.Join(stateDir, "members.json")),
 	}
+}
+
+func addWebAuth(t *testing.T, app *App, req *http.Request, role string) {
+	t.Helper()
+	member, err := app.MemberStore.SetupAdmin("Test Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatalf("setup admin: %v", err)
+	}
+	if role != "" && role != "admin" {
+		member.Role = role
+		db, err := app.MemberStore.Load()
+		if err != nil {
+			t.Fatalf("load members: %v", err)
+		}
+		for i := range db.Members {
+			if db.Members[i].Email == member.Email {
+				db.Members[i].Role = role
+			}
+		}
+		if err := app.MemberStore.Save(db); err != nil {
+			t.Fatalf("save members: %v", err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	if err := app.setWebSession(rec, member); err != nil {
+		t.Fatalf("set web session: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("expected auth cookie")
+	}
+	req.AddCookie(cookies[0])
+}
+
+func webChallengeForTest(t *testing.T, app App) map[string]string {
+	t.Helper()
+	challenge, err := app.newWebChallenge()
+	if err != nil {
+		t.Fatalf("new challenge: %v", err)
+	}
+	token := challenge["token"]
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 4 {
+		t.Fatalf("challenge parts = %#v", parts)
+	}
+	return map[string]string{"token": token, "answer": parts[1]}
 }
 
 func writeConfig(t *testing.T, dir, key string) string {

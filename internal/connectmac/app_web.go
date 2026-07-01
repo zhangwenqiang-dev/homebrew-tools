@@ -31,13 +31,13 @@ type webAPIResponse struct {
 }
 
 type webProfile struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	AppleEmail  string   `json:"apple_email"`
-	Region      string   `json:"region"`
-	AWSProfile  string   `json:"aws_profile"`
-	Host        string   `json:"host"`
-	Owners      []Member `json:"owners"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	AppleEmail  string         `json:"apple_email"`
+	Region      string         `json:"region"`
+	AWSProfile  string         `json:"aws_profile"`
+	Host        string         `json:"host"`
+	Owners      []PublicMember `json:"owners"`
 }
 
 type webAWSStatus struct {
@@ -157,19 +157,25 @@ func (a App) newWebHandler(configPath string) http.Handler {
 		}
 		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 	})
-	mux.HandleFunc("/api/profiles", a.webProfilesHandler(configPath))
-	mux.HandleFunc("/api/members", a.webMembersHandler())
-	mux.HandleFunc("/api/member/add", a.webMemberAddHandler())
-	mux.HandleFunc("/api/member/enable", a.webMemberEnabledHandler(true))
-	mux.HandleFunc("/api/member/disable", a.webMemberEnabledHandler(false))
-	mux.HandleFunc("/api/member/assign", a.webMemberAssignHandler(false))
-	mux.HandleFunc("/api/member/unassign", a.webMemberAssignHandler(true))
-	mux.HandleFunc("/api/events", a.webEventsHandler())
-	mux.HandleFunc("/api/jobs", a.webJobsHandler())
-	mux.HandleFunc("/api/job/log", a.webJobLogHandler())
-	mux.HandleFunc("/api/aws/status", a.webAWSStatusHandler(configPath))
-	mux.HandleFunc("/api/aws/open", a.webAWSActionHandler(configPath, "open"))
-	mux.HandleFunc("/api/aws/destroy", a.webAWSActionHandler(configPath, "destroy"))
+	mux.HandleFunc("/api/auth/me", a.webAuthMeHandler())
+	mux.HandleFunc("/api/auth/challenge", a.webAuthChallengeHandler())
+	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler())
+	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler())
+	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
+	mux.HandleFunc("/api/settings", a.requireWebRole(a.webSettingsHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/members", a.requireWebRole(a.webMembersHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/member/add", a.requireWebRole(a.webMemberAddHandler(), "admin"))
+	mux.HandleFunc("/api/member/enable", a.requireWebRole(a.webMemberEnabledHandler(true), "admin"))
+	mux.HandleFunc("/api/member/disable", a.requireWebRole(a.webMemberEnabledHandler(false), "admin"))
+	mux.HandleFunc("/api/member/assign", a.requireWebRole(a.webMemberAssignHandler(false), "admin"))
+	mux.HandleFunc("/api/member/unassign", a.requireWebRole(a.webMemberAssignHandler(true), "admin"))
+	mux.HandleFunc("/api/events", a.requireWebRole(a.webEventsHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/jobs", a.requireWebRole(a.webJobsHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/job/log", a.requireWebRole(a.webJobLogHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/aws/status", a.requireWebRole(a.webAWSStatusHandler(configPath), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/aws/open", a.requireWebRole(a.webAWSActionHandler(configPath, "open"), "operator", "admin"))
+	mux.HandleFunc("/api/aws/destroy", a.requireWebRole(a.webAWSActionHandler(configPath, "destroy"), "operator", "admin"))
 	return mux
 }
 
@@ -259,15 +265,22 @@ func (a App) webMemberAddHandler() http.HandlerFunc {
 			return
 		}
 		var req struct {
-			Name  string `json:"name"`
-			Email string `json:"email"`
-			Role  string `json:"role"`
+			Name     string `json:"name"`
+			Email    string `json:"email"`
+			Role     string `json:"role"`
+			Password string `json:"password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
-		member, err := a.MemberStore.AddMember(req.Name, req.Email, req.Role)
+		var member Member
+		var err error
+		if strings.TrimSpace(req.Password) != "" {
+			member, err = a.MemberStore.AddMemberWithPassword(req.Name, req.Email, req.Role, req.Password)
+		} else {
+			member, err = a.MemberStore.AddMember(req.Name, req.Email, req.Role)
+		}
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
