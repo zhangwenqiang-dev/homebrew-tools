@@ -973,6 +973,116 @@ func TestAppAWSDestroyConfirmPrintsFinalStatus(t *testing.T) {
 	}
 }
 
+func TestAppAWSDestroyBackgroundRequiresConfirm(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"aws", "destroy", "user@example.com", "--background", "--config", config}); code != 2 {
+		t.Fatalf("aws destroy background code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--background requires --confirm") {
+		t.Fatalf("err missing background confirm guidance: %s", errOut.String())
+	}
+}
+
+func TestAppAWSDestroyBackgroundCreatesJob(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"aws", "destroy", "user@example.com", "--confirm", "--background", "--notify", "--config", config}); code != 0 {
+		t.Fatalf("aws destroy background code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	text := out.String()
+	for _, want := range []string{"Started background AWS destroy job", "aws-destroy-xcode-vnc-20260701123045", "cm job status", "Elastic IP allocation will be retained"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("background output missing %q:\n%s", want, text)
+		}
+	}
+	job, err := app.JobManager.Load("aws-destroy-xcode-vnc-20260701123045")
+	if err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if job.Profile != "xcode-vnc" || job.AppleEmail != "user@example.com" || !job.Notify {
+		t.Fatalf("job = %#v", job)
+	}
+	joined := strings.Join(job.Command, " ")
+	if !strings.Contains(joined, "aws destroy xcode-vnc --confirm --config "+config) {
+		t.Fatalf("job command = %#v", job.Command)
+	}
+}
+
+func TestAppJobListStatusAndLog(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	job, err := app.JobManager.Create(Job{
+		Type:       "aws-destroy",
+		Profile:    "xcode-vnc",
+		AppleEmail: "user@example.com",
+		Status:     JobStatusSuccess,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := os.WriteFile(job.Log, []byte("hello job\n"), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if code := app.Run(context.Background(), []string{"job", "list"}); code != 0 {
+		t.Fatalf("job list code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "ID") || !strings.Contains(out.String(), "xcode-vnc") || !strings.Contains(out.String(), "success") {
+		t.Fatalf("job list output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"job", "status", job.ID}); code != 0 {
+		t.Fatalf("job status code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Apple account: user@example.com") || !strings.Contains(out.String(), "Status: success") {
+		t.Fatalf("job status output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"job", "log", job.ID}); code != 0 {
+		t.Fatalf("job log code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "hello job") {
+		t.Fatalf("job log output = %s", out.String())
+	}
+}
+
+func TestJobManagerRunJobMarksDeferred(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewJobManager(filepath.Join(dir, "jobs"))
+	manager.Now = func() time.Time {
+		return time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	}
+	manager.Notify = func(title, message string) error { return nil }
+	job, err := manager.Create(Job{
+		Type:    "aws-destroy",
+		Profile: "xcode-vnc",
+		Command: []string{"/bin/echo", "Need rerun: true"},
+		Notify:  true,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	job, err = manager.RunJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	if job.Status != JobStatusDeferred {
+		t.Fatalf("status = %s", job.Status)
+	}
+	if job.ExitCode == nil || *job.ExitCode != 0 {
+		t.Fatalf("exit code = %#v", job.ExitCode)
+	}
+}
+
 func TestAppAWSRunningListsRunningInstances(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -1120,6 +1230,15 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		StateManager: StateManager{
 			Dir:       filepath.Join(stateDir, "state"),
 			IsRunning: func(pid int) bool { return pid == 55 },
+		},
+		JobManager: JobManager{
+			Dir:        filepath.Join(stateDir, "jobs"),
+			Executable: "/bin/echo",
+			Now: func() time.Time {
+				return time.Date(2026, 7, 1, 12, 30, 45, 0, time.UTC)
+			},
+			IsRunning: func(pid int) bool { return pid > 0 },
+			Notify:    func(title, message string) error { return nil },
 		},
 		AWSService: AWSService{Now: func() time.Time {
 			return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
