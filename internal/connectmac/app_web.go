@@ -31,12 +31,13 @@ type webAPIResponse struct {
 }
 
 type webProfile struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	AppleEmail  string `json:"apple_email"`
-	Region      string `json:"region"`
-	AWSProfile  string `json:"aws_profile"`
-	Host        string `json:"host"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	AppleEmail  string   `json:"apple_email"`
+	Region      string   `json:"region"`
+	AWSProfile  string   `json:"aws_profile"`
+	Host        string   `json:"host"`
+	Owners      []Member `json:"owners"`
 }
 
 type webAWSStatus struct {
@@ -157,6 +158,13 @@ func (a App) newWebHandler(configPath string) http.Handler {
 		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 	})
 	mux.HandleFunc("/api/profiles", a.webProfilesHandler(configPath))
+	mux.HandleFunc("/api/members", a.webMembersHandler())
+	mux.HandleFunc("/api/member/add", a.webMemberAddHandler())
+	mux.HandleFunc("/api/member/enable", a.webMemberEnabledHandler(true))
+	mux.HandleFunc("/api/member/disable", a.webMemberEnabledHandler(false))
+	mux.HandleFunc("/api/member/assign", a.webMemberAssignHandler(false))
+	mux.HandleFunc("/api/member/unassign", a.webMemberAssignHandler(true))
+	mux.HandleFunc("/api/events", a.webEventsHandler())
 	mux.HandleFunc("/api/jobs", a.webJobsHandler())
 	mux.HandleFunc("/api/job/log", a.webJobLogHandler())
 	mux.HandleFunc("/api/aws/status", a.webAWSStatusHandler(configPath))
@@ -214,6 +222,7 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 		profiles := make([]webProfile, 0, len(cfg.Profiles))
 		for _, name := range sortedProfileNames(cfg) {
 			profile, _ := cfg.Profile(name)
+			owners, _ := a.MemberStore.MembersForApple(profile.AWS.AccountEmail)
 			profiles = append(profiles, webProfile{
 				Name:        profile.Name,
 				Description: profile.Description,
@@ -221,9 +230,118 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 				Region:      profile.AWS.Region,
 				AWSProfile:  profile.AWS.Profile,
 				Host:        profile.Host,
+				Owners:      owners,
 			})
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": profiles}})
+	}
+}
+
+func (a App) webMembersHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		members, err := a.MemberStore.ListMembers()
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"members": members}})
+	}
+}
+
+func (a App) webMemberAddHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Name  string `json:"name"`
+			Email string `json:"email"`
+			Role  string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		member, err := a.MemberStore.AddMember(req.Name, req.Email, req.Role)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"member": member}})
+	}
+}
+
+func (a App) webMemberEnabledHandler(enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		member, err := a.MemberStore.SetMemberEnabled(req.Email, enabled)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"member": member}})
+	}
+}
+
+func (a App) webMemberAssignHandler(unassign bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			AppleEmail  string `json:"apple_email"`
+			MemberEmail string `json:"member_email"`
+			Relation    string `json:"relation"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if unassign {
+			if err := a.MemberStore.UnassignMember(req.AppleEmail, req.MemberEmail); err != nil {
+				writeWebError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeWebJSON(w, webAPIResponse{OK: true})
+			return
+		}
+		assignment, err := a.MemberStore.AssignMember(req.AppleEmail, req.MemberEmail, req.Relation)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"assignment": assignment}})
+	}
+}
+
+func (a App) webEventsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		events, err := a.MemberStore.RecentEvents(r.URL.Query().Get("apple_email"), 50)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"events": events}})
 	}
 }
 
@@ -314,6 +432,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		}
 		if req.Confirm && req.Background {
 			resp := a.startWebAWSJob(r.Context(), configPath, command, req.Profile, req.Notify)
+			a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 			writeWebJSON(w, resp)
 			return
 		}
@@ -324,6 +443,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			}
 		}
 		resp := a.webRunCommand(r.Context(), configPath, args)
+		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
 	}
 }
@@ -411,6 +531,32 @@ func (a App) startWebAWSJob(ctx context.Context, configPath, command, profileRef
 		fmt.Fprintln(&out, "Elastic IP allocation will be retained.")
 	}
 	return webAPIResponse{OK: true, Code: 0, Output: out.String(), Data: map[string]interface{}{"job": job}}
+}
+
+func (a App) recordWebEvent(configPath, profileRef, action string, confirmed bool, resp webAPIResponse) {
+	status := "success"
+	message := strings.TrimSpace(resp.Output)
+	if !resp.OK {
+		status = "failed"
+		message = strings.TrimSpace(resp.Error)
+	}
+	if len(message) > 400 {
+		message = message[:400]
+	}
+	event := OperationEvent{
+		Action:    action,
+		Profile:   profileRef,
+		Confirmed: confirmed,
+		Status:    status,
+		Message:   message,
+	}
+	if cfg, err := LoadConfig(configPath); err == nil {
+		if profile, err := resolveProfileRef(cfg, profileRef); err == nil {
+			event.Profile = profile.Name
+			event.AppleEmail = profile.AWS.AccountEmail
+		}
+	}
+	_ = a.MemberStore.RecordEvent(event)
 }
 
 func webAWSStatusData(profile Profile, plan MacPlan, status AWSStatus) webAWSStatus {

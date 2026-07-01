@@ -4,7 +4,7 @@ import "fmt"
 
 func (a App) runCompletion(configPath string, args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands>")
+		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands|member-commands>")
 		return 2
 	}
 	switch args[0] {
@@ -28,6 +28,9 @@ func (a App) runCompletion(configPath string, args []string) int {
 		return 0
 	case "profile-commands":
 		printLines(a.Out, completionProfileCommands())
+		return 0
+	case "member-commands":
+		printLines(a.Out, completionMemberCommands())
 		return 0
 	case "profiles":
 		cfg, code := a.loadConfig(configPath)
@@ -57,6 +60,7 @@ func completionCommands() []string {
 		"completion",
 		"list",
 		"profile",
+		"member",
 		"next",
 		"check",
 		"connect",
@@ -85,6 +89,9 @@ func completionJobCommands() []string {
 }
 func completionProfileCommands() []string {
 	return []string{"accounts", "find", "show", "add", "wizard", "remove", "rename", "edit", "export", "import", "import-dir"}
+}
+func completionMemberCommands() []string {
+	return []string{"list", "add", "enable", "disable", "assign", "unassign"}
 }
 func completionAWSCommands() []string {
 	return []string{
@@ -138,12 +145,13 @@ _cm_profile_or_apple() {
 }
 
 _cm() {
-  local -a commands aws_commands mcp_commands job_commands profile_commands
+  local -a commands aws_commands mcp_commands job_commands profile_commands member_commands
   commands=("${(@f)$(command cm completion commands 2>/dev/null)}")
   aws_commands=("${(@f)$(command cm completion aws-commands 2>/dev/null)}")
   mcp_commands=("${(@f)$(command cm completion mcp-commands 2>/dev/null)}")
   job_commands=(list status log wait)
   profile_commands=("${(@f)$(command cm completion profile-commands 2>/dev/null)}")
+  member_commands=("${(@f)$(command cm completion member-commands 2>/dev/null)}")
 
   if [[ "${words[$((CURRENT - 1))]}" == "--config" ]]; then
     _files
@@ -202,6 +210,13 @@ _cm() {
         _cm_profiles
       elif [[ "${words[3]}" == "import" || "${words[3]}" == "import-dir" ]]; then
         _files
+      fi
+      ;;
+    member)
+      if (( CURRENT == 3 )); then
+        compadd -- "${member_commands[@]}"
+      else
+        _values 'member option' --name --email --role --member --relation
       fi
       ;;
     aws)
@@ -307,6 +322,13 @@ func bashCompletionScript() string {
         COMPREPLY=( $(compgen -f -- "$cur") )
       fi
       ;;
+    member)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion member-commands 2>/dev/null)" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--name --email --role --member --relation" -- "$cur") )
+      fi
+      ;;
     aws)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion aws-commands 2>/dev/null)" -- "$cur") )
@@ -355,6 +377,8 @@ complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion pro
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from pull push" -a "--include --exclude"
 complete -c cm -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from (cm completion profile-commands)" -a "(cm completion profile-commands)"
+complete -c cm -n "__fish_seen_subcommand_from member; and not __fish_seen_subcommand_from (cm completion member-commands)" -a "(cm completion member-commands)"
+complete -c cm -n "__fish_seen_subcommand_from member" -a "--name --email --role --member --relation"
 complete -c cm -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from find" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and not __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion aws-commands)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion profiles)"

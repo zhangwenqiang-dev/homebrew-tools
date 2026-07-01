@@ -37,6 +37,12 @@ func (a App) printUsage() {
   cm profile export <profile-or-apple-email> [--config <path>]
   cm profile import <profile-file.yaml> [--overwrite] [--config <path>]
   cm profile import-dir <profiles-dir> [--overwrite] [--config <path>]
+  cm member list
+  cm member add --name <name> --email <email> [--role <admin|operator|viewer>]
+  cm member enable <email>
+  cm member disable <email>
+  cm member assign <apple-email> --member <member-email> [--relation owner]
+  cm member unassign <apple-email> --member <member-email>
   cm aws plan <profile-or-apple-email> [--config <path>]
   cm aws capacity <profile-or-apple-email> [--config <path>]
   cm aws open <profile-or-apple-email> [--confirm] [--config <path>]

@@ -221,12 +221,42 @@ func TestAppCompletionProfiles(t *testing.T) {
 	}
 }
 
+func TestAppMemberCommands(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"member", "add", "--name", "王恒辉", "--email", "whh@example.com"}); code != 0 {
+		t.Fatalf("member add code = %d, err = %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"member", "assign", "apple@example.com", "--member", "whh@example.com"}); code != 0 {
+		t.Fatalf("member assign code = %d, err = %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := app.Run(context.Background(), []string{"member", "list"}); code != 0 {
+		t.Fatalf("member list code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"EMAIL", "whh@example.com", "王恒辉", "apple@example.com(owner)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("member list missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestAppWebProfilesAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("王恒辉", "whh@example.com", "operator"); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	if _, err := app.MemberStore.AssignMember("user@example.com", "whh@example.com", "owner"); err != nil {
+		t.Fatalf("assign member: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/api/profiles", nil)
 	rec := httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
@@ -240,8 +270,44 @@ func TestAppWebProfilesAPI(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("response not ok: %#v", resp)
 	}
-	if !strings.Contains(rec.Body.String(), "xcode-vnc") || !strings.Contains(rec.Body.String(), "user@example.com") {
+	if !strings.Contains(rec.Body.String(), "xcode-vnc") || !strings.Contains(rec.Body.String(), "user@example.com") || !strings.Contains(rec.Body.String(), "whh@example.com") {
 		t.Fatalf("profiles body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebMemberAPIs(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+
+	body := strings.NewReader(`{"name":"王恒辉","email":"whh@example.com","role":"operator"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/member/add", body)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body = strings.NewReader(`{"apple_email":"user@example.com","member_email":"whh@example.com","relation":"owner"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/member/assign", body)
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/members", nil)
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"whh@example.com", "user@example.com", "owner"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("members body missing %q:\n%s", want, rec.Body.String())
+		}
 	}
 }
 
@@ -316,6 +382,13 @@ func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("destroy response missing %q:\n%s", want, text)
 		}
+	}
+	events, err := app.MemberStore.RecentEvents("user@example.com", 10)
+	if err != nil {
+		t.Fatalf("recent events: %v", err)
+	}
+	if len(events) != 1 || events[0].Action != "destroy" || !events[0].Confirmed || events[0].Profile != "xcode-vnc" {
+		t.Fatalf("events = %+v", events)
 	}
 }
 
@@ -1404,7 +1477,8 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		AWSService: AWSService{Now: func() time.Time {
 			return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
 		}},
-		WebDir: filepath.Join("..", "..", "web"),
+		WebDir:      filepath.Join("..", "..", "web"),
+		MemberStore: NewMemberStore(filepath.Join(stateDir, "members.json")),
 	}
 }
 

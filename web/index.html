@@ -156,9 +156,48 @@
       overflow-wrap: anywhere;
     }
     .jobs { max-height: 220px; overflow: auto; border-top: 1px solid var(--line); }
+    .members-panel { border-top: 1px solid var(--line); }
+    .member-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    .member-form input { width: 190px; }
+    .member-form select { width: 128px; }
+    .loading-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: start center;
+      padding-top: 18px;
+      background: rgba(246, 247, 249, .48);
+      pointer-events: auto;
+    }
+    .loading-layer.hidden { display: none; }
+    .loading-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      max-width: min(92vw, 520px);
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 10px 30px rgba(16, 24, 40, .14);
+      color: var(--text);
+    }
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid #d6e2ff;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+      flex: 0 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .status-line { min-height: 22px; color: var(--muted); }
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .row-actions button { min-height: 28px; padding: 3px 8px; }
+    .inline-select { width: 100%; margin-top: 6px; }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       main { grid-template-columns: 1fr; }
@@ -169,6 +208,12 @@
   </style>
 </head>
 <body>
+  <div id="loadingLayer" class="loading-layer hidden" aria-live="polite" aria-busy="true">
+    <div class="loading-card">
+      <span class="spinner"></span>
+      <strong id="loadingTitle">处理中...</strong>
+    </div>
+  </div>
   <header>
     <h1>ConnectMac</h1>
     <div class="toolbar">
@@ -181,6 +226,9 @@
         <option value="launch-on-host">host-ready</option>
         <option value="blocked">blocked</option>
         <option value="error">error</option>
+      </select>
+      <select id="ownerFilter">
+        <option value="">全部成员</option>
       </select>
       <button id="refresh">刷新</button>
     </div>
@@ -195,14 +243,42 @@
         <thead>
           <tr>
             <th style="width: 24%">Profile</th>
-            <th style="width: 28%">Apple</th>
-            <th style="width: 14%">Region</th>
-            <th style="width: 14%">状态</th>
-            <th style="width: 20%">操作</th>
+            <th style="width: 24%">Apple</th>
+            <th style="width: 16%">负责人</th>
+            <th style="width: 12%">Region</th>
+            <th style="width: 12%">状态</th>
+            <th style="width: 12%">操作</th>
           </tr>
         </thead>
         <tbody id="profiles"></tbody>
       </table>
+      <div class="members-panel">
+        <div class="section-head">
+          <h2>Members</h2>
+          <button id="refreshMembers">刷新成员</button>
+        </div>
+        <div class="member-form">
+          <input id="memberName" placeholder="成员姓名">
+          <input id="memberEmail" placeholder="成员邮箱">
+          <select id="memberRole">
+            <option value="operator">operator</option>
+            <option value="admin">admin</option>
+            <option value="viewer">viewer</option>
+          </select>
+          <button id="addMemberBtn" class="primary">添加成员</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 30%">成员</th>
+              <th style="width: 18%">角色</th>
+              <th style="width: 34%">Apple 账号</th>
+              <th style="width: 18%">状态</th>
+            </tr>
+          </thead>
+          <tbody id="members"></tbody>
+        </table>
+      </div>
     </section>
     <section>
       <div class="section-head">
@@ -213,6 +289,7 @@
           <button id="confirmOpenBtn" class="primary">确认打开</button>
           <button id="previewDestroyBtn">预览释放</button>
           <button id="confirmDestroyBtn" class="danger">确认释放</button>
+          <button id="eventsBtn">事件</button>
         </div>
       </div>
       <div class="details">
@@ -220,6 +297,12 @@
         <div class="metric"><span>Ready</span><strong id="readyValue">-</strong></div>
         <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
         <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
+        <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
+        <div class="metric">
+          <span>分配负责人</span>
+          <select id="assignMemberSelect" class="inline-select"></select>
+          <button id="assignOwnerBtn">分配</button>
+        </div>
       </div>
       <div class="output">
         <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
@@ -246,17 +329,21 @@
     </section>
   </main>
   <script>
-    const state = { profiles: [], statuses: {}, selected: "", loadingStatus: new Set() };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", loadingStatus: new Set(), busy: false };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
       return state.profiles.find((p) => p.name === state.selected);
     }
 
-    function setBusy(busy) {
-      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "refresh"]) {
-        $(id).disabled = busy;
+    function setBusy(busy, message = "处理中...") {
+      state.busy = busy;
+      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberRole", "assignMemberSelect"]) {
+        const el = $(id);
+        if (el) el.disabled = busy;
       }
+      $("loadingTitle").textContent = message;
+      $("loadingLayer").classList.toggle("hidden", !busy);
     }
 
     function setOutput(text) {
@@ -286,18 +373,30 @@
       if (!state.selected && state.profiles.length) {
         state.selected = state.profiles[0].name;
       }
+      renderOwnerFilter();
       renderProfiles();
       renderSelected();
       refreshVisibleStatuses();
     }
 
+    async function loadMembers() {
+      const body = await api("/api/members");
+      state.members = body.data.members || [];
+      renderMembers();
+      renderOwnerFilter();
+      renderAssignMemberOptions();
+    }
+
     function filteredProfiles() {
       const q = $("search").value.trim().toLowerCase();
       const status = $("statusFilter").value;
+      const owner = $("ownerFilter").value;
       return state.profiles.filter((p) => {
-        const haystack = [p.name, p.apple_email, p.region, p.description].join(" ").toLowerCase();
+        const owners = ownerNames(p).join(" ");
+        const haystack = [p.name, p.apple_email, p.region, p.description, owners].join(" ").toLowerCase();
         const current = state.statuses[p.name]?.decision || "";
-        return (!q || haystack.includes(q)) && (!status || current === status || (status === "ready" && state.statuses[p.name]?.ready));
+        const ownerMatched = !owner || (p.owners || []).some((member) => member.email === owner);
+        return ownerMatched && (!q || haystack.includes(q)) && (!status || current === status || (status === "ready" && state.statuses[p.name]?.ready));
       });
     }
 
@@ -309,11 +408,12 @@
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
+          "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + "</td>" +
           "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button></div></td>" +
         "</tr>";
-      }).join("") : "<tr><td colspan=\"5\" class=\"muted\">没有匹配的 profile。</td></tr>";
+      }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
         button.addEventListener("click", () => {
           state.selected = button.getAttribute("data-profile");
@@ -331,18 +431,54 @@
       });
     }
 
+    function renderMembers() {
+      $("members").innerHTML = state.members.length ? state.members.map((member) => {
+        const accounts = (member.assignments || []).map((item) => item.apple_email + "(" + item.relation + ")").join(", ");
+        return "<tr>" +
+          "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
+          "<td>" + escapeHTML(member.role || "-") + "</td>" +
+          "<td>" + escapeHTML(accounts || "-") + "</td>" +
+          "<td><button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button></td>" +
+        "</tr>";
+      }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
+      document.querySelectorAll("[data-member-toggle]").forEach((button) => {
+        button.addEventListener("click", () => toggleMember(button.getAttribute("data-member-toggle"), button.getAttribute("data-enabled") === "true"));
+      });
+    }
+
+    function renderOwnerFilter() {
+      const current = $("ownerFilter").value;
+      const enabledMembers = state.members.filter((member) => member.enabled);
+      $("ownerFilter").innerHTML = "<option value=\"\">全部成员</option>" + enabledMembers.map((member) =>
+        "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
+      ).join("");
+      $("ownerFilter").value = enabledMembers.some((member) => member.email === current) ? current : "";
+    }
+
+    function renderAssignMemberOptions() {
+      const select = $("assignMemberSelect");
+      const enabledMembers = state.members.filter((member) => member.enabled);
+      select.innerHTML = enabledMembers.length ? enabledMembers.map((member) =>
+        "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
+      ).join("") : "<option value=\"\">没有可用成员</option>";
+      select.disabled = state.busy || !enabledMembers.length || !selectedProfile();
+      $("assignOwnerBtn").disabled = state.busy || !enabledMembers.length || !selectedProfile();
+    }
+
     function renderSelected() {
       const p = selectedProfile();
       $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
       const disabled = !p;
-      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn"]) {
-        $(id).disabled = disabled;
+      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn"]) {
+        $(id).disabled = disabled || state.busy;
       }
       const status = p ? state.statuses[p.name] : null;
       $("decisionValue").textContent = status ? statusLabel(status) + (status.detail ? " · " + status.detail : "") : "-";
       $("readyValue").textContent = status ? String(!!status.ready) : "-";
       $("ipValue").textContent = status?.elastic_ip?.public_ip || firstInstanceIP(status) || "-";
       $("nextValue").textContent = status?.next || "-";
+      $("ownerValue").textContent = p ? (ownerNames(p).join(", ") || "-") : "-";
+      renderAssignMemberOptions();
     }
 
     function statusBadge(status) {
@@ -399,7 +535,7 @@
       const p = selectedProfile();
       if (!p) return;
       if (confirm && !confirmAWS(command, p)) return;
-      setBusy(true);
+      setBusy(true, confirm ? "正在启动后台任务..." : "正在生成预览...");
       setStatus(confirm ? "后台任务启动中..." : "预览中...");
       try {
         const body = await api("/api/aws/" + command, {
@@ -408,7 +544,7 @@
         });
         setOutput((body.output || "") + (body.error || ""));
         setStatus(body.ok ? (confirm ? "后台任务已启动" : "预览完成") : "失败");
-        await Promise.all([loadJobs(), refreshStatus(p.name, false)]);
+        await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false)]);
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("失败");
@@ -430,12 +566,109 @@
     async function loadStatus() {
       const p = selectedProfile();
       if (!p) return;
-      setBusy(true);
+      setBusy(true, "正在读取状态...");
       setStatus("读取状态...");
       await refreshStatus(p.name, true);
       setBusy(false);
       renderProfiles();
       renderSelected();
+    }
+
+    async function addMember() {
+      const name = $("memberName").value.trim();
+      const email = $("memberEmail").value.trim();
+      const role = $("memberRole").value;
+      if (!name || !email) {
+        setStatus("成员姓名和邮箱必填");
+        return;
+      }
+      setBusy(true, "正在添加成员...");
+      try {
+        await api("/api/member/add", {
+          method: "POST",
+          body: JSON.stringify({ name, email, role })
+        });
+        $("memberName").value = "";
+        $("memberEmail").value = "";
+        await loadMembers();
+        setStatus("成员已添加");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("成员添加失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function toggleMember(email, enabled) {
+      if (!email) return;
+      setBusy(true, enabled ? "正在停用成员..." : "正在启用成员...");
+      try {
+        await api(enabled ? "/api/member/disable" : "/api/member/enable", {
+          method: "POST",
+          body: JSON.stringify({ email })
+        });
+        await loadMembers();
+        await loadProfiles();
+        setStatus(enabled ? "成员已停用" : "成员已启用");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("成员状态更新失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function assignOwner() {
+      const p = selectedProfile();
+      const memberEmail = $("assignMemberSelect").value;
+      if (!p || !p.apple_email || !memberEmail) return;
+      setBusy(true, "正在分配负责人...");
+      try {
+        await api("/api/member/assign", {
+          method: "POST",
+          body: JSON.stringify({ apple_email: p.apple_email, member_email: memberEmail, relation: "owner" })
+        });
+        await Promise.all([loadMembers(), loadProfiles()]);
+        setStatus("负责人已分配");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("负责人分配失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function loadEvents(showStatus = true) {
+      const p = selectedProfile();
+      if (!p || !p.apple_email) return;
+      if (showStatus) {
+        setBusy(true, "正在读取事件...");
+        setStatus("读取事件...");
+      }
+      try {
+        const body = await api("/api/events?apple_email=" + encodeURIComponent(p.apple_email));
+        const events = body.data.events || [];
+        if (showStatus) {
+          setOutput(events.length ? events.map((event) =>
+            "[" + formatTime(event.created_at) + "] " + event.action + " " + event.status + " confirmed=" + String(!!event.confirmed) + "\n" + (event.message || "")
+          ).join("\n\n") : "No events.");
+          setStatus("事件已加载");
+        }
+      } catch (err) {
+        if (showStatus) {
+          setOutput(String(err.message || err));
+          setStatus("事件读取失败");
+        }
+      } finally {
+        if (showStatus) {
+          setBusy(false);
+          renderSelected();
+        }
+      }
     }
 
     async function loadJobs() {
@@ -469,6 +702,7 @@
 
     async function loadJobLog(id) {
       if (!id) return;
+      setBusy(true, "正在读取任务日志...");
       setStatus("读取任务日志...");
       try {
         const body = await api("/api/job/log?id=" + encodeURIComponent(id));
@@ -477,6 +711,9 @@
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("任务日志读取失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
       }
     }
 
@@ -487,6 +724,10 @@
 
     function firstInstanceIP(status) {
       return (status?.instances || []).find((item) => item.public_ip)?.public_ip || "";
+    }
+
+    function ownerNames(profile) {
+      return (profile?.owners || []).filter((member) => member.enabled !== false).map((member) => member.name || member.email);
     }
 
     function formatTime(value) {
@@ -504,20 +745,58 @@
       return escapeHTML(value);
     }
 
-    $("refresh").addEventListener("click", async () => { await loadProfiles(); await loadJobs(); });
+    $("refresh").addEventListener("click", async () => {
+      setBusy(true, "正在刷新数据...");
+      try {
+        await loadMembers();
+        await loadProfiles();
+        await loadJobs();
+        setStatus("刷新完成");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("刷新失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    });
+    $("refreshMembers").addEventListener("click", async () => {
+      setBusy(true, "正在刷新成员...");
+      try {
+        await loadMembers();
+        setStatus("成员已刷新");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("成员刷新失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    });
+    $("addMemberBtn").addEventListener("click", addMember);
+    $("assignOwnerBtn").addEventListener("click", assignOwner);
+    $("eventsBtn").addEventListener("click", () => loadEvents(true));
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
+    $("ownerFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusBtn").addEventListener("click", loadStatus);
     $("previewOpenBtn").addEventListener("click", () => runAWS("open", false));
     $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
     $("previewDestroyBtn").addEventListener("click", () => runAWS("destroy", false));
     $("confirmDestroyBtn").addEventListener("click", () => runAWS("destroy", true));
 
-    loadProfiles().then(loadJobs).catch((err) => {
-      setOutput(String(err.message || err));
-      setStatus("加载失败");
-    });
+    setBusy(true, "正在加载数据...");
+    Promise.all([loadMembers(), loadProfiles(), loadJobs()])
+      .then(() => setStatus("加载完成"))
+      .catch((err) => {
+        setOutput(String(err.message || err));
+        setStatus("加载失败");
+      })
+      .finally(() => {
+        setBusy(false);
+        renderSelected();
+      });
   </script>
 </body>
 </html>

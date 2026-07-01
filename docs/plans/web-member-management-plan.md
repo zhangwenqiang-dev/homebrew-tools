@@ -4,7 +4,25 @@
 
 Add a lightweight local data layer for the `cm web` manager so teams can maintain members, ownership, and operator metadata without making the YAML profile files carry every operational detail.
 
-## Recommended First Version
+## Implemented First Version
+
+Use a local JSON data file under:
+
+```text
+~/.connectmac/members.json
+```
+
+This keeps the Homebrew binary dependency-light and avoids adding a CGO SQLite driver for the first release. The storage API is isolated behind `MemberStore`, so it can migrate to SQLite later without changing the CLI/Web surface.
+
+The JSON file stores the same logical records as the proposed tables:
+
+- `members`
+- `assignments`
+- `events`
+
+Events are capped to the latest 500 records to keep the file lightweight.
+
+## Future SQLite Option
 
 Use a local SQLite database under:
 
@@ -12,7 +30,7 @@ Use a local SQLite database under:
 ~/.connectmac/connectmac.db
 ```
 
-SQLite is the best first choice because it is small, local, transactional, easy to back up, and does not require a background service. It also fits Homebrew installs well: `cm` owns the schema and user data stays under `~/.connectmac`, so uninstalling Homebrew removes the app files but keeps user data.
+SQLite is still a good later upgrade if the audit log, querying, or multi-user metadata grows beyond the JSON file. It is small, local, transactional, easy to back up, and does not require a background service. It also fits Homebrew installs well: `cm` owns the schema and user data stays under `~/.connectmac`, so uninstalling Homebrew removes the app files but keeps user data.
 
 ## Data Scope
 
@@ -97,9 +115,9 @@ This is simpler and easier to edit manually, but harder to query, audit, and evo
 
 ## Implementation Order
 
-1. Add a storage abstraction and SQLite-backed implementation.
-2. Add schema migration on first use.
-3. Add `cm member ...` commands.
-4. Add Web Members tab.
-5. Add operation event logging for Web open/destroy actions.
-6. Add tests for migration, CRUD, assignment, and audit records.
+1. Add a storage abstraction and JSON-backed implementation.
+2. Add `cm member ...` commands.
+3. Add Web member management and owner filtering.
+4. Add operation event logging for Web open/destroy actions.
+5. Add tests for CRUD, assignment, Web APIs, and audit records.
+6. Later, add a JSON-to-SQLite migration only if the local data model grows enough to need it.
