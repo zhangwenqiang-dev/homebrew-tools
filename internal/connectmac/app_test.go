@@ -323,6 +323,14 @@ func TestAppWebMemberAPIs(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("operator add member status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/members", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("operator list members status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
@@ -481,7 +489,7 @@ func TestAppWebOpenConfirmStartsBackgroundJobWhenRequested(t *testing.T) {
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
-	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true}`)
+	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true,"owner_email":"admin@example.com"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/aws/open", body)
 	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
@@ -494,6 +502,60 @@ func TestAppWebOpenConfirmStartsBackgroundJobWhenRequested(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("open response missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+
+	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/aws/open", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("admin open without owner status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "owner_email is required") {
+		t.Fatalf("admin open without owner body = %s", rec.Body.String())
+	}
+
+	operator, err := app.MemberStore.AddMemberWithPassword("Operator", "operator@example.com", "operator", "password123")
+	if err != nil {
+		t.Fatalf("add operator: %v", err)
+	}
+	body = strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/aws/open", body)
+	sessionRec := httptest.NewRecorder()
+	if err := app.setWebSession(sessionRec, operator); err != nil {
+		t.Fatalf("set operator session: %v", err)
+	}
+	cookies := sessionRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("expected operator auth cookie")
+	}
+	req.AddCookie(cookies[0])
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator open status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	owners, err := app.MemberStore.MembersForApple("user@example.com")
+	if err != nil {
+		t.Fatalf("members for apple: %v", err)
+	}
+	found := false
+	for _, owner := range owners {
+		if owner.Email == "operator@example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("operator was not assigned as owner: %+v", owners)
 	}
 }
 

@@ -165,7 +165,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/auth/update-email", a.requireWebRole(a.webAuthUpdateEmailHandler(), "admin"))
 	mux.HandleFunc("/api/settings", a.requireWebRole(a.webSettingsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
-	mux.HandleFunc("/api/members", a.requireWebRole(a.webMembersHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/members", a.requireWebRole(a.webMembersHandler(), "admin"))
 	mux.HandleFunc("/api/member/add", a.requireWebRole(a.webMemberAddHandler(), "admin"))
 	mux.HandleFunc("/api/member/enable", a.requireWebRole(a.webMemberEnabledHandler(true), "admin"))
 	mux.HandleFunc("/api/member/disable", a.requireWebRole(a.webMemberEnabledHandler(false), "admin"))
@@ -430,6 +430,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			Confirm    bool   `json:"confirm"`
 			Background bool   `json:"background"`
 			Notify     bool   `json:"notify"`
+			OwnerEmail string `json:"owner_email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
@@ -439,6 +440,12 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		if req.Profile == "" {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
+		}
+		if command == "open" && req.Confirm {
+			if err := a.assignWebOwnerForOpen(r, configPath, req.Profile, req.OwnerEmail); err != nil {
+				writeWebError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		args := []string{"aws", command, req.Profile}
 		if req.Confirm {
@@ -460,6 +467,31 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
 	}
+}
+
+func (a App) assignWebOwnerForOpen(r *http.Request, configPath, profileRef, ownerEmail string) error {
+	member, ok := a.currentWebMember(r)
+	if !ok {
+		return errors.New("login required")
+	}
+	if member.Role == "admin" {
+		ownerEmail = normalizeEmail(ownerEmail)
+		if ownerEmail == "" {
+			return errors.New("owner_email is required when admin confirms open")
+		}
+	} else {
+		ownerEmail = member.Email
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	profile, err := resolveProfileRef(cfg, profileRef)
+	if err != nil {
+		return err
+	}
+	_, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner")
+	return err
 }
 
 func (a App) webJobLogHandler() http.HandlerFunc {

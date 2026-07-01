@@ -307,7 +307,7 @@
         </thead>
         <tbody id="profiles"></tbody>
       </table>
-      <div class="members-panel">
+      <div class="members-panel admin-only">
         <div class="section-head">
           <h2>Members</h2>
           <button id="refreshMembers">刷新成员</button>
@@ -611,7 +611,12 @@
     async function loadAppData() {
       setBusy(true, "正在加载数据...");
       try {
-        await Promise.all([loadMembers(), loadProfiles(), loadJobs(), loadSettings()]);
+        if (isAdmin()) {
+          await Promise.all([loadMembers(), loadProfiles(), loadJobs(), loadSettings()]);
+        } else {
+          state.members = [];
+          await Promise.all([loadProfiles(), loadJobs(), loadSettings()]);
+        }
         setStatus("加载完成");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -636,6 +641,10 @@
     }
 
     async function loadMembers() {
+      if (!isAdmin()) {
+        state.members = [];
+        return;
+      }
       const body = await api("/api/members");
       state.members = body.data.members || [];
       renderMembers();
@@ -821,13 +830,18 @@
     async function runAWS(command, confirm = false) {
       const p = selectedProfile();
       if (!p) return;
+      const ownerEmail = $("assignMemberSelect").value;
+      if (confirm && command === "open" && isAdmin() && !ownerEmail) {
+        setStatus("管理员确认打开前必须选择负责人");
+        return;
+      }
       if (confirm && !confirmAWS(command, p)) return;
       setBusy(true, confirm ? "正在启动后台任务..." : "正在生成预览...");
       setStatus(confirm ? "后台任务启动中..." : "预览中...");
       try {
         const body = await api("/api/aws/" + command, {
           method: "POST",
-          body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true })
+          body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true, owner_email: ownerEmail })
         });
         setOutput((body.output || "") + (body.error || ""));
         setStatus(body.ok ? (confirm ? "后台任务已启动" : "预览完成") : "失败");
@@ -847,7 +861,8 @@
       if (command === "destroy") {
         return window.confirm("确认释放 " + email + " 的 Mac？\n\nElastic IP 会保留。\n该操作会启动后台任务。");
       }
-      return window.confirm("确认打开 " + email + " 的 Mac？\n\n如果需要创建或等待资源，会启动后台任务。");
+      const owner = isAdmin() ? ("\n负责人：" + ($("assignMemberSelect").selectedOptions[0]?.textContent || $("assignMemberSelect").value)) : "";
+      return window.confirm("确认打开 " + email + " 的 Mac？" + owner + "\n\n如果需要创建或等待资源，会启动后台任务。");
     }
 
     async function loadStatus() {
