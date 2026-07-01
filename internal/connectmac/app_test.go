@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -216,6 +218,111 @@ func TestAppCompletionProfiles(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) != "xcode-vnc" {
 		t.Fatalf("profiles output = %q", out.String())
+	}
+}
+
+func TestAppWebProfilesAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/profiles", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp webAPIResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not ok: %#v", resp)
+	}
+	if !strings.Contains(rec.Body.String(), "xcode-vnc") || !strings.Contains(rec.Body.String(), "user@example.com") {
+		t.Fatalf("profiles body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebServesExternalIndex(t *testing.T) {
+	dir := t.TempDir()
+	webDir := filepath.Join(dir, "web")
+	writeFile(t, filepath.Join(webDir, "index.html"), "<!doctype html><title>External ConnectMac</title>")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.WebDir = webDir
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "External ConnectMac") {
+		t.Fatalf("index body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebAWSStatusAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", InstanceType: "mac2.metal", ZoneID: "usw2-az1", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "running", InstanceType: "mac2.metal", HostID: "h-1", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>", AssociationID: "eipassoc-1", InstanceID: "i-1", PublicIP: "203.0.113.10"},
+		}}, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/aws/status?profile=xcode-vnc", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "AWS Mac status for profile xcode-vnc") || !strings.Contains(rec.Body.String(), "203.0.113.10") {
+		t.Fatalf("status body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"notify":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/aws/destroy", body)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	text := rec.Body.String()
+	for _, want := range []string{"Started background AWS destroy job", "aws-destroy-xcode-vnc-20260701123045", "Elastic IP allocation will be retained"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("destroy response missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAppWebJobsAPI(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.JobManager.Create(Job{Type: "aws-destroy", Profile: "xcode-vnc", Status: JobStatusSuccess}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "aws-destroy") || !strings.Contains(rec.Body.String(), "success") {
+		t.Fatalf("jobs body = %s", rec.Body.String())
 	}
 }
 
@@ -1243,6 +1350,7 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		AWSService: AWSService{Now: func() time.Time {
 			return time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
 		}},
+		WebDir: filepath.Join("..", "..", "web"),
 	}
 }
 

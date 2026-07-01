@@ -75,6 +75,7 @@ func completionCommands() []string {
 		"doctor",
 		"dashboard",
 		"job",
+		"web",
 		"mcp",
 		"aws",
 	}
@@ -221,6 +222,9 @@ _cm() {
         compadd -- "${job_commands[@]}"
       fi
       ;;
+    web)
+      _values 'web option' --host --port --open --web-dir --config
+      ;;
     mcp)
       if (( CURRENT == 3 )); then
         compadd -- "${mcp_commands[@]}"
@@ -321,6 +325,9 @@ func bashCompletionScript() string {
         COMPREPLY=( $(compgen -W "list status log wait" -- "$cur") )
       fi
       ;;
+    web)
+      COMPREPLY=( $(compgen -W "--host --port --open --web-dir --config" -- "$cur") )
+      ;;
     mcp)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion mcp-commands 2>/dev/null)" -- "$cur") )
@@ -354,6 +361,7 @@ complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_f
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from destroy" -a "--background --notify"
 complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcommand_from list status log wait" -a "list status log wait"
+complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and not __fish_seen_subcommand_from (cm completion mcp-commands)" -a "(cm completion mcp-commands)"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and __fish_seen_subcommand_from tools" -a "--json"
 complete -c cm -n "__fish_seen_subcommand_from completion" -a "zsh bash fish"

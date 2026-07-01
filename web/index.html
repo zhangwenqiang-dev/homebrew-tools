@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ConnectMac</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #637083;
+      --line: #d9dee7;
+      --accent: #246bfe;
+      --accent-quiet: #e8f0ff;
+      --danger: #b42318;
+      --danger-quiet: #fee4e2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.15fr);
+      gap: 14px;
+      padding: 14px;
+      min-height: calc(100vh - 56px);
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .section-head {
+      min-height: 48px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    h2 { margin: 0; font-size: 14px; font-weight: 650; letter-spacing: 0; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button {
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 5px 10px;
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover { border-color: #9aa8bd; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.danger { background: var(--danger-quiet); border-color: #fecdca; color: var(--danger); }
+    button:disabled { opacity: .55; cursor: default; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: middle;
+      overflow-wrap: anywhere;
+    }
+    th {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 650;
+      background: #fbfcfe;
+    }
+    tr.selected { background: var(--accent-quiet); }
+    .name { font-weight: 650; }
+    .muted { color: var(--muted); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: var(--muted);
+      font-size: 12px;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+    .output { padding: 12px; display: grid; gap: 12px; }
+    pre {
+      min-height: 320px;
+      max-height: calc(100vh - 220px);
+      overflow: auto;
+      margin: 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #101828;
+      color: #f9fafb;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .jobs { max-height: 180px; overflow: auto; border-top: 1px solid var(--line); }
+    .status-line { min-height: 22px; color: var(--muted); }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      pre { max-height: 420px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ConnectMac</h1>
+    <div class="toolbar"><button id="refresh">刷新</button></div>
+  </header>
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>Profiles</h2>
+        <span id="profileCount" class="pill">0</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 28%">Profile</th>
+            <th style="width: 34%">Apple</th>
+            <th style="width: 18%">Region</th>
+            <th style="width: 20%">操作</th>
+          </tr>
+        </thead>
+        <tbody id="profiles"></tbody>
+      </table>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2 id="selectedTitle">未选择</h2>
+        <div class="toolbar">
+          <button id="statusBtn">状态</button>
+          <button id="previewOpenBtn">预览打开</button>
+          <button id="confirmOpenBtn" class="primary">确认打开</button>
+          <button id="previewDestroyBtn">预览释放</button>
+          <button id="confirmDestroyBtn" class="danger">确认释放</button>
+        </div>
+      </div>
+      <div class="output">
+        <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
+        <pre id="output"></pre>
+      </div>
+      <div class="section-head">
+        <h2>后台任务</h2>
+        <button id="refreshJobs">刷新任务</button>
+      </div>
+      <div class="jobs">
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Profile</th>
+              <th>Status</th>
+              <th>Started</th>
+            </tr>
+          </thead>
+          <tbody id="jobs"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    const state = { profiles: [], selected: "" };
+    const $ = (id) => document.getElementById(id);
+
+    function selectedProfile() {
+      return state.profiles.find((p) => p.name === state.selected);
+    }
+
+    function setBusy(busy) {
+      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "refresh"]) {
+        $(id).disabled = busy;
+      }
+    }
+
+    function setOutput(text) {
+      $("output").textContent = text || "";
+    }
+
+    function setStatus(text) {
+      $("statusLine").textContent = text || "";
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      const body = await res.json();
+      if (!body.ok) {
+        throw new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+      }
+      return body;
+    }
+
+    async function loadProfiles() {
+      const body = await api("/api/profiles");
+      state.profiles = body.data.profiles || [];
+      $("profileCount").textContent = String(state.profiles.length);
+      if (!state.selected && state.profiles.length) {
+        state.selected = state.profiles[0].name;
+      }
+      renderProfiles();
+      renderSelected();
+    }
+
+    function renderProfiles() {
+      $("profiles").innerHTML = state.profiles.map((p) =>
+        "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
+          "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
+          "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
+          "<td>" + escapeHTML(p.region || "-") + "</td>" +
+          "<td><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button></td>" +
+        "</tr>"
+      ).join("");
+      document.querySelectorAll("[data-profile]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.selected = button.getAttribute("data-profile");
+          renderProfiles();
+          renderSelected();
+        });
+      });
+    }
+
+    function renderSelected() {
+      const p = selectedProfile();
+      $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
+      const disabled = !p;
+      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn"]) {
+        $(id).disabled = disabled;
+      }
+    }
+
+    async function runAWS(command, confirm = false) {
+      const p = selectedProfile();
+      if (!p) return;
+      setBusy(true);
+      setStatus(confirm ? "执行中..." : "预览中...");
+      try {
+        const body = await api("/api/aws/" + command, {
+          method: "POST",
+          body: JSON.stringify({ profile: p.name, confirm, notify: true })
+        });
+        setOutput((body.output || "") + (body.error || ""));
+        setStatus(body.ok ? "完成" : "失败");
+        await loadJobs();
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function loadStatus() {
+      const p = selectedProfile();
+      if (!p) return;
+      setBusy(true);
+      setStatus("读取状态...");
+      try {
+        const body = await api("/api/aws/status?profile=" + encodeURIComponent(p.name));
+        setOutput(body.output || "");
+        setStatus("完成");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function loadJobs() {
+      const body = await api("/api/jobs");
+      const jobs = body.data.jobs || [];
+      $("jobs").innerHTML = jobs.length ? jobs.map((job) =>
+        "<tr>" +
+          "<td>" + escapeHTML(job.id || "-") + "</td>" +
+          "<td>" + escapeHTML(job.profile || "-") + "</td>" +
+          "<td>" + escapeHTML(job.status || "-") + "</td>" +
+          "<td>" + escapeHTML(job.started_at || "-") + "</td>" +
+        "</tr>"
+      ).join("") : "<tr><td colspan=\"4\" class=\"muted\">No jobs.</td></tr>";
+    }
+
+    function escapeHTML(value) {
+      return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+
+    function escapeAttr(value) {
+      return escapeHTML(value);
+    }
+
+    $("refresh").addEventListener("click", async () => { await loadProfiles(); await loadJobs(); });
+    $("refreshJobs").addEventListener("click", loadJobs);
+    $("statusBtn").addEventListener("click", loadStatus);
+    $("previewOpenBtn").addEventListener("click", () => runAWS("open", false));
+    $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
+    $("previewDestroyBtn").addEventListener("click", () => runAWS("destroy", false));
+    $("confirmDestroyBtn").addEventListener("click", () => runAWS("destroy", true));
+
+    loadProfiles().then(loadJobs).catch((err) => {
+      setOutput(String(err.message || err));
+      setStatus("加载失败");
+    });
+  </script>
+</body>
+</html>

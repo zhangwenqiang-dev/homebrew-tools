@@ -54,6 +54,7 @@ func (a App) printUsage() {
   cm job status <job-id>
   cm job log <job-id>
   cm job wait <job-id>
+  cm web [--host 127.0.0.1] [--port 8765] [--open] [--web-dir <path>] [--config <path>]
   cm mcp [--config <path>]
   cm mcp tools [--json]
   cm doctor [--fix] [--config <path>]
