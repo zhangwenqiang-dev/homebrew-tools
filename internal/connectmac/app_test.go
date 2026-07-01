@@ -314,6 +314,15 @@ func TestAppWebMemberAPIs(t *testing.T) {
 			t.Fatalf("members body missing %q:\n%s", want, rec.Body.String())
 		}
 	}
+
+	body = strings.NewReader(`{"name":"Nope","email":"nope@example.com","role":"operator"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/member/add", body)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("operator add member status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
@@ -359,6 +368,27 @@ func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "admin@example.com") || !strings.Contains(rec.Body.String(), "ready") {
 		t.Fatalf("settings body = %s", rec.Body.String())
+	}
+
+	challenge = webChallengeForTest(t, app)
+	body = strings.NewReader(`{"email":"new-admin@example.com","password":"password123","challenge_token":"` + challenge["token"] + `","challenge_answer":"` + challenge["answer"] + `"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/update-email", body)
+	req.AddCookie(cookies[0])
+	rec = httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update email status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "new-admin@example.com") || strings.Contains(rec.Body.String(), "password_hash") {
+		t.Fatalf("update email body = %s", rec.Body.String())
+	}
+	updatedCookies := rec.Result().Cookies()
+	if len(updatedCookies) == 0 {
+		t.Fatalf("expected update email to refresh session cookie")
+	}
+	_, ok, err := app.MemberStore.VerifyMemberPassword("new-admin@example.com", "password123")
+	if err != nil || !ok {
+		t.Fatalf("updated email login failed ok=%t err=%v", ok, err)
 	}
 }
 

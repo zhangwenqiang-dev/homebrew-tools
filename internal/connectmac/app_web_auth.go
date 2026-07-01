@@ -149,6 +149,53 @@ func (a App) webAuthLogoutHandler() http.HandlerFunc {
 	}
 }
 
+func (a App) webAuthUpdateEmailHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.requireWebRoleValue(r, "admin")
+		if !ok {
+			writeWebError(w, http.StatusForbidden, "admin login required")
+			return
+		}
+		var req struct {
+			Email           string `json:"email"`
+			Password        string `json:"password"`
+			ChallengeToken  string `json:"challenge_token"`
+			ChallengeAnswer string `json:"challenge_answer"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if err := a.verifyWebChallenge(req.ChallengeToken, req.ChallengeAnswer); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		_, verified, err := a.MemberStore.VerifyMemberPassword(member.Email, req.Password)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !verified {
+			writeWebError(w, http.StatusUnauthorized, "current password is incorrect")
+			return
+		}
+		updated, err := a.MemberStore.UpdateMemberEmail(member.ID, req.Email)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := a.setWebSession(w, updated); err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: webAuthMember{Authenticated: true, Member: publicMember(updated)}})
+	}
+}
+
 func (a App) webSettingsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

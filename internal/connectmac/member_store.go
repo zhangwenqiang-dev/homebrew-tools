@@ -293,6 +293,38 @@ func (s MemberStore) SetMemberPassword(emailOrUsername, password string) error {
 	return s.Save(db)
 }
 
+func (s MemberStore) UpdateMemberEmail(memberID, newEmail string) (Member, error) {
+	newEmail = normalizeEmail(newEmail)
+	if newEmail == "" || !strings.Contains(newEmail, "@") {
+		return Member{}, errors.New("valid email is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	targetIdx := -1
+	for i, member := range db.Members {
+		if member.ID == memberID {
+			targetIdx = i
+			continue
+		}
+		if strings.EqualFold(member.Email, newEmail) || strings.EqualFold(member.Username, newEmail) {
+			return Member{}, fmt.Errorf("member %s already exists", newEmail)
+		}
+	}
+	if targetIdx < 0 {
+		return Member{}, fmt.Errorf("member %s not found", memberID)
+	}
+	oldEmail := db.Members[targetIdx].Email
+	db.Members[targetIdx].Email = newEmail
+	db.Members[targetIdx].Username = newEmail
+	db.Members[targetIdx].UpdatedAt = s.normalize().Now().Format(time.RFC3339)
+	if strings.EqualFold(db.Settings.DefaultOwnerEmail, oldEmail) {
+		db.Settings.DefaultOwnerEmail = newEmail
+	}
+	return db.Members[targetIdx], s.Save(db)
+}
+
 func (s MemberStore) VerifyMemberPassword(emailOrUsername, password string) (Member, bool, error) {
 	db, err := s.Load()
 	if err != nil {

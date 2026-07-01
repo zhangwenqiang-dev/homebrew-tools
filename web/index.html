@@ -185,6 +185,8 @@
     .settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
     .settings-form label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
     .settings-form input[type="checkbox"] { width: auto; min-height: auto; }
+    .account-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+    .account-form input { width: 100%; }
     .loading-layer {
       position: fixed;
       inset: 0;
@@ -281,6 +283,7 @@
           <option value="">全部成员</option>
         </select>
         <span id="currentUser" class="pill">未登录</span>
+        <button id="accountSettingsBtn" class="admin-only">账号设置</button>
         <button id="logoutBtn">退出</button>
         <button id="refresh">刷新</button>
       </div>
@@ -309,7 +312,7 @@
           <h2>Members</h2>
           <button id="refreshMembers">刷新成员</button>
         </div>
-        <div class="member-form">
+        <div class="member-form admin-only">
           <input id="memberName" placeholder="成员姓名">
           <input id="memberEmail" placeholder="成员邮箱">
           <input id="memberPassword" type="password" placeholder="登录密码（可选）">
@@ -333,9 +336,9 @@
         </table>
         <div class="section-head">
           <h2>Settings</h2>
-          <button id="saveSettingsBtn">保存设置</button>
+          <button id="saveSettingsBtn" class="admin-only">保存设置</button>
         </div>
-        <div class="settings-form">
+        <div class="settings-form admin-only">
           <select id="settingsDefaultOwner">
             <option value="">默认负责人</option>
           </select>
@@ -350,6 +353,19 @@
           </select>
           <label><input id="settingsBackgroundConfirm" type="checkbox"> 确认操作默认后台执行</label>
           <label><input id="settingsShowReleased" type="checkbox"> 显示释放/终止资源</label>
+        </div>
+        <div id="accountSettingsPanel" class="hidden admin-only">
+          <div class="section-head">
+            <h2>Account</h2>
+            <button id="refreshAccountChallengeBtn">换一题</button>
+          </div>
+          <div class="account-form">
+            <input id="accountEmail" placeholder="新的管理员邮箱">
+            <input id="accountPassword" type="password" placeholder="当前密码">
+            <strong id="accountChallengeQuestion">校验题加载中...</strong>
+            <input id="accountChallengeAnswer" placeholder="校验答案">
+            <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
+          </div>
         </div>
       </div>
     </section>
@@ -371,7 +387,7 @@
         <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
         <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
         <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
-        <div class="metric">
+        <div class="metric admin-only">
           <span>分配负责人</span>
           <select id="assignMemberSelect" class="inline-select"></select>
           <button id="assignOwnerBtn">分配</button>
@@ -403,7 +419,7 @@
     </main>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", loadingStatus: new Set(), busy: false, auth: null, challenge: null, settings: {} };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {} };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -412,7 +428,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn"]) {
+      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -472,6 +488,18 @@
       $("appShell").classList.remove("hidden");
       const member = state.auth?.member || {};
       $("currentUser").textContent = member.email ? `${member.name || member.email} · ${member.role || "-"}` : "已登录";
+      $("accountEmail").value = member.email || "";
+      applyRoleVisibility();
+    }
+
+    function isAdmin() {
+      return state.auth?.member?.role === "admin";
+    }
+
+    function applyRoleVisibility() {
+      document.querySelectorAll(".admin-only").forEach((el) => {
+        el.classList.toggle("hidden", !isAdmin());
+      });
     }
 
     async function loadChallenge() {
@@ -479,6 +507,13 @@
       state.challenge = body.data || {};
       $("challengeQuestion").textContent = state.challenge.question || "校验题加载失败";
       $("challengeAnswer").value = "";
+    }
+
+    async function loadAccountChallenge() {
+      const body = await api("/api/auth/challenge");
+      state.accountChallenge = body.data || {};
+      $("accountChallengeQuestion").textContent = state.accountChallenge.question || "校验题加载失败";
+      $("accountChallengeAnswer").value = "";
     }
 
     async function submitAuth() {
@@ -526,6 +561,50 @@
         showAuth();
         await loadChallenge().catch(() => {});
         setBusy(false);
+      }
+    }
+
+    async function toggleAccountSettings() {
+      if (!isAdmin()) return;
+      const panel = $("accountSettingsPanel");
+      const willShow = panel.classList.contains("hidden");
+      panel.classList.toggle("hidden", !willShow);
+      if (willShow) {
+        $("accountEmail").value = state.auth?.member?.email || "";
+        $("accountPassword").value = "";
+        await loadAccountChallenge().catch((err) => {
+          setOutput(String(err.message || err));
+          setStatus("账号校验题加载失败");
+        });
+      }
+    }
+
+    async function saveAccountEmail() {
+      if (!isAdmin()) return;
+      setBusy(true, "正在保存管理员邮箱...");
+      try {
+        const body = await api("/api/auth/update-email", {
+          method: "POST",
+          body: JSON.stringify({
+            email: $("accountEmail").value.trim(),
+            password: $("accountPassword").value,
+            challenge_token: state.accountChallenge?.token || "",
+            challenge_answer: $("accountChallengeAnswer").value.trim()
+          })
+        });
+        state.auth = body.data || state.auth;
+        $("accountPassword").value = "";
+        $("accountSettingsPanel").classList.add("hidden");
+        showApp();
+        await loadAppData();
+        setStatus("管理员邮箱已更新");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("管理员邮箱更新失败");
+        await loadAccountChallenge().catch(() => {});
+      } finally {
+        setBusy(false);
+        renderSelected();
       }
     }
 
@@ -622,12 +701,13 @@
           "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
           "<td>" + escapeHTML(member.role || "-") + "</td>" +
           "<td>" + escapeHTML(accounts || (member.has_password ? "可登录" : "-")) + "</td>" +
-          "<td><button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button></td>" +
+          "<td>" + (isAdmin() ? "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" : escapeHTML(member.enabled ? "启用" : "停用")) + "</td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
       document.querySelectorAll("[data-member-toggle]").forEach((button) => {
         button.addEventListener("click", () => toggleMember(button.getAttribute("data-member-toggle"), button.getAttribute("data-enabled") === "true"));
       });
+      applyRoleVisibility();
     }
 
     function renderOwnerFilter() {
@@ -685,6 +765,7 @@
       $("nextValue").textContent = status?.next || "-";
       $("ownerValue").textContent = p ? (ownerNames(p).join(", ") || "-") : "-";
       renderAssignMemberOptions();
+      applyRoleVisibility();
     }
 
     function statusBadge(status) {
@@ -995,6 +1076,9 @@
     $("authSubmitBtn").addEventListener("click", submitAuth);
     $("refreshChallengeBtn").addEventListener("click", () => loadChallenge().catch((err) => { $("authStatus").textContent = String(err.message || err); }));
     $("logoutBtn").addEventListener("click", logout);
+    $("accountSettingsBtn").addEventListener("click", toggleAccountSettings);
+    $("refreshAccountChallengeBtn").addEventListener("click", () => loadAccountChallenge().catch((err) => { setOutput(String(err.message || err)); setStatus("账号校验题加载失败"); }));
+    $("saveAccountEmailBtn").addEventListener("click", saveAccountEmail);
     $("saveSettingsBtn").addEventListener("click", saveSettings);
     $("refreshMembers").addEventListener("click", async () => {
       setBusy(true, "正在刷新成员...");

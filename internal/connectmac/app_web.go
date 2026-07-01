@@ -162,6 +162,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler())
 	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler())
 	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
+	mux.HandleFunc("/api/auth/update-email", a.requireWebRole(a.webAuthUpdateEmailHandler(), "admin"))
 	mux.HandleFunc("/api/settings", a.requireWebRole(a.webSettingsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/members", a.requireWebRole(a.webMembersHandler(), "viewer", "operator", "admin"))
