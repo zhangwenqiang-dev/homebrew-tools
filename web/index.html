@@ -165,6 +165,28 @@
       overflow-wrap: anywhere;
     }
     .pill { background: #eef2f7; color: var(--muted); }
+    .user-button {
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 9px 4px 5px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: var(--text);
+    }
+    .avatar {
+      width: 24px;
+      height: 24px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .user-label { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .badge.ready { background: var(--ok-quiet); color: var(--ok); }
     .badge.wait { background: var(--warn-quiet); color: var(--warn); }
     .badge.stopped { background: var(--idle-quiet); color: var(--idle); }
@@ -308,7 +330,10 @@
       <h1>ConnectMac</h1>
       <div class="toolbar">
         <span id="globalStatusLine" class="app-feedback" aria-live="polite">就绪</span>
-        <span id="currentUser" class="pill">未登录</span>
+        <button id="currentUserBtn" class="user-button" title="用户页">
+          <span id="currentUserAvatar" class="avatar">-</span>
+          <span id="currentUser" class="user-label">未登录</span>
+        </button>
         <button id="accountSettingsBtn" class="admin-only">账号设置</button>
         <button id="logoutBtn">退出</button>
         <button id="refresh">刷新</button>
@@ -317,7 +342,6 @@
     <div class="app-layout">
       <nav class="sidebar" aria-label="管理页面导航">
         <button class="nav-btn active" data-view="profilesView">首页</button>
-        <button class="nav-btn" data-view="userView">用户页</button>
         <button class="nav-btn admin-only" data-view="userManagementView">用户管理</button>
       </nav>
       <main>
@@ -488,7 +512,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -549,7 +573,9 @@
       $("authScreen").classList.add("hidden");
       $("appShell").classList.remove("hidden");
       const member = state.auth?.member || {};
-      $("currentUser").textContent = member.email ? `${member.name || member.email} · ${member.role || "-"}` : "已登录";
+      const label = member.email ? `${member.name || member.email} · ${member.role || "-"}` : "已登录";
+      $("currentUser").textContent = label;
+      $("currentUserAvatar").textContent = avatarInitial(member);
       $("accountEmail").value = member.email || "";
       applyRoleVisibility();
       renderUserPage();
@@ -558,6 +584,11 @@
 
     function isAdmin() {
       return state.auth?.member?.role === "admin";
+    }
+
+    function avatarInitial(member) {
+      const value = (member?.name || member?.email || "?").trim();
+      return value ? value.slice(0, 1).toUpperCase() : "?";
     }
 
     function applyRoleVisibility() {
@@ -1192,6 +1223,7 @@
     $("refreshAccountChallengeBtn").addEventListener("click", () => loadAccountChallenge().catch((err) => { setOutput(String(err.message || err)); setStatus("账号校验题加载失败"); }));
     $("saveAccountEmailBtn").addEventListener("click", saveAccountEmail);
     $("saveSettingsBtn").addEventListener("click", saveSettings);
+    $("currentUserBtn").addEventListener("click", () => showView("userView"));
     $("refreshMembers").addEventListener("click", async () => {
       setBusy(true, "正在刷新成员...");
       try {
