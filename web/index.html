@@ -246,6 +246,18 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .status-line { min-height: 22px; color: var(--muted); }
+    .app-feedback {
+      min-height: 28px;
+      max-width: min(42vw, 520px);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfe;
+      color: var(--muted);
+      padding: 4px 9px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .row-actions button { min-height: 28px; padding: 3px 8px; }
     .inline-select { width: 100%; margin-top: 6px; }
@@ -253,6 +265,7 @@
       header { align-items: flex-start; flex-direction: column; }
       .app-layout { flex-direction: column; }
       .sidebar { width: 100%; flex-basis: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .app-feedback { max-width: 100%; width: 100%; white-space: normal; }
       input { width: min(100%, 280px); }
       .details { grid-template-columns: 1fr; }
       pre { max-height: 420px; }
@@ -294,6 +307,7 @@
     <header>
       <h1>ConnectMac</h1>
       <div class="toolbar">
+        <span id="globalStatusLine" class="app-feedback" aria-live="polite">就绪</span>
         <span id="currentUser" class="pill">未登录</span>
         <button id="accountSettingsBtn" class="admin-only">账号设置</button>
         <button id="logoutBtn">退出</button>
@@ -490,7 +504,9 @@
     }
 
     function setStatus(text) {
-      $("statusLine").textContent = text || "";
+      const value = text || "就绪";
+      $("globalStatusLine").textContent = value;
+      $("statusLine").textContent = value;
     }
 
     async function api(path, options = {}) {
