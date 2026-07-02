@@ -64,11 +64,34 @@
     }
     h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: 0; }
     main {
-      display: grid;
-      grid-template-columns: minmax(460px, 1fr) minmax(480px, 1.05fr);
+      min-width: 0;
+      flex: 1;
+    }
+    .app-layout {
+      display: flex;
+      align-items: stretch;
       gap: 12px;
       padding: 12px;
       min-height: calc(100vh - 58px);
+    }
+    .sidebar {
+      width: 176px;
+      flex: 0 0 176px;
+      display: grid;
+      align-content: start;
+      gap: 6px;
+    }
+    .nav-btn {
+      width: 100%;
+      justify-content: flex-start;
+      text-align: left;
+      background: transparent;
+    }
+    .nav-btn.active {
+      background: var(--accent-quiet);
+      border-color: #bfd2ff;
+      color: var(--accent);
+      font-weight: 650;
     }
     section {
       background: var(--panel);
@@ -77,6 +100,7 @@
       min-width: 0;
       overflow: hidden;
     }
+    .view { display: block; }
     .section-head {
       min-height: 48px;
       padding: 10px 12px;
@@ -227,7 +251,8 @@
     .inline-select { width: 100%; margin-top: 6px; }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
-      main { grid-template-columns: 1fr; }
+      .app-layout { flex-direction: column; }
+      .sidebar { width: 100%; flex-basis: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); }
       input { width: min(100%, 280px); }
       .details { grid-template-columns: 1fr; }
       pre { max-height: 420px; }
@@ -269,157 +294,181 @@
     <header>
       <h1>ConnectMac</h1>
       <div class="toolbar">
-        <input id="search" placeholder="搜索 profile / Apple / region">
-        <select id="statusFilter">
-          <option value="">全部状态</option>
-          <option value="ready">ready</option>
-          <option value="wait-ready">creating</option>
-          <option value="create">stopped</option>
-          <option value="launch-on-host">host-ready</option>
-          <option value="blocked">blocked</option>
-          <option value="error">error</option>
-        </select>
-        <select id="ownerFilter">
-          <option value="">全部成员</option>
-        </select>
         <span id="currentUser" class="pill">未登录</span>
         <button id="accountSettingsBtn" class="admin-only">账号设置</button>
         <button id="logoutBtn">退出</button>
         <button id="refresh">刷新</button>
       </div>
     </header>
-    <main>
-    <section>
-      <div class="section-head">
-        <h2>Profiles</h2>
-        <span id="profileCount" class="pill">0</span>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th style="width: 24%">Profile</th>
-            <th style="width: 24%">Apple</th>
-            <th style="width: 16%">负责人</th>
-            <th style="width: 12%">Region</th>
-            <th style="width: 12%">状态</th>
-            <th style="width: 12%">操作</th>
-          </tr>
-        </thead>
-        <tbody id="profiles"></tbody>
-      </table>
-      <div class="members-panel admin-only">
-        <div class="section-head">
-          <h2>Members</h2>
-          <button id="refreshMembers">刷新成员</button>
-        </div>
-        <div class="member-form admin-only">
-          <input id="memberName" placeholder="成员姓名">
-          <input id="memberEmail" placeholder="成员邮箱">
-          <input id="memberPassword" type="password" placeholder="登录密码（可选）">
-          <select id="memberRole">
-            <option value="operator">operator</option>
-            <option value="admin">admin</option>
-            <option value="viewer">viewer</option>
-          </select>
-          <button id="addMemberBtn" class="primary">添加成员</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th style="width: 30%">成员</th>
-              <th style="width: 18%">角色</th>
-              <th style="width: 34%">Apple 账号</th>
-              <th style="width: 18%">状态</th>
-            </tr>
-          </thead>
-          <tbody id="members"></tbody>
-        </table>
-        <div class="section-head">
-          <h2>Settings</h2>
-          <button id="saveSettingsBtn" class="admin-only">保存设置</button>
-        </div>
-        <div class="settings-form admin-only">
-          <select id="settingsDefaultOwner">
-            <option value="">默认负责人</option>
-          </select>
-          <select id="settingsStatusFilter">
-            <option value="">默认状态筛选</option>
-            <option value="ready">ready</option>
-            <option value="wait-ready">creating</option>
-            <option value="create">stopped</option>
-            <option value="launch-on-host">host-ready</option>
-            <option value="blocked">blocked</option>
-            <option value="error">error</option>
-          </select>
-          <label><input id="settingsBackgroundConfirm" type="checkbox"> 确认操作默认后台执行</label>
-          <label><input id="settingsShowReleased" type="checkbox"> 显示释放/终止资源</label>
-        </div>
-        <div id="accountSettingsPanel" class="hidden admin-only">
+    <div class="app-layout">
+      <nav class="sidebar" aria-label="管理页面导航">
+        <button class="nav-btn active" data-view="profilesView">Profile 首页</button>
+        <button class="nav-btn" data-view="operationsView">操作页</button>
+        <button class="nav-btn" data-view="userView">用户页</button>
+        <button class="nav-btn admin-only" data-view="userManagementView">用户管理</button>
+      </nav>
+      <main>
+        <section id="profilesView" class="view">
           <div class="section-head">
-            <h2>Account</h2>
-            <button id="refreshAccountChallengeBtn">换一题</button>
+            <h2>Profiles</h2>
+            <div class="toolbar">
+              <input id="search" placeholder="搜索 profile / Apple / region">
+              <select id="statusFilter">
+                <option value="">全部状态</option>
+                <option value="ready">ready</option>
+                <option value="wait-ready">creating</option>
+                <option value="create">stopped</option>
+                <option value="launch-on-host">host-ready</option>
+                <option value="blocked">blocked</option>
+                <option value="error">error</option>
+              </select>
+              <select id="ownerFilter">
+                <option value="">全部成员</option>
+              </select>
+              <span id="profileCount" class="pill">0</span>
+            </div>
           </div>
-          <div class="account-form">
-            <input id="accountEmail" placeholder="新的管理员邮箱">
-            <input id="accountPassword" type="password" placeholder="当前密码">
-            <strong id="accountChallengeQuestion">校验题加载中...</strong>
-            <input id="accountChallengeAnswer" placeholder="校验答案">
-            <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 24%">Profile</th>
+                <th style="width: 24%">Apple</th>
+                <th style="width: 16%">负责人</th>
+                <th style="width: 12%">Region</th>
+                <th style="width: 12%">状态</th>
+                <th style="width: 12%">操作</th>
+              </tr>
+            </thead>
+            <tbody id="profiles"></tbody>
+          </table>
+        </section>
+
+        <section id="operationsView" class="view hidden">
+          <div class="section-head">
+            <h2 id="selectedTitle">未选择</h2>
+            <div class="toolbar">
+              <button id="statusBtn">状态</button>
+              <button id="previewOpenBtn">预览打开</button>
+              <button id="confirmOpenBtn" class="primary">确认打开</button>
+              <button id="previewDestroyBtn">预览释放</button>
+              <button id="confirmDestroyBtn" class="danger">确认释放</button>
+              <button id="eventsBtn">事件</button>
+            </div>
           </div>
-        </div>
-      </div>
-    </section>
-    <section>
-      <div class="section-head">
-        <h2 id="selectedTitle">未选择</h2>
-        <div class="toolbar">
-          <button id="statusBtn">状态</button>
-          <button id="previewOpenBtn">预览打开</button>
-          <button id="confirmOpenBtn" class="primary">确认打开</button>
-          <button id="previewDestroyBtn">预览释放</button>
-          <button id="confirmDestroyBtn" class="danger">确认释放</button>
-          <button id="eventsBtn">事件</button>
-        </div>
-      </div>
-      <div class="details">
-        <div class="metric"><span>Decision</span><strong id="decisionValue">-</strong></div>
-        <div class="metric"><span>Ready</span><strong id="readyValue">-</strong></div>
-        <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
-        <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
-        <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
-        <div class="metric admin-only">
-          <span>分配负责人</span>
-          <select id="assignMemberSelect" class="inline-select"></select>
-          <button id="assignOwnerBtn">分配</button>
-        </div>
-      </div>
-      <div class="output">
-        <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
-        <pre id="output"></pre>
-      </div>
-      <div class="section-head">
-        <h2>后台任务</h2>
-        <button id="refreshJobs">刷新任务</button>
-      </div>
-      <div class="jobs">
-        <table>
-          <thead>
-            <tr>
-              <th style="width: 34%">Job</th>
-              <th style="width: 22%">Profile</th>
-              <th style="width: 16%">Status</th>
-              <th style="width: 18%">Started</th>
-              <th style="width: 10%">日志</th>
-            </tr>
-          </thead>
-          <tbody id="jobs"></tbody>
-        </table>
-      </div>
-    </section>
-    </main>
+          <div class="details">
+            <div class="metric"><span>Decision</span><strong id="decisionValue">-</strong></div>
+            <div class="metric"><span>Ready</span><strong id="readyValue">-</strong></div>
+            <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
+            <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
+            <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
+            <div class="metric admin-only">
+              <span>分配负责人</span>
+              <select id="assignMemberSelect" class="inline-select"></select>
+              <button id="assignOwnerBtn">分配</button>
+            </div>
+          </div>
+          <div class="output">
+            <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
+            <pre id="output"></pre>
+          </div>
+          <div class="section-head">
+            <h2>后台任务</h2>
+            <button id="refreshJobs">刷新任务</button>
+          </div>
+          <div class="jobs">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 34%">Job</th>
+                  <th style="width: 22%">Profile</th>
+                  <th style="width: 16%">Status</th>
+                  <th style="width: 18%">Started</th>
+                  <th style="width: 10%">日志</th>
+                </tr>
+              </thead>
+              <tbody id="jobs"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="userView" class="view hidden">
+          <div class="section-head">
+            <h2>用户页</h2>
+          </div>
+          <div class="details">
+            <div class="metric"><span>姓名</span><strong id="userNameValue">-</strong></div>
+            <div class="metric"><span>邮箱</span><strong id="userEmailValue">-</strong></div>
+            <div class="metric"><span>角色</span><strong id="userRoleValue">-</strong></div>
+            <div class="metric"><span>当前 Profile</span><strong id="userSelectedProfileValue">-</strong></div>
+          </div>
+        </section>
+
+        <section id="userManagementView" class="view hidden admin-only">
+          <div class="section-head">
+            <h2>Members</h2>
+            <button id="refreshMembers">刷新成员</button>
+          </div>
+          <div class="member-form admin-only">
+            <input id="memberName" placeholder="成员姓名">
+            <input id="memberEmail" placeholder="成员邮箱">
+            <input id="memberPassword" type="password" placeholder="登录密码（可选）">
+            <select id="memberRole">
+              <option value="operator">operator</option>
+              <option value="admin">admin</option>
+              <option value="viewer">viewer</option>
+            </select>
+            <button id="addMemberBtn" class="primary">添加成员</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 30%">成员</th>
+                <th style="width: 18%">角色</th>
+                <th style="width: 34%">Apple 账号</th>
+                <th style="width: 18%">状态</th>
+              </tr>
+            </thead>
+            <tbody id="members"></tbody>
+          </table>
+          <div class="section-head">
+            <h2>Settings</h2>
+            <button id="saveSettingsBtn" class="admin-only">保存设置</button>
+          </div>
+          <div class="settings-form admin-only">
+            <select id="settingsDefaultOwner">
+              <option value="">默认负责人</option>
+            </select>
+            <select id="settingsStatusFilter">
+              <option value="">默认状态筛选</option>
+              <option value="ready">ready</option>
+              <option value="wait-ready">creating</option>
+              <option value="create">stopped</option>
+              <option value="launch-on-host">host-ready</option>
+              <option value="blocked">blocked</option>
+              <option value="error">error</option>
+            </select>
+            <label><input id="settingsBackgroundConfirm" type="checkbox"> 确认操作默认后台执行</label>
+            <label><input id="settingsShowReleased" type="checkbox"> 显示释放/终止资源</label>
+          </div>
+          <div id="accountSettingsPanel" class="hidden admin-only">
+            <div class="section-head">
+              <h2>Account</h2>
+              <button id="refreshAccountChallengeBtn">换一题</button>
+            </div>
+            <div class="account-form">
+              <input id="accountEmail" placeholder="新的管理员邮箱">
+              <input id="accountPassword" type="password" placeholder="当前密码">
+              <strong id="accountChallengeQuestion">校验题加载中...</strong>
+              <input id="accountChallengeAnswer" placeholder="校验答案">
+              <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {} };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {} };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -490,6 +539,8 @@
       $("currentUser").textContent = member.email ? `${member.name || member.email} · ${member.role || "-"}` : "已登录";
       $("accountEmail").value = member.email || "";
       applyRoleVisibility();
+      renderUserPage();
+      showView(state.view || "profilesView");
     }
 
     function isAdmin() {
@@ -500,6 +551,24 @@
       document.querySelectorAll(".admin-only").forEach((el) => {
         el.classList.toggle("hidden", !isAdmin());
       });
+      if (!isAdmin() && state.view === "userManagementView") {
+        showView("profilesView");
+      }
+    }
+
+    function showView(viewID) {
+      if (viewID === "userManagementView" && !isAdmin()) {
+        viewID = "profilesView";
+      }
+      state.view = viewID;
+      document.querySelectorAll(".view").forEach((el) => {
+        el.classList.toggle("hidden", el.id !== viewID);
+      });
+      document.querySelectorAll("[data-view]").forEach((button) => {
+        button.classList.toggle("active", button.getAttribute("data-view") === viewID);
+      });
+      renderSelected();
+      renderUserPage();
     }
 
     async function loadChallenge() {
@@ -571,6 +640,7 @@
 
     async function toggleAccountSettings() {
       if (!isAdmin()) return;
+      showView("userManagementView");
       const panel = $("accountSettingsPanel");
       const willShow = panel.classList.contains("hidden");
       panel.classList.toggle("hidden", !willShow);
@@ -699,6 +769,7 @@
       document.querySelectorAll("[data-profile]").forEach((button) => {
         button.addEventListener("click", () => {
           state.selected = button.getAttribute("data-profile");
+          showView("operationsView");
           renderProfiles();
           renderSelected();
         });
@@ -706,6 +777,7 @@
       document.querySelectorAll("[data-status]").forEach((button) => {
         button.addEventListener("click", () => {
           state.selected = button.getAttribute("data-status");
+          showView("operationsView");
           renderProfiles();
           renderSelected();
           loadStatus();
@@ -785,6 +857,16 @@
       $("ownerValue").textContent = p ? (ownerNames(p).join(", ") || "-") : "-";
       renderAssignMemberOptions();
       applyRoleVisibility();
+      renderUserPage();
+    }
+
+    function renderUserPage() {
+      const member = state.auth?.member || {};
+      const p = selectedProfile();
+      $("userNameValue").textContent = member.name || "-";
+      $("userEmailValue").textContent = member.email || "-";
+      $("userRoleValue").textContent = member.role || "-";
+      $("userSelectedProfileValue").textContent = p ? `${p.name} · ${p.apple_email || "-"}` : "-";
     }
 
     function statusBadge(status) {
@@ -1137,6 +1219,9 @@
     $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
     $("previewDestroyBtn").addEventListener("click", () => runAWS("destroy", false));
     $("confirmDestroyBtn").addEventListener("click", () => runAWS("destroy", true));
+    document.querySelectorAll("[data-view]").forEach((button) => {
+      button.addEventListener("click", () => showView(button.getAttribute("data-view")));
+    });
 
     loadAuth().then((ok) => {
       if (ok) return loadAppData();
