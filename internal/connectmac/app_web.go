@@ -393,20 +393,25 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 		}
 		cfg, err := LoadConfig(configPath)
 		if err != nil {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.status", Profile: ref, Message: err.Error()})
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		profile, err := resolveProfileRef(cfg, ref)
 		if err != nil {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.status", Profile: ref, Message: err.Error()})
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
-			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: strings.Join(validationMessages(errs), "\n")})
+			message := fmt.Sprintf("profile %s config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
+			a.logProfileError("web.aws.status", profile, message)
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: message})
 			return
 		}
 		plan, status, err := a.AWSService.StatusWithOptions(r.Context(), profile, AWSStatusOptions{IncludeTerminal: false})
 		if err != nil {
+			a.logProfileError("web.aws.status", profile, fmt.Sprintf("aws status failed: %v", err))
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("aws status failed: %v", err)})
 			return
 		}
@@ -433,16 +438,19 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			OwnerEmail string `json:"owner_email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws." + command, Message: "invalid json body"})
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
 		req.Profile = strings.TrimSpace(req.Profile)
 		if req.Profile == "" {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws." + command, Message: "profile is required"})
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
 		if command == "open" && req.Confirm {
 			if err := a.assignWebOwnerForOpen(r, configPath, req.Profile, req.OwnerEmail); err != nil {
+				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.open", Profile: req.Profile, Message: err.Error()})
 				writeWebError(w, http.StatusBadRequest, err.Error())
 				return
 			}
@@ -453,6 +461,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		}
 		if req.Confirm && req.Background {
 			resp := a.startWebAWSJob(r.Context(), configPath, command, req.Profile, req.Notify)
+			a.logWebResponse("web.aws."+command, req.Profile, resp)
 			a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 			writeWebJSON(w, resp)
 			return
@@ -464,6 +473,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			}
 		}
 		resp := a.webRunCommand(r.Context(), configPath, args)
+		a.logWebResponse("web.aws."+command, req.Profile, resp)
 		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
 	}
@@ -603,6 +613,31 @@ func (a App) recordWebEvent(configPath, profileRef, action string, confirmed boo
 		}
 	}
 	_ = a.MemberStore.RecordEvent(event)
+}
+
+func (a App) logProfileError(action string, profile Profile, message string) {
+	_ = a.LogManager.Write(LogEntry{
+		Level:      "error",
+		Action:     action,
+		Profile:    profile.Name,
+		AppleEmail: profile.AWS.AccountEmail,
+		Region:     profile.AWS.Region,
+		AWSProfile: profile.AWS.Profile,
+		Message:    message,
+	})
+}
+
+func (a App) logWebResponse(action, profileRef string, resp webAPIResponse) {
+	level := "info"
+	message := strings.TrimSpace(resp.Output)
+	if !resp.OK {
+		level = "error"
+		message = strings.TrimSpace(resp.Error)
+	}
+	if message == "" {
+		message = fmt.Sprintf("code=%d ok=%t", resp.Code, resp.OK)
+	}
+	_ = a.LogManager.Write(LogEntry{Level: level, Action: action, Profile: profileRef, Message: message})
 }
 
 func webAWSStatusData(profile Profile, plan MacPlan, status AWSStatus) webAWSStatus {

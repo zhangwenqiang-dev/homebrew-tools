@@ -43,6 +43,9 @@ func (a App) printUsage() {
   cm member disable <email>
   cm member assign <apple-email> --member <member-email> [--relation owner]
   cm member unassign <apple-email> --member <member-email>
+  cm logs list
+  cm logs export [--output <zip>]
+  cm logs clean
   cm aws plan <profile-or-apple-email> [--config <path>]
   cm aws capacity <profile-or-apple-email> [--config <path>]
   cm aws open <profile-or-apple-email> [--confirm] [--config <path>]

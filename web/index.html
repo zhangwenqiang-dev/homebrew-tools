@@ -516,6 +516,10 @@
       $("accountChallengeAnswer").value = "";
     }
 
+    function delay(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     async function submitAuth() {
       const setupRequired = !!state.auth?.setup_required;
       const payload = {
@@ -537,8 +541,9 @@
           body: JSON.stringify(payload)
         });
         state.auth = body.data || {};
+        setBusy(true, setupRequired ? "管理员创建成功，正在加载管理页面..." : "登录成功，正在加载管理页面...");
+        await Promise.all([loadAppData({ keepBusy: true }), delay(450)]);
         showApp();
-        await loadAppData();
         $("authStatus").textContent = "";
       } catch (err) {
         $("authStatus").textContent = String(err.message || err);
@@ -608,8 +613,11 @@
       }
     }
 
-    async function loadAppData() {
-      setBusy(true, "正在加载数据...");
+    async function loadAppData(options = {}) {
+      const keepBusy = !!options.keepBusy;
+      if (!keepBusy) {
+        setBusy(true, "正在加载数据...");
+      }
       try {
         if (isAdmin()) {
           await Promise.all([loadMembers(), loadProfiles(), loadJobs(), loadSettings()]);
@@ -622,7 +630,9 @@
         setOutput(String(err.message || err));
         setStatus("加载失败");
       } finally {
-        setBusy(false);
+        if (!keepBusy) {
+          setBusy(false);
+        }
         renderSelected();
       }
     }
@@ -682,7 +692,7 @@
           "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
-          "<td>" + statusBadge(status) + "</td>" +
+          "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
           "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
@@ -780,7 +790,14 @@
     function statusBadge(status) {
       if (!status) return "<span class=\"badge loading\">unknown</span>";
       const cls = status.ready ? "ready" : statusClass(status.decision);
-      return "<span class=\"badge " + cls + "\">" + escapeHTML(statusLabel(status)) + "</span>";
+      const title = status.error || status.detail || status.next || "";
+      return "<span class=\"badge " + cls + "\" title=\"" + escapeAttr(title) + "\">" + escapeHTML(statusLabel(status)) + "</span>";
+    }
+
+    function statusDetail(status) {
+      if (!status?.error) return "";
+      const text = String(status.error).split("\n")[0];
+      return "<div class=\"muted\">" + escapeHTML(text.length > 96 ? text.slice(0, 93) + "..." : text) + "</div>";
     }
 
     function statusClass(decision) {

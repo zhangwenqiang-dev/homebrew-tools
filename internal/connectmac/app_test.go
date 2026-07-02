@@ -454,6 +454,43 @@ func TestAppWebAWSStatusAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebAWSStatusWritesErrorLog(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return nil, errors.New("missing aws profile website")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/aws/status?profile=xcode-vnc", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing aws profile website") {
+		t.Fatalf("status body = %s", rec.Body.String())
+	}
+	files, err := app.LogManager.List()
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("log files = %+v", files)
+	}
+	data, err := os.ReadFile(files[0].Path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	for _, want := range []string{"web.aws.status", "xcode-vnc", "missing aws profile website"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("log missing %q: %s", want, data)
+		}
+	}
+}
+
 func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -1603,6 +1640,33 @@ func TestAppUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestAppLogsCommands(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if err := app.LogManager.Write(LogEntry{Level: "error", Action: "test", Message: "hello"}); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if code := app.Run(context.Background(), []string{"logs", "list"}); code != 0 {
+		t.Fatalf("logs list code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "cm-2026-07-01.log") {
+		t.Fatalf("logs list output = %s", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	exportPath := filepath.Join(dir, "logs.zip")
+	if code := app.Run(context.Background(), []string{"logs", "export", "--output", exportPath}); code != 0 {
+		t.Fatalf("logs export code = %d, err = %s", code, errOut.String())
+	}
+	if _, err := os.Stat(exportPath); err != nil {
+		t.Fatalf("expected export zip: %v", err)
+	}
+	if !strings.Contains(out.String(), "exported logs") {
+		t.Fatalf("logs export output = %s", out.String())
+	}
+}
+
 func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 	return App{
 		Out:       out,
@@ -1627,6 +1691,12 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		}},
 		WebDir:      filepath.Join("..", "..", "web"),
 		MemberStore: NewMemberStore(filepath.Join(stateDir, "members.json")),
+		LogManager: LogManager{
+			Dir: filepath.Join(stateDir, "logs"),
+			Now: func() time.Time {
+				return time.Date(2026, 7, 1, 12, 30, 45, 0, time.UTC)
+			},
+		},
 	}
 }
 

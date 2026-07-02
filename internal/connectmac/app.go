@@ -30,6 +30,7 @@ type App struct {
 	AWSService   AWSService
 	WebDir       string
 	MemberStore  MemberStore
+	LogManager   LogManager
 }
 
 func NewApp(out, err io.Writer) App {
@@ -44,6 +45,7 @@ func NewApp(out, err io.Writer) App {
 		JobManager:   NewJobManager(DefaultJobDir),
 		AWSService:   NewAWSService(),
 		MemberStore:  NewMemberStore(DefaultMemberDataPath),
+		LogManager:   NewLogManager(DefaultLogDir),
 	}
 }
 
@@ -89,6 +91,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runProfile(ctx, configPath, cfg, args[1:])
 	case "member":
 		return a.runMember(args[1:])
+	case "logs":
+		return a.runLogs(args[1:])
 	case "doctor":
 		return a.runDoctor(configPath, args[1:])
 	case "dashboard":
