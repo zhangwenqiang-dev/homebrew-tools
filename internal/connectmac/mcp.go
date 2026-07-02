@@ -73,7 +73,7 @@ func (s MCPServer) handle(ctx context.Context, req mcpRequest) mcpResponse {
 			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]string{
 				"name":    "cm",
-				"version": "0.1.59",
+				"version": "0.1.60",
 			},
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},

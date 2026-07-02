@@ -316,15 +316,14 @@
     </header>
     <div class="app-layout">
       <nav class="sidebar" aria-label="管理页面导航">
-        <button class="nav-btn active" data-view="profilesView">Profile 首页</button>
-        <button class="nav-btn" data-view="operationsView">操作页</button>
+        <button class="nav-btn active" data-view="profilesView">首页</button>
         <button class="nav-btn" data-view="userView">用户页</button>
         <button class="nav-btn admin-only" data-view="userManagementView">用户管理</button>
       </nav>
       <main>
         <section id="profilesView" class="view">
           <div class="section-head">
-            <h2>Profiles</h2>
+            <h2>首页</h2>
             <div class="toolbar">
               <input id="search" placeholder="搜索 profile / Apple / region">
               <select id="statusFilter">
@@ -335,9 +334,6 @@
                 <option value="launch-on-host">host-ready</option>
                 <option value="blocked">blocked</option>
                 <option value="error">error</option>
-              </select>
-              <select id="ownerFilter">
-                <option value="">全部成员</option>
               </select>
               <span id="profileCount" class="pill">0</span>
             </div>
@@ -361,6 +357,7 @@
           <div class="section-head">
             <h2 id="selectedTitle">未选择</h2>
             <div class="toolbar">
+              <button id="backHomeBtn">返回首页</button>
               <button id="statusBtn">状态</button>
               <button id="previewOpenBtn">预览打开</button>
               <button id="confirmOpenBtn" class="primary">确认打开</button>
@@ -491,7 +488,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -581,7 +578,8 @@
         el.classList.toggle("hidden", el.id !== viewID);
       });
       document.querySelectorAll("[data-view]").forEach((button) => {
-        button.classList.toggle("active", button.getAttribute("data-view") === viewID);
+        const target = button.getAttribute("data-view");
+        button.classList.toggle("active", target === viewID);
       });
       renderSelected();
       renderUserPage();
@@ -730,7 +728,6 @@
       if (!state.selected && state.profiles.length) {
         state.selected = state.profiles[0].name;
       }
-      renderOwnerFilter();
       renderProfiles();
       renderSelected();
       refreshVisibleStatuses();
@@ -744,7 +741,6 @@
       const body = await api("/api/members");
       state.members = body.data.members || [];
       renderMembers();
-      renderOwnerFilter();
       renderAssignMemberOptions();
       renderSettingsMemberOptions();
     }
@@ -758,13 +754,11 @@
     function filteredProfiles() {
       const q = $("search").value.trim().toLowerCase();
       const status = $("statusFilter").value;
-      const owner = $("ownerFilter").value;
       return state.profiles.filter((p) => {
         const owners = ownerNames(p).join(" ");
         const haystack = [p.name, p.apple_email, p.region, p.description, owners].join(" ").toLowerCase();
         const current = state.statuses[p.name]?.decision || "";
-        const ownerMatched = !owner || (p.owners || []).some((member) => member.email === owner);
-        return ownerMatched && (!q || haystack.includes(q)) && (!status || current === status || (status === "ready" && state.statuses[p.name]?.ready));
+        return (!q || haystack.includes(q)) && (!status || current === status || (status === "ready" && state.statuses[p.name]?.ready));
       });
     }
 
@@ -817,15 +811,6 @@
       applyRoleVisibility();
     }
 
-    function renderOwnerFilter() {
-      const current = $("ownerFilter").value;
-      const enabledMembers = state.members.filter((member) => member.enabled);
-      $("ownerFilter").innerHTML = "<option value=\"\">全部成员</option>" + enabledMembers.map((member) =>
-        "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
-      ).join("");
-      $("ownerFilter").value = enabledMembers.some((member) => member.email === current) ? current : "";
-    }
-
     function renderSettingsMemberOptions() {
       const current = $("settingsDefaultOwner").value || state.settings.default_owner_email || "";
       const enabledMembers = state.members.filter((member) => member.enabled);
@@ -840,9 +825,6 @@
       $("settingsStatusFilter").value = state.settings.default_status_filter || "";
       $("settingsBackgroundConfirm").checked = state.settings.background_confirm !== false;
       $("settingsShowReleased").checked = !!state.settings.show_released;
-      if (state.settings.default_owner_email && !$("ownerFilter").value) {
-        $("ownerFilter").value = state.settings.default_owner_email;
-      }
       if (state.settings.default_status_filter && !$("statusFilter").value) {
         $("statusFilter").value = state.settings.default_status_filter;
       }
@@ -1229,7 +1211,7 @@
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
-    $("ownerFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
+    $("backHomeBtn").addEventListener("click", () => showView("profilesView"));
     $("statusBtn").addEventListener("click", loadStatus);
     $("previewOpenBtn").addEventListener("click", () => runAWS("open", false));
     $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
