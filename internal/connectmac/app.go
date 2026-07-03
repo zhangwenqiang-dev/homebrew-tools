@@ -12,6 +12,8 @@ type Runner interface {
 	StartBackground(ctx context.Context, args []string) (int, error)
 	Stop(pid int) error
 	RunRsync(ctx context.Context, args []string) error
+	KnownHostKey(ctx context.Context, host string) (string, error)
+	ScanHostKey(ctx context.Context, host string) (string, error)
 	ForgetHost(ctx context.Context, host string) error
 	OpenURL(ctx context.Context, target string) error
 }
@@ -31,6 +33,7 @@ type App struct {
 	WebDir       string
 	MemberStore  MemberStore
 	LogManager   LogManager
+	KnownHosts   string
 }
 
 func NewApp(out, err io.Writer) App {
@@ -46,6 +49,7 @@ func NewApp(out, err io.Writer) App {
 		AWSService:   NewAWSService(),
 		MemberStore:  NewMemberStore(DefaultMemberDataPath),
 		LogManager:   NewLogManager(DefaultLogDir),
+		KnownHosts:   "~/.ssh/known_hosts",
 	}
 }
 
@@ -173,6 +177,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 			return code
 		}
 		return a.runForgetHost(ctx, cfg, args[1:])
+	case "host-key":
+		cfg, code := a.loadConfig(configPath)
+		if code != 0 {
+			return code
+		}
+		return a.runHostKey(ctx, cfg, args[1:])
 	case "open-vnc":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {

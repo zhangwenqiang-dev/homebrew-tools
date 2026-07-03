@@ -53,6 +53,25 @@ func (ExecRunner) RunRsync(ctx context.Context, args []string) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
+func (ExecRunner) KnownHostKey(ctx context.Context, host string) (string, error) {
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-F", host)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return string(out), nil
+		}
+		return string(out), err
+	}
+	return string(out), nil
+}
+func (ExecRunner) ScanHostKey(ctx context.Context, host string) (string, error) {
+	cmd := exec.CommandContext(ctx, "ssh-keyscan", "-T", "5", host)
+	out, err := cmd.Output()
+	if err != nil {
+		return string(out), err
+	}
+	return string(out), nil
+}
 func (ExecRunner) ForgetHost(ctx context.Context, host string) error {
 	cmd := exec.CommandContext(ctx, "ssh-keygen", "-R", host)
 	cmd.Stdin = os.Stdin

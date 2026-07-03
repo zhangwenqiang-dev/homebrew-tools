@@ -23,6 +23,8 @@ func (a App) printUsage() {
   cm pull <profile-or-apple-email> <remote-path> [--include <pattern>] [--exclude <pattern>] [--config <path>]
   cm push <profile-or-apple-email> <local-path> <remote-dir> [--include <pattern>] [--exclude <pattern>] [--config <path>]
   cm forget-host <profile> [--config <path>]
+  cm host-key check <profile> [--config <path>]
+  cm host-key fix <profile> [--config <path>]
   cm open-vnc <profile> [--config <path>]
   cm setup-vnc <profile> [--config <path>]
   cm profile accounts [--config <path>]

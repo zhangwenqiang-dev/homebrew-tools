@@ -22,6 +22,9 @@ type fakeRunner struct {
 	startErr   error
 	rsync      []string
 	forgotHost string
+	knownHost  string
+	scannedKey string
+	scanErr    error
 	openedURL  string
 	stopPID    int
 }
@@ -47,6 +50,20 @@ func (r *fakeRunner) Stop(pid int) error {
 func (r *fakeRunner) RunRsync(ctx context.Context, args []string) error {
 	r.rsync = args
 	return nil
+}
+
+func (r *fakeRunner) KnownHostKey(ctx context.Context, host string) (string, error) {
+	return r.knownHost, nil
+}
+
+func (r *fakeRunner) ScanHostKey(ctx context.Context, host string) (string, error) {
+	if r.scanErr != nil {
+		return r.scannedKey, r.scanErr
+	}
+	if r.scannedKey == "" {
+		return "mac-host.example.com ssh-ed25519 AAAACURRENT\n", nil
+	}
+	return r.scannedKey, nil
 }
 
 func (r *fakeRunner) ForgetHost(ctx context.Context, host string) error {
@@ -1038,10 +1055,11 @@ func TestAppSSHUsesRunner(t *testing.T) {
 
 func TestAppStartSavesStateAfterHealthyTunnel(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
-	runner := &fakeRunner{}
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
 	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
@@ -1053,18 +1071,90 @@ func TestAppStartSavesStateAfterHealthyTunnel(t *testing.T) {
 	if !strings.Contains(out.String(), "started xcode-vnc with pid 55") {
 		t.Fatalf("out = %q", out.String())
 	}
+	if !strings.Contains(out.String(), "Host key: current") {
+		t.Fatalf("out missing host key status = %q", out.String())
+	}
 	state, ok, err := app.StateManager.Load("xcode-vnc")
 	if err != nil || !ok || state.PID != 55 {
 		t.Fatalf("state = %+v ok=%t err=%v", state, ok, err)
 	}
 }
 
-func TestAppStartDoesNotSaveStateWhenTunnelFailsHealthCheck(t *testing.T) {
+func TestAppStartAddsMissingHostKeyBeforeTunnel(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
-	runner := &fakeRunner{startErr: errors.New("Permission denied (publickey)")}
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".ssh", "known_hosts"))
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	if !strings.Contains(string(data), "AAAACURRENT") || !strings.Contains(out.String(), "Host key: missing") {
+		t.Fatalf("known_hosts=%q out=%q", data, out.String())
+	}
+	if len(runner.background) == 0 {
+		t.Fatal("expected tunnel to start after adding host key")
+	}
+}
+
+func TestAppStartReplacesStaleHostKeyBeforeTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAAOLD\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, err = %s", code, errOut.String())
+	}
+	if runner.forgotHost != "mac-host.example.com" {
+		t.Fatalf("forgot host = %q", runner.forgotHost)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".ssh", "known_hosts"))
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	if !strings.Contains(string(data), "AAAACURRENT") || !strings.Contains(out.String(), "Host key: stale") {
+		t.Fatalf("known_hosts=%q out=%q", data, out.String())
+	}
+}
+
+func TestAppStartStopsWhenHostKeyScanFails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{scanErr: errors.New("scan failed")}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if len(runner.background) != 0 {
+		t.Fatalf("tunnel should not start after scan failure: %#v", runner.background)
+	}
+	if !strings.Contains(errOut.String(), "host key scan failed") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartDoesNotSaveStateWhenTunnelFailsHealthCheck(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n", startErr: errors.New("Permission denied (publickey)")}
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
 	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
@@ -1236,6 +1326,32 @@ func TestAppForgetHostUsesRunner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Removing known_hosts entries") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppHostKeyCommands(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	if code := app.Run(context.Background(), []string{"host-key", "check", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("host-key check code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Host key: current") {
+		t.Fatalf("check out = %q", out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	runner.knownHost = ""
+	if code := app.Run(context.Background(), []string{"host-key", "fix", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("host-key fix code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Host key: missing") {
+		t.Fatalf("fix out = %q", out.String())
 	}
 }
 
@@ -1697,6 +1813,7 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 				return time.Date(2026, 7, 1, 12, 30, 45, 0, time.UTC)
 			},
 		},
+		KnownHosts: filepath.Join(stateDir, ".ssh", "known_hosts"),
 	}
 }
 

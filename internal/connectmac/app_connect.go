@@ -35,6 +35,16 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 	if !a.validateAndSummarize(profile) {
 		return 1
 	}
+	check, err := a.fixHostKey(ctx, profile)
+	if err != nil {
+		fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
+	if check.Status == HostKeyScanFailed {
+		fmt.Fprintf(a.Err, "host key scan failed for %s: %s\n", profile.Host, check.Message)
+		return 1
+	}
 	sshArgs, err := SSHArgs(profile)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -154,6 +164,45 @@ func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
 		return 1
 	}
 	return 0
+}
+func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
+	if len(args) != 2 {
+		fmt.Fprintln(a.Err, "usage: cm host-key <check|fix> <profile>")
+		return 2
+	}
+	action := args[0]
+	profile, ok := cfg.Profile(args[1])
+	if !ok {
+		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[1]))
+		return 2
+	}
+	switch action {
+	case "check":
+		check, err := a.checkHostKey(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "host key check failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
+		if check.Status == HostKeyScanFailed {
+			return 1
+		}
+		return 0
+	case "fix":
+		check, err := a.fixHostKey(ctx, profile)
+		if err != nil {
+			fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
+		if check.Status == HostKeyScanFailed {
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(a.Err, "unknown host-key command %q\n", action)
+		return 2
+	}
 }
 func (a App) runStop(args []string) int {
 	if len(args) != 1 {
