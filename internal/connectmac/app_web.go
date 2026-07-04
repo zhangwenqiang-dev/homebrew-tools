@@ -177,6 +177,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/aws/status", a.requireWebRole(a.webAWSStatusHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/aws/open", a.requireWebRole(a.webAWSActionHandler(configPath, "open"), "operator", "admin"))
 	mux.HandleFunc("/api/aws/destroy", a.requireWebRole(a.webAWSActionHandler(configPath, "destroy"), "operator", "admin"))
+	mux.HandleFunc("/api/tunnel/start", a.requireWebRole(a.webTunnelStartHandler(configPath), "operator", "admin"))
 	return mux
 }
 
@@ -475,6 +476,33 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		resp := a.webRunCommand(r.Context(), configPath, args)
 		a.logWebResponse("web.aws."+command, req.Profile, resp)
 		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
+		writeWebJSON(w, resp)
+	}
+}
+
+func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile string `json:"profile"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.tunnel.start", Message: "invalid json body"})
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		req.Profile = strings.TrimSpace(req.Profile)
+		if req.Profile == "" {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.tunnel.start", Message: "profile is required"})
+			writeWebError(w, http.StatusBadRequest, "profile is required")
+			return
+		}
+		resp := a.webRunCommand(r.Context(), configPath, []string{"start", req.Profile})
+		a.logWebResponse("web.tunnel.start", req.Profile, resp)
+		a.recordWebEvent(configPath, req.Profile, "start", true, resp)
 		writeWebJSON(w, resp)
 	}
 }

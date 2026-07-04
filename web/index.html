@@ -516,6 +516,9 @@
         const el = $(id);
         if (el) el.disabled = busy;
       }
+      document.querySelectorAll("[data-profile], [data-status], [data-start]").forEach((button) => {
+        button.disabled = busy;
+      });
       $("loadingTitle").textContent = message;
       $("loadingLayer").classList.toggle("hidden", !busy);
     }
@@ -804,7 +807,7 @@
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button></div></td>" +
+          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -822,6 +825,11 @@
           renderProfiles();
           renderSelected();
           loadStatus();
+        });
+      });
+      document.querySelectorAll("[data-start]").forEach((button) => {
+        button.addEventListener("click", () => {
+          startTunnel(button.getAttribute("data-start"));
         });
       });
     }
@@ -977,6 +985,32 @@
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("失败");
+      } finally {
+        setBusy(false);
+        renderProfiles();
+        renderSelected();
+      }
+    }
+
+    async function startTunnel(profile) {
+      if (state.busy || !profile) return;
+      state.selected = profile;
+      showView("operationsView");
+      renderProfiles();
+      renderSelected();
+      setBusy(true, "正在连接...");
+      setStatus("连接中...");
+      try {
+        const body = await api("/api/tunnel/start", {
+          method: "POST",
+          body: JSON.stringify({ profile })
+        });
+        setOutput((body.output || "") + (body.error || ""));
+        setStatus(body.ok ? "连接已启动" : "连接失败");
+        await loadEvents(false);
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("连接失败");
       } finally {
         setBusy(false);
         renderProfiles();
