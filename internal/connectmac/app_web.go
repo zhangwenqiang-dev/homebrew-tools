@@ -212,8 +212,12 @@ func (a App) webConfigHandler(configPath string) http.HandlerFunc {
 		}
 		cfg, err := LoadConfig(configPath)
 		if err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
-			return
+			var pathErr *os.PathError
+			if !errors.As(err, &pathErr) || !os.IsNotExist(pathErr.Err) {
+				writeWebError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			cfg = Config{}
 		}
 		writeWebJSON(w, webAPIResponse{
 			OK: true,
