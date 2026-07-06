@@ -613,6 +613,60 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 	}
 }
 
+func TestAppWebTerminalCheckRequiresReadyAWSMac(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/terminal/check?profile=xcode-vnc", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "aws mac is not ready") || !strings.Contains(rec.Body.String(), "no managed instance found") {
+		t.Fatalf("terminal check body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebTerminalCheckReady(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-ready",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+				Tags:                managedTestTags(),
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-ready", PublicIP: "54.1.2.3", AllocationID: "eipalloc-1"},
+		}}, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/terminal/check?profile=xcode-vnc", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"ok":true`, `"profile":"xcode-vnc"`, `"target":"user@mac-host.example.com"`, `"ready":true`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("terminal check missing %q:\n%s", want, rec.Body.String())
+		}
+	}
+}
+
 func TestAppWebJobsAPI(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer

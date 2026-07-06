@@ -6,7 +6,10 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.12
 	github.com/aws/aws-sdk-go-v2/config v1.32.21
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.305.0
+	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.35.6
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.0
+	github.com/gorilla/websocket v1.5.3
+	golang.org/x/crypto v0.53.0
 )
 
 require (
@@ -17,9 +20,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.27 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.26 // indirect
-	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.35.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.1.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.31.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.3 // indirect
 	github.com/aws/smithy-go v1.27.1 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )

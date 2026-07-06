@@ -283,6 +283,28 @@
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
     .row-actions button { min-height: 28px; padding: 3px 8px; }
     .inline-select { width: 100%; margin-top: 6px; }
+    .terminal-wrap { display: grid; gap: 10px; padding: 12px; }
+    .terminal-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .terminal-command {
+      text-align: left;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .terminal-surface {
+      min-height: min(62vh, 620px);
+      max-height: min(62vh, 620px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #101828;
+      color: #f9fafb;
+      padding: 12px;
+      outline: none;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .terminal-surface:focus { border-color: #7da2ff; box-shadow: 0 0 0 2px rgba(36, 107, 254, .18); }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       .app-layout { flex-direction: column; }
@@ -387,6 +409,7 @@
               <button id="confirmOpenBtn" class="primary">确认打开</button>
               <button id="previewDestroyBtn">预览释放</button>
               <button id="confirmDestroyBtn" class="danger">确认释放</button>
+              <button id="terminalBtn">终端</button>
               <button id="eventsBtn">事件</button>
             </div>
           </div>
@@ -423,6 +446,27 @@
               </thead>
               <tbody id="jobs"></tbody>
             </table>
+          </div>
+        </section>
+
+        <section id="terminalView" class="view hidden">
+          <div class="section-head">
+            <h2 id="terminalTitle">网页终端</h2>
+            <div class="toolbar">
+              <button id="terminalBackBtn">返回操作页</button>
+              <button id="terminalReconnectBtn" class="primary">重新连接</button>
+              <button id="terminalDisconnectBtn">断开</button>
+            </div>
+          </div>
+          <div class="terminal-wrap">
+            <div id="terminalStatus" class="status-line">选择 profile 后打开终端。</div>
+            <div class="terminal-toolbar">
+              <button class="terminal-command" data-terminal-command="sudo passwd ec2-user">sudo passwd ec2-user</button>
+              <button class="terminal-command" data-terminal-command="sudo launchctl enable system/com.apple.screensharing">enable screensharing</button>
+              <button class="terminal-command" data-terminal-command="sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist">load screensharing</button>
+              <button class="terminal-command" data-terminal-command="exit">exit</button>
+            </div>
+            <div id="terminalSurface" class="terminal-surface" tabindex="0" aria-label="网页 SSH 终端"></div>
           </div>
         </section>
 
@@ -503,7 +547,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {} };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -512,11 +556,11 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
-      document.querySelectorAll("[data-profile], [data-status], [data-start]").forEach((button) => {
+      document.querySelectorAll("[data-profile], [data-status], [data-start], [data-terminal]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -807,7 +851,7 @@
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button></div></td>" +
+          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button><button data-terminal=\"" + escapeAttr(p.name) + "\">终端</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -830,6 +874,11 @@
       document.querySelectorAll("[data-start]").forEach((button) => {
         button.addEventListener("click", () => {
           startTunnel(button.getAttribute("data-start"));
+        });
+      });
+      document.querySelectorAll("[data-terminal]").forEach((button) => {
+        button.addEventListener("click", () => {
+          openTerminal(button.getAttribute("data-terminal"));
         });
       });
     }
@@ -883,9 +932,12 @@
       const p = selectedProfile();
       $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
       const disabled = !p;
-      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "eventsBtn"]) {
+      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
+      $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
+      $("terminalReconnectBtn").disabled = disabled;
+      $("terminalDisconnectBtn").disabled = !state.terminal.socket;
       const status = p ? state.statuses[p.name] : null;
       $("decisionValue").textContent = status ? statusLabel(status) + (status.detail ? " · " + status.detail : "") : "-";
       $("readyValue").textContent = status ? String(!!status.ready) : "-";
@@ -1016,6 +1068,123 @@
         renderProfiles();
         renderSelected();
       }
+    }
+
+    function terminalSetStatus(text) {
+      $("terminalStatus").textContent = text || "终端就绪";
+      setStatus(text || "终端就绪");
+    }
+
+    function terminalAppend(text) {
+      state.terminal.buffer += text || "";
+      if (state.terminal.buffer.length > 120000) {
+        state.terminal.buffer = state.terminal.buffer.slice(-100000);
+      }
+      const surface = $("terminalSurface");
+      surface.textContent = state.terminal.buffer;
+      surface.scrollTop = surface.scrollHeight;
+    }
+
+    function terminalClear() {
+      state.terminal.buffer = "";
+      $("terminalSurface").textContent = "";
+    }
+
+    async function openTerminal(profile) {
+      if (!profile) return;
+      state.selected = profile;
+      showView("terminalView");
+      renderProfiles();
+      renderSelected();
+      await connectTerminal(profile);
+    }
+
+    async function connectTerminal(profile) {
+      if (!profile) return;
+      closeTerminal(false);
+      state.terminal.profile = profile;
+      state.terminal.manualClose = false;
+      terminalClear();
+      terminalSetStatus("终端预检中...");
+      try {
+        const check = await api("/api/terminal/check?profile=" + encodeURIComponent(profile));
+        const data = check.data || {};
+        terminalAppend("Connecting " + (data.target || profile) + "...\r\n");
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(protocol + "//" + window.location.host + "/api/terminal/ws?profile=" + encodeURIComponent(profile));
+        state.terminal.socket = socket;
+        socket.binaryType = "arraybuffer";
+        socket.onopen = () => {
+          terminalSetStatus("终端已连接，点击黑色区域后输入命令。");
+          $("terminalSurface").focus();
+          renderSelected();
+        };
+        socket.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            terminalAppend(new TextDecoder().decode(event.data));
+          } else {
+            terminalAppend(String(event.data || ""));
+          }
+        };
+        socket.onerror = () => {
+          terminalSetStatus("终端连接错误");
+        };
+        socket.onclose = () => {
+          const wasManual = state.terminal.manualClose;
+          state.terminal.socket = null;
+          terminalSetStatus(wasManual ? "终端已断开" : "终端连接已关闭");
+          renderSelected();
+        };
+      } catch (err) {
+        terminalAppend(String(err.message || err) + "\r\n");
+        terminalSetStatus("终端打开失败");
+        renderSelected();
+      }
+    }
+
+    function closeTerminal(manual = true) {
+      const socket = state.terminal.socket;
+      if (!socket) return;
+      state.terminal.manualClose = manual;
+      state.terminal.socket = null;
+      socket.close();
+      renderSelected();
+    }
+
+    function sendTerminalInput(data) {
+      const socket = state.terminal.socket;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        terminalSetStatus("终端未连接");
+        return;
+      }
+      socket.send(data);
+    }
+
+    function terminalKeyData(event) {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+        const code = event.key.toUpperCase().charCodeAt(0);
+        if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+      }
+      const map = {
+        Enter: "\r",
+        Backspace: "\x7f",
+        Tab: "\t",
+        Escape: "\x1b",
+        ArrowUp: "\x1b[A",
+        ArrowDown: "\x1b[B",
+        ArrowRight: "\x1b[C",
+        ArrowLeft: "\x1b[D",
+        Delete: "\x1b[3~",
+        Home: "\x1b[H",
+        End: "\x1b[F",
+        PageUp: "\x1b[5~",
+        PageDown: "\x1b[6~"
+      };
+      if (map[event.key]) return map[event.key];
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) {
+        return event.key;
+      }
+      return "";
     }
 
     function confirmAWS(command, profile) {
@@ -1283,6 +1452,37 @@
     $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
     $("previewDestroyBtn").addEventListener("click", () => runAWS("destroy", false));
     $("confirmDestroyBtn").addEventListener("click", () => runAWS("destroy", true));
+    $("terminalBtn").addEventListener("click", () => {
+      const p = selectedProfile();
+      if (p) openTerminal(p.name);
+    });
+    $("terminalBackBtn").addEventListener("click", () => showView("operationsView"));
+    $("terminalReconnectBtn").addEventListener("click", () => {
+      const p = selectedProfile();
+      if (p) connectTerminal(p.name);
+    });
+    $("terminalDisconnectBtn").addEventListener("click", () => {
+      closeTerminal(true);
+      terminalSetStatus("终端已断开");
+    });
+    $("terminalSurface").addEventListener("keydown", (event) => {
+      const data = terminalKeyData(event);
+      if (!data) return;
+      event.preventDefault();
+      sendTerminalInput(data);
+    });
+    $("terminalSurface").addEventListener("paste", (event) => {
+      const text = event.clipboardData?.getData("text") || "";
+      if (!text) return;
+      event.preventDefault();
+      sendTerminalInput(text);
+    });
+    document.querySelectorAll("[data-terminal-command]").forEach((button) => {
+      button.addEventListener("click", () => {
+        $("terminalSurface").focus();
+        sendTerminalInput(button.getAttribute("data-terminal-command") + "\r");
+      });
+    });
     document.querySelectorAll("[data-view]").forEach((button) => {
       button.addEventListener("click", () => showView(button.getAttribute("data-view")));
     });
