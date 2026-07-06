@@ -418,7 +418,7 @@
               <button id="confirmOpenBtn" class="primary">确认打开</button>
               <button id="previewDestroyBtn">预览释放</button>
               <button id="confirmDestroyBtn" class="danger">确认释放</button>
-              <button id="syncBtn">上传/下载</button>
+              <button id="syncBtn">传输</button>
               <button id="terminalBtn">终端</button>
               <button id="eventsBtn">事件</button>
             </div>
@@ -461,7 +461,7 @@
 
         <section id="syncView" class="view hidden">
           <div class="section-head">
-            <h2 id="syncTitle">上传/下载</h2>
+            <h2 id="syncTitle">传输</h2>
             <div class="toolbar">
               <button id="syncBackBtn">返回操作页</button>
               <button id="syncRefreshHistoryBtn">刷新历史</button>
@@ -891,14 +891,14 @@
       $("profiles").innerHTML = rows.length ? rows.map((p) => {
         const status = state.statuses[p.name];
         const ready = !!status?.ready;
-        const syncAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能上传/下载。\"";
+        const syncAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能传输。\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + syncAttrs + ">上传/下载</button><button data-terminal=\"" + escapeAttr(p.name) + "\">终端</button></div></td>" +
+          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + syncAttrs + ">传输</button><button data-terminal=\"" + escapeAttr(p.name) + "\">终端</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -926,7 +926,7 @@
       document.querySelectorAll("[data-sync]").forEach((button) => {
         button.addEventListener("click", () => {
           if (button.disabled) {
-            setStatus("Mac 未 ready，不能上传/下载。");
+            setStatus("Mac 未 ready，不能传输。");
             return;
           }
           openSync(button.getAttribute("data-sync"));
@@ -996,8 +996,8 @@
       $("syncPushBtn").disabled = syncDisabled;
       $("syncPullBtn").disabled = syncDisabled;
       $("syncRefreshHistoryBtn").disabled = disabled || state.busy;
-      $("syncTitle").textContent = p ? ("上传/下载 · " + p.name) : "上传/下载";
-      $("syncReadyHint").textContent = p && !profileReady(p.name) ? "Mac 未 ready，不能上传/下载。" : "";
+      $("syncTitle").textContent = p ? ("传输 · " + p.name) : "传输";
+      $("syncReadyHint").textContent = p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : "";
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
@@ -1166,7 +1166,7 @@
           "<code>" + escapeHTML(from || "-") + " -> " + escapeHTML(to || "-") + "</code>" +
           "<div class=\"sync-history-actions\"><button data-sync-use=\"" + escapeAttr(item.id) + "\">使用</button><button data-sync-delete=\"" + escapeAttr(item.id) + "\">删除</button></div>" +
         "</div>";
-      }).join("") : "<div class=\"muted\">还没有上传/下载记录。</div>";
+      }).join("") : "<div class=\"muted\">还没有传输记录。</div>";
       document.querySelectorAll("[data-sync-use]").forEach((button) => {
         button.addEventListener("click", () => useSyncHistory(button.getAttribute("data-sync-use")));
       });
@@ -1211,7 +1211,7 @@
       const p = selectedProfile();
       if (!p) return;
       if (!profileReady(p.name)) {
-        setStatus("Mac 未 ready，不能上传/下载。");
+        setStatus("Mac 未 ready，不能传输。");
         return;
       }
       const payload = { profile: p.name };
@@ -1628,7 +1628,7 @@
       const p = selectedProfile();
       if (!p) return;
       if (!profileReady(p.name)) {
-        setStatus("Mac 未 ready，不能上传/下载。");
+        setStatus("Mac 未 ready，不能传输。");
         return;
       }
       openSync(p.name);
