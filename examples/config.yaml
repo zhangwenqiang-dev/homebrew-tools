@@ -1,3 +1,6 @@
+server:
+  user_api: https://cm.hsgitlab.xyz
+
 profiles:
   xcode-vnc:
     description: Apple account: user@example.com

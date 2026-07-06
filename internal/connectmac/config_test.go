@@ -8,6 +8,8 @@ import (
 )
 
 const sampleConfig = `
+server:
+  user_api: https://cm.hsgitlab.xyz
 defaults:
   user: default-user
   identity_file: ~/.ssh/default.pem
@@ -75,6 +77,9 @@ func TestParseConfig(t *testing.T) {
 	profile, ok := cfg.Profile("xcode-vnc")
 	if !ok {
 		t.Fatal("expected profile xcode-vnc")
+	}
+	if cfg.Server.UserAPI != "https://cm.hsgitlab.xyz" {
+		t.Fatalf("server user_api = %q, want https://cm.hsgitlab.xyz", cfg.Server.UserAPI)
 	}
 	if profile.User != "user" {
 		t.Fatalf("user = %q, want user", profile.User)
@@ -242,6 +247,27 @@ profiles:
 	}
 	if extra.AWS.Creator != "" {
 		t.Fatalf("extra aws creator = %q, want empty because defaults.aws.creator is not applied", extra.AWS.Creator)
+	}
+}
+
+func TestLoadConfigMergesServerConfig(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(config, []byte(`
+server:
+  user_api: https://cm.hsgitlab.xyz/
+profiles:
+  base:
+    description: Base profile
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(config)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Server.UserAPI != "https://cm.hsgitlab.xyz" {
+		t.Fatalf("server user_api = %q, want https://cm.hsgitlab.xyz", cfg.Server.UserAPI)
 	}
 }
 

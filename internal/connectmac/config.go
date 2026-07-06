@@ -16,7 +16,12 @@ const DefaultAWSUser = "ec2-user"
 
 type Config struct {
 	Defaults ProfileDefaults
+	Server   ServerConfig
 	Profiles map[string]Profile
+}
+
+type ServerConfig struct {
+	UserAPI string
 }
 
 type ProfileDefaults struct {
@@ -159,6 +164,9 @@ func mergeConfigs(dst *Config, src Config, source string) error {
 	if dst.Profiles == nil {
 		dst.Profiles = map[string]Profile{}
 	}
+	if err := mergeServer(&dst.Server, src.Server, source); err != nil {
+		return err
+	}
 	if err := mergeDefaults(&dst.Defaults, src.Defaults, source); err != nil {
 		return err
 	}
@@ -167,6 +175,13 @@ func mergeConfigs(dst *Config, src Config, source string) error {
 			return fmt.Errorf("duplicate profile %q in %s", name, source)
 		}
 		dst.Profiles[name] = profile
+	}
+	return nil
+}
+
+func mergeServer(dst *ServerConfig, src ServerConfig, source string) error {
+	if err := mergeDefaultString(&dst.UserAPI, src.UserAPI, "server.user_api", source); err != nil {
+		return err
 	}
 	return nil
 }
@@ -230,6 +245,7 @@ func ParseConfig(data string) (Config, error) {
 	inDefaultsAWSAMI := false
 	inDefaultsAWSAMIsByRegion := false
 	defaultsAWSAMIRegion := ""
+	inServer := false
 	inProfiles := false
 	inTunnels := false
 	inSync := false
@@ -252,7 +268,29 @@ func ParseConfig(data string) (Config, error) {
 		line := strings.TrimSpace(raw)
 
 		switch {
+		case indent == 0 && line == "server:":
+			inServer = true
+			inDefaults = false
+			inDefaultsAWS = false
+			inDefaultsAWSAMI = false
+			inDefaultsAWSAMIsByRegion = false
+			defaultsAWSAMIRegion = ""
+			inProfiles = false
+			current = nil
+			currentTunnel = nil
+			inTunnels = false
+			inSync = false
+			syncDirection = ""
+			syncList = ""
+			inVNC = false
+			inAWS = false
+			inAWSAMI = false
+			inAWSEIPOwnerTag = false
+			inAWSSubnetsByAZ = false
+			awsList = ""
+			continue
 		case indent == 0 && line == "defaults:":
+			inServer = false
 			inDefaults = true
 			inProfiles = false
 			current = nil
@@ -273,6 +311,7 @@ func ParseConfig(data string) (Config, error) {
 			awsList = ""
 			continue
 		case indent == 0 && line == "profiles:":
+			inServer = false
 			inDefaults = false
 			inDefaultsAWS = false
 			inDefaultsAWSAMI = false
@@ -298,6 +337,13 @@ func ParseConfig(data string) (Config, error) {
 			inAWSEIPOwnerTag = false
 			inAWSSubnetsByAZ = false
 			awsList = ""
+			continue
+		}
+
+		if inServer && indent == 2 {
+			if err := applyServerField(&cfg.Server, line); err != nil {
+				return Config{}, err
+			}
 			continue
 		}
 
@@ -843,6 +889,20 @@ func applyDefaultField(defaults *ProfileDefaults, line string) error {
 		defaults.IdentityFile = value
 	default:
 		return fmt.Errorf("unsupported defaults field %q", key)
+	}
+	return nil
+}
+
+func applyServerField(server *ServerConfig, line string) error {
+	key, value, err := splitField(line)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "user_api":
+		server.UserAPI = strings.TrimRight(value, "/")
+	default:
+		return fmt.Errorf("unsupported server field %q", key)
 	}
 	return nil
 }

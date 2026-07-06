@@ -42,11 +42,14 @@ For many profiles, keep shared or important entries in `config.yaml` and put add
 ```
 
 Each file uses the same `profiles:` structure. `cm` loads `config.yaml` first, then all `.yaml` and `.yml` files in `profiles/` by filename. Duplicate profile names are rejected.
-Shared `user`, `identity_file`, and region-specific AMI values can be placed in top-level `defaults:`. Profile values override defaults. `aws.creator` is intentionally not inherited from defaults; it must be supplied explicitly in the profile or by the user during confirmed AWS create/open/adopt/launch operations.
+Shared `user`, `identity_file`, and region-specific AMI values can be placed in top-level `defaults:`. Profile values override defaults. `aws.creator` is intentionally not inherited from defaults; it must be supplied explicitly in the profile or by the user during confirmed AWS create/open/adopt/launch operations. For a shared team user service, set top-level `server.user_api`.
 
 Example profile:
 
 ```yaml
+server:
+  user_api: https://cm.hsgitlab.xyz
+
 defaults:
   user: ec2-user
   identity_file: ~/.ssh/example.pem

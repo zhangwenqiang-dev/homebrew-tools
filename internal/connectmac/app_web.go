@@ -30,6 +30,10 @@ type webAPIResponse struct {
 	Data   interface{} `json:"data,omitempty"`
 }
 
+type webClientConfig struct {
+	UserAPI string `json:"user_api"`
+}
+
 type webProfile struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -162,6 +166,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler())
 	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler())
 	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
+	mux.HandleFunc("/api/config", a.webConfigHandler(configPath))
 	mux.HandleFunc("/api/auth/update-email", a.requireWebRole(a.webAuthUpdateEmailHandler(), "admin"))
 	mux.HandleFunc("/api/settings", a.requireWebRole(a.webSettingsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
@@ -186,6 +191,26 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/sync/pull", a.requireWebRole(a.webSyncPullHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/local/list", a.requireWebRole(a.webLocalListHandler(), "operator", "admin"))
 	return mux
+}
+
+func (a App) webConfigHandler(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		cfg, err := LoadConfig(configPath)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{
+			OK: true,
+			Data: map[string]interface{}{
+				"config": webClientConfig{UserAPI: cfg.Server.UserAPI},
+			},
+		})
+	}
 }
 
 func (a App) resolveWebDir() (string, error) {

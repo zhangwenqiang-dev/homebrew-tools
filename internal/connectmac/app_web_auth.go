@@ -93,7 +93,7 @@ func (a App) webAuthSetupHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := a.setWebSession(w, member); err != nil {
+		if err := a.setWebSessionForRequest(w, r, member); err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -130,7 +130,7 @@ func (a App) webAuthLoginHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusUnauthorized, "invalid username or password")
 			return
 		}
-		if err := a.setWebSession(w, member); err != nil {
+		if err := a.setWebSessionForRequest(w, r, member); err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -144,7 +144,15 @@ func (a App) webAuthLogoutHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: webSessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		options := webSessionCookieOptions(r)
+		http.SetCookie(w, &http.Cookie{
+			Name:     webSessionCookie,
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: options.sameSite,
+			Secure:   options.secure,
+		})
 		writeWebJSON(w, webAPIResponse{OK: true})
 	}
 }
@@ -188,7 +196,7 @@ func (a App) webAuthUpdateEmailHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := a.setWebSession(w, updated); err != nil {
+		if err := a.setWebSessionForRequest(w, r, updated); err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -279,7 +287,20 @@ func (a App) webSetupRequired() (bool, error) {
 	return !hasMembers, nil
 }
 
+type webSessionOptions struct {
+	secure   bool
+	sameSite http.SameSite
+}
+
 func (a App) setWebSession(w http.ResponseWriter, member Member) error {
+	return a.setWebSessionWithOptions(w, member, webSessionOptions{sameSite: http.SameSiteLaxMode})
+}
+
+func (a App) setWebSessionForRequest(w http.ResponseWriter, r *http.Request, member Member) error {
+	return a.setWebSessionWithOptions(w, member, webSessionCookieOptions(r))
+}
+
+func (a App) setWebSessionWithOptions(w http.ResponseWriter, member Member, options webSessionOptions) error {
 	secret, err := a.MemberStore.EnsureAuthSecret()
 	if err != nil {
 		return err
@@ -293,9 +314,33 @@ func (a App) setWebSession(w http.ResponseWriter, member Member) error {
 		Path:     "/",
 		Expires:  time.Unix(expires, 0),
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: options.sameSite,
+		Secure:   options.secure,
 	})
 	return nil
+}
+
+func webSessionCookieOptions(r *http.Request) webSessionOptions {
+	if webRequestIsHTTPS(r) {
+		return webSessionOptions{secure: true, sameSite: http.SameSiteNoneMode}
+	}
+	return webSessionOptions{sameSite: http.SameSiteLaxMode}
+}
+
+func webRequestIsHTTPS(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") {
+		return true
+	}
+	return false
 }
 
 func (a App) verifyWebSession(value string) (string, bool) {

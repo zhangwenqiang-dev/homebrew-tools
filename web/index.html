@@ -634,7 +634,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -671,9 +671,26 @@
       $("statusLine").textContent = value;
     }
 
+    function remoteUserAPIPath(path) {
+      return path.startsWith("/api/auth/") ||
+        path === "/api/members" ||
+        path.startsWith("/api/member/") ||
+        path === "/api/settings" ||
+        path.startsWith("/api/events");
+    }
+
+    function apiURL(path) {
+      const userAPI = (state.clientConfig?.user_api || "").replace(/\/+$/, "");
+      if (userAPI && remoteUserAPIPath(path)) {
+        return userAPI + path;
+      }
+      return path;
+    }
+
     async function api(path, options = {}) {
-      const res = await fetch(path, {
+      const res = await fetch(apiURL(path), {
         headers: { "Content-Type": "application/json" },
+        credentials: remoteUserAPIPath(path) && state.clientConfig?.user_api ? "include" : "same-origin",
         ...options
       });
       const body = await res.json();
@@ -685,6 +702,11 @@
         throw new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
       }
       return body;
+    }
+
+    async function loadClientConfig() {
+      const body = await api("/api/config");
+      state.clientConfig = body.data?.config || { user_api: "" };
     }
 
     async function loadAuth() {
@@ -1782,7 +1804,7 @@
       button.addEventListener("click", () => showView(button.getAttribute("data-view")));
     });
 
-    loadAuth().then((ok) => {
+    loadClientConfig().then(() => loadAuth()).then((ok) => {
       if (ok) return loadAppData();
       return null;
     }).catch((err) => {

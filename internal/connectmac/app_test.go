@@ -296,6 +296,29 @@ func TestAppWebProfilesAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebConfigAPI(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `
+server:
+  user_api: https://cm.hsgitlab.xyz/
+profiles:
+  xcode-vnc:
+    description: Example
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"user_api":"https://cm.hsgitlab.xyz"`) {
+		t.Fatalf("config body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebMemberAPIs(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -381,6 +404,12 @@ func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
 	if len(cookies) == 0 {
 		t.Fatalf("expected login to set session cookie")
 	}
+	if cookies[0].Secure {
+		t.Fatalf("local login cookie should not be secure")
+	}
+	if cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("local login cookie SameSite = %v, want Lax", cookies[0].SameSite)
+	}
 
 	body = strings.NewReader(`{"default_owner_email":"admin@example.com","default_status_filter":"ready","background_confirm":true,"show_released":true}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/settings", body)
@@ -416,6 +445,34 @@ func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
 	_, ok, err := app.MemberStore.VerifyMemberPassword("new-admin@example.com", "password123")
 	if err != nil || !ok {
 		t.Fatalf("updated email login failed ok=%t err=%v", ok, err)
+	}
+}
+
+func TestAppWebAuthHTTPSProxyCookie(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.SetupAdmin("管理员", "admin@example.com", "password123"); err != nil {
+		t.Fatalf("setup admin: %v", err)
+	}
+	challenge := webChallengeForTest(t, app)
+	body := strings.NewReader(`{"username":"admin@example.com","password":"password123","challenge_token":"` + challenge["token"] + `","challenge_answer":"` + challenge["answer"] + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatalf("expected login to set session cookie")
+	}
+	if !cookies[0].Secure {
+		t.Fatalf("https proxy cookie should be secure")
+	}
+	if cookies[0].SameSite != http.SameSiteNoneMode {
+		t.Fatalf("https proxy cookie SameSite = %v, want None", cookies[0].SameSite)
 	}
 }
 
