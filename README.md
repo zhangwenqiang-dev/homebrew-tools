@@ -124,6 +124,18 @@ profiles:
 
 AMI defaults are resolved in this order: `profile.aws.ami`, then `defaults.aws.amis_by_region[profile.aws.region]`, then legacy `defaults.aws.ami`.
 
+For a deployed user API, `cm web` automatically uses MySQL for members when these environment variables are present:
+
+```env
+CONNECTMAC_DB_HOST=127.0.0.1
+CONNECTMAC_DB_PORT=3306
+CONNECTMAC_DB_DATABASE=connectmac
+CONNECTMAC_DB_USERNAME=connectmac
+CONNECTMAC_DB_PASSWORD=...
+```
+
+Without those variables, `cm web` keeps using the local JSON member store at `~/.connectmac/members.json`.
+
 ## Commands
 
 Show step-by-step guidance:

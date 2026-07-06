@@ -31,7 +31,7 @@ type App struct {
 	JobManager   JobManager
 	AWSService   AWSService
 	WebDir       string
-	MemberStore  MemberStore
+	MemberStore  MemberRepository
 	LogManager   LogManager
 	SyncHistory  SyncHistoryStore
 	KnownHosts   string

@@ -92,6 +92,17 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	if opts.Dir != "" {
 		a.WebDir = opts.Dir
 	}
+	if store, ok, err := NewMySQLMemberStoreFromEnv(); err != nil {
+		fmt.Fprintf(a.Err, "mysql member store failed: %v\n", err)
+		return 1
+	} else if ok {
+		if err := store.EnsureSchema(); err != nil {
+			fmt.Fprintf(a.Err, "mysql member schema failed: %v\n", err)
+			return 1
+		}
+		a.MemberStore = store
+		fmt.Fprintln(a.Out, "ConnectMac member store: mysql")
+	}
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
 	handler := a.newWebHandler(configPath)
 	server := &http.Server{Addr: addr, Handler: handler}

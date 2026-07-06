@@ -22,6 +22,28 @@ type MemberStore struct {
 	Now  func() time.Time
 }
 
+type MemberRepository interface {
+	Load() (MemberData, error)
+	Save(MemberData) error
+	ListMembers() ([]MemberWithAssignments, error)
+	AddMember(name, email, role string) (Member, error)
+	AddMemberWithPassword(name, email, role, password string) (Member, error)
+	SetupAdmin(name, email, password string) (Member, error)
+	SetMemberPassword(emailOrUsername, password string) error
+	UpdateMemberEmail(memberID, newEmail string) (Member, error)
+	VerifyMemberPassword(emailOrUsername, password string) (Member, bool, error)
+	HasPasswordMembers() (bool, error)
+	SetMemberEnabled(email string, enabled bool) (Member, error)
+	AssignMember(appleEmail, memberEmail, relation string) (AppleAccountMember, error)
+	UnassignMember(appleEmail, memberEmail string) error
+	MembersForApple(appleEmail string) ([]PublicMember, error)
+	WebSettings() (WebSettings, error)
+	UpdateWebSettings(update WebSettings) (WebSettings, error)
+	EnsureAuthSecret() (string, error)
+	RecordEvent(event OperationEvent) error
+	RecentEvents(appleEmail string, limit int) ([]OperationEvent, error)
+}
+
 type MemberData struct {
 	Members     []Member             `json:"members"`
 	Assignments []AppleAccountMember `json:"assignments"`
@@ -644,4 +666,362 @@ func hashPassword(password, salt string) string {
 		sum = hash[:]
 	}
 	return base64.RawURLEncoding.EncodeToString(sum)
+}
+
+type memberDataStore interface {
+	Load() (MemberData, error)
+	Save(MemberData) error
+	currentTime() time.Time
+}
+
+func addMemberToStore(s memberDataStore, name, email, role string) (Member, error) {
+	name = strings.TrimSpace(name)
+	email = normalizeEmail(email)
+	if strings.TrimSpace(role) == "" {
+		role = "operator"
+	}
+	role = normalizeMemberRole(role)
+	if name == "" {
+		return Member{}, errors.New("name is required")
+	}
+	if email == "" || !strings.Contains(email, "@") {
+		return Member{}, errors.New("valid email is required")
+	}
+	if role == "" {
+		return Member{}, errors.New("role must be admin, operator, or viewer")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	if _, ok := findMemberByEmail(db, email); ok {
+		return Member{}, fmt.Errorf("member %s already exists", email)
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	member := Member{
+		ID:        "member-" + slugPart(email),
+		Name:      name,
+		Email:     email,
+		Username:  email,
+		Role:      role,
+		Enabled:   true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	db.Members = append(db.Members, member)
+	return member, s.Save(db)
+}
+
+func setupAdminInStore(s memberDataStore, name, email, password string) (Member, error) {
+	name = strings.TrimSpace(name)
+	email = normalizeEmail(email)
+	if name == "" {
+		return Member{}, errors.New("name is required")
+	}
+	if email == "" || !strings.Contains(email, "@") {
+		return Member{}, errors.New("valid email is required")
+	}
+	if len(password) < 8 {
+		return Member{}, errors.New("password must be at least 8 characters")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	member, ok := findMemberByEmailOrUsername(db, email)
+	if ok {
+		idx, _ := findMemberIndexByEmailOrUsername(db, email)
+		db.Members[idx].Name = name
+		db.Members[idx].Email = email
+		db.Members[idx].Username = email
+		db.Members[idx].Role = "admin"
+		db.Members[idx].Enabled = true
+		db.Members[idx].UpdatedAt = now
+		member = db.Members[idx]
+	} else {
+		member = Member{
+			ID:        "member-" + slugPart(email),
+			Name:      name,
+			Email:     email,
+			Username:  email,
+			Role:      "admin",
+			Enabled:   true,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		db.Members = append(db.Members, member)
+	}
+	if err := s.Save(db); err != nil {
+		return Member{}, err
+	}
+	if err := setMemberPasswordInStore(s, email, password); err != nil {
+		return Member{}, err
+	}
+	db, err = s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	member, _ = findMemberByEmailOrUsername(db, email)
+	return member, nil
+}
+
+func setMemberPasswordInStore(s memberDataStore, emailOrUsername, password string) error {
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return err
+	}
+	idx, ok := findMemberIndexByEmailOrUsername(db, emailOrUsername)
+	if !ok {
+		return fmt.Errorf("member %s not found", emailOrUsername)
+	}
+	salt, err := randomToken(24)
+	if err != nil {
+		return err
+	}
+	db.Members[idx].PasswordSalt = salt
+	db.Members[idx].PasswordHash = hashPassword(password, salt)
+	db.Members[idx].UpdatedAt = s.currentTime().Format(time.RFC3339)
+	return s.Save(db)
+}
+
+func updateMemberEmailInStore(s memberDataStore, memberID, newEmail string) (Member, error) {
+	newEmail = normalizeEmail(newEmail)
+	if newEmail == "" || !strings.Contains(newEmail, "@") {
+		return Member{}, errors.New("valid email is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	targetIdx := -1
+	for i, member := range db.Members {
+		if member.ID == memberID {
+			targetIdx = i
+			continue
+		}
+		if strings.EqualFold(member.Email, newEmail) || strings.EqualFold(member.Username, newEmail) {
+			return Member{}, fmt.Errorf("member %s already exists", newEmail)
+		}
+	}
+	if targetIdx < 0 {
+		return Member{}, fmt.Errorf("member %s not found", memberID)
+	}
+	oldEmail := db.Members[targetIdx].Email
+	db.Members[targetIdx].Email = newEmail
+	db.Members[targetIdx].Username = newEmail
+	db.Members[targetIdx].UpdatedAt = s.currentTime().Format(time.RFC3339)
+	if strings.EqualFold(db.Settings.DefaultOwnerEmail, oldEmail) {
+		db.Settings.DefaultOwnerEmail = newEmail
+	}
+	return db.Members[targetIdx], s.Save(db)
+}
+
+func verifyMemberPasswordInStore(s memberDataStore, emailOrUsername, password string) (Member, bool, error) {
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, false, err
+	}
+	member, ok := findMemberByEmailOrUsername(db, emailOrUsername)
+	if !ok || !member.Enabled || member.PasswordHash == "" || member.PasswordSalt == "" {
+		return Member{}, false, nil
+	}
+	got := hashPassword(password, member.PasswordSalt)
+	if subtle.ConstantTimeCompare([]byte(got), []byte(member.PasswordHash)) != 1 {
+		return Member{}, false, nil
+	}
+	return member, true, nil
+}
+
+func hasPasswordMembersInStore(s memberDataStore) (bool, error) {
+	db, err := s.Load()
+	if err != nil {
+		return false, err
+	}
+	for _, member := range db.Members {
+		if member.Enabled && member.PasswordHash != "" && member.PasswordSalt != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func setMemberEnabledInStore(s memberDataStore, email string, enabled bool) (Member, error) {
+	email = normalizeEmail(email)
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	idx, ok := findMemberIndexByEmail(db, email)
+	if !ok {
+		return Member{}, fmt.Errorf("member %s not found", email)
+	}
+	db.Members[idx].Enabled = enabled
+	db.Members[idx].UpdatedAt = s.currentTime().Format(time.RFC3339)
+	return db.Members[idx], s.Save(db)
+}
+
+func assignMemberInStore(s memberDataStore, appleEmail, memberEmail, relation string) (AppleAccountMember, error) {
+	appleEmail = normalizeEmail(appleEmail)
+	memberEmail = normalizeEmail(memberEmail)
+	relation = strings.TrimSpace(strings.ToLower(relation))
+	if appleEmail == "" || !strings.Contains(appleEmail, "@") {
+		return AppleAccountMember{}, errors.New("valid apple email is required")
+	}
+	if relation == "" {
+		relation = "owner"
+	}
+	db, err := s.Load()
+	if err != nil {
+		return AppleAccountMember{}, err
+	}
+	member, ok := findMemberByEmail(db, memberEmail)
+	if !ok {
+		return AppleAccountMember{}, fmt.Errorf("member %s not found", memberEmail)
+	}
+	for _, assignment := range db.Assignments {
+		if strings.EqualFold(assignment.AppleEmail, appleEmail) && assignment.MemberID == member.ID {
+			return assignment, nil
+		}
+	}
+	assignment := AppleAccountMember{
+		AppleEmail: appleEmail,
+		MemberID:   member.ID,
+		Relation:   relation,
+		CreatedAt:  s.currentTime().Format(time.RFC3339),
+	}
+	db.Assignments = append(db.Assignments, assignment)
+	return assignment, s.Save(db)
+}
+
+func unassignMemberInStore(s memberDataStore, appleEmail, memberEmail string) error {
+	appleEmail = normalizeEmail(appleEmail)
+	memberEmail = normalizeEmail(memberEmail)
+	db, err := s.Load()
+	if err != nil {
+		return err
+	}
+	member, ok := findMemberByEmail(db, memberEmail)
+	if !ok {
+		return fmt.Errorf("member %s not found", memberEmail)
+	}
+	out := db.Assignments[:0]
+	removed := false
+	for _, assignment := range db.Assignments {
+		if strings.EqualFold(assignment.AppleEmail, appleEmail) && assignment.MemberID == member.ID {
+			removed = true
+			continue
+		}
+		out = append(out, assignment)
+	}
+	if !removed {
+		return fmt.Errorf("assignment not found")
+	}
+	db.Assignments = out
+	return s.Save(db)
+}
+
+func membersForAppleInStore(s memberDataStore, appleEmail string) ([]PublicMember, error) {
+	appleEmail = normalizeEmail(appleEmail)
+	db, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	var members []PublicMember
+	for _, assignment := range db.Assignments {
+		if !strings.EqualFold(assignment.AppleEmail, appleEmail) {
+			continue
+		}
+		if member, ok := findMemberByID(db, assignment.MemberID); ok {
+			members = append(members, publicMember(member))
+		}
+	}
+	return members, nil
+}
+
+func webSettingsInStore(s memberDataStore) (WebSettings, error) {
+	db, err := s.Load()
+	if err != nil {
+		return WebSettings{}, err
+	}
+	return publicWebSettings(db.Settings), nil
+}
+
+func updateWebSettingsInStore(s memberDataStore, update WebSettings) (WebSettings, error) {
+	db, err := s.Load()
+	if err != nil {
+		return WebSettings{}, err
+	}
+	db.Settings.DefaultOwnerEmail = normalizeEmail(update.DefaultOwnerEmail)
+	db.Settings.DefaultStatusFilter = strings.TrimSpace(update.DefaultStatusFilter)
+	db.Settings.BackgroundConfirm = update.BackgroundConfirm
+	db.Settings.ShowReleased = update.ShowReleased
+	if err := s.Save(db); err != nil {
+		return WebSettings{}, err
+	}
+	return publicWebSettings(db.Settings), nil
+}
+
+func ensureAuthSecretInStore(s memberDataStore) (string, error) {
+	db, err := s.Load()
+	if err != nil {
+		return "", err
+	}
+	if db.Settings.AuthSecret == "" {
+		secret, err := randomToken(32)
+		if err != nil {
+			return "", err
+		}
+		db.Settings.AuthSecret = secret
+		if err := s.Save(db); err != nil {
+			return "", err
+		}
+	}
+	return db.Settings.AuthSecret, nil
+}
+
+func recordEventInStore(s memberDataStore, event OperationEvent) error {
+	db, err := s.Load()
+	if err != nil {
+		return err
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	if event.ID == "" {
+		event.ID = "event-" + strings.ReplaceAll(now, ":", "") + "-" + slugPart(event.Action+"-"+event.Profile)
+	}
+	if event.CreatedAt == "" {
+		event.CreatedAt = now
+	}
+	db.Events = append(db.Events, event)
+	if len(db.Events) > 500 {
+		db.Events = db.Events[len(db.Events)-500:]
+	}
+	return s.Save(db)
+}
+
+func recentEventsInStore(s memberDataStore, appleEmail string, limit int) ([]OperationEvent, error) {
+	db, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	appleEmail = normalizeEmail(appleEmail)
+	var out []OperationEvent
+	for i := len(db.Events) - 1; i >= 0; i-- {
+		event := db.Events[i]
+		if appleEmail != "" && !strings.EqualFold(event.AppleEmail, appleEmail) {
+			continue
+		}
+		out = append(out, event)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s MemberStore) currentTime() time.Time {
+	return s.normalize().Now()
 }
