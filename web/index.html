@@ -647,7 +647,14 @@
         const el = $(id);
         if (el) el.disabled = busy;
       }
-      document.querySelectorAll("[data-profile], [data-start], [data-sync], [data-terminal], [data-sync-use], [data-sync-delete]").forEach((button) => {
+      document.querySelectorAll("[data-profile]").forEach((button) => {
+        button.disabled = busy;
+      });
+      document.querySelectorAll("[data-start], [data-sync], [data-terminal]").forEach((button) => {
+        const profile = button.getAttribute("data-start") || button.getAttribute("data-sync") || button.getAttribute("data-terminal");
+        button.disabled = busy || !profileReady(profile);
+      });
+      document.querySelectorAll("[data-sync-use], [data-sync-delete]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
