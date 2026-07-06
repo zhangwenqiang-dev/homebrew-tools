@@ -33,6 +33,7 @@ type App struct {
 	WebDir       string
 	MemberStore  MemberStore
 	LogManager   LogManager
+	SyncHistory  SyncHistoryStore
 	KnownHosts   string
 }
 
@@ -49,6 +50,7 @@ func NewApp(out, err io.Writer) App {
 		AWSService:   NewAWSService(),
 		MemberStore:  NewMemberStore(DefaultMemberDataPath),
 		LogManager:   NewLogManager(DefaultLogDir),
+		SyncHistory:  NewSyncHistoryStore(DefaultSyncHistoryPath),
 		KnownHosts:   "~/.ssh/known_hosts",
 	}
 }

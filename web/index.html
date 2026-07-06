@@ -305,6 +305,14 @@
       font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     .terminal-surface:focus { border-color: #7da2ff; box-shadow: 0 0 0 2px rgba(36, 107, 254, .18); }
+    .sync-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
+    .sync-panel { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 8px; }
+    .sync-panel input { width: 100%; }
+    .sync-history { padding: 12px; border-top: 1px solid var(--line); }
+    .sync-history-list { display: grid; gap: 8px; margin-top: 8px; }
+    .sync-history-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
+    .sync-history-item code { overflow-wrap: anywhere; white-space: normal; }
+    .sync-history-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       .app-layout { flex-direction: column; }
@@ -312,6 +320,7 @@
       .app-feedback { max-width: 100%; width: 100%; white-space: normal; }
       input { width: min(100%, 280px); }
       .details { grid-template-columns: 1fr; }
+      .sync-grid { grid-template-columns: 1fr; }
       pre { max-height: 420px; }
     }
   </style>
@@ -409,6 +418,7 @@
               <button id="confirmOpenBtn" class="primary">确认打开</button>
               <button id="previewDestroyBtn">预览释放</button>
               <button id="confirmDestroyBtn" class="danger">确认释放</button>
+              <button id="syncBtn">上传/下载</button>
               <button id="terminalBtn">终端</button>
               <button id="eventsBtn">事件</button>
             </div>
@@ -446,6 +456,37 @@
               </thead>
               <tbody id="jobs"></tbody>
             </table>
+          </div>
+        </section>
+
+        <section id="syncView" class="view hidden">
+          <div class="section-head">
+            <h2 id="syncTitle">上传/下载</h2>
+            <div class="toolbar">
+              <button id="syncBackBtn">返回操作页</button>
+              <button id="syncRefreshHistoryBtn">刷新历史</button>
+            </div>
+          </div>
+          <div class="sync-grid">
+            <div class="sync-panel">
+              <h2>上传到 Mac</h2>
+              <input id="syncPushLocalPath" placeholder="本地路径，空则使用 cm web 当前目录">
+              <input id="syncPushRemotePath" placeholder="远程目录，空则 ~/Downloads/">
+              <button id="syncPushBtn" class="primary">开始上传</button>
+            </div>
+            <div class="sync-panel">
+              <h2>下载到本机</h2>
+              <input id="syncPullRemotePath" placeholder="远程路径，空则 ~/Downloads/">
+              <input id="syncPullLocalPath" placeholder="本地目录，空则使用 cm web 当前目录">
+              <button id="syncPullBtn" class="primary">开始下载</button>
+            </div>
+          </div>
+          <div class="sync-history">
+            <div class="section-head">
+              <h2>最近使用</h2>
+              <span id="syncReadyHint" class="muted"></span>
+            </div>
+            <div id="syncHistory" class="sync-history-list"></div>
           </div>
         </section>
 
@@ -547,7 +588,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, syncHistory: [], terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -556,11 +597,11 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
-      document.querySelectorAll("[data-profile], [data-status], [data-start], [data-terminal]").forEach((button) => {
+      document.querySelectorAll("[data-profile], [data-status], [data-start], [data-sync], [data-terminal], [data-sync-use], [data-sync-delete]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -840,18 +881,24 @@
       });
     }
 
+    function profileReady(name) {
+      return !!state.statuses[name]?.ready;
+    }
+
     function renderProfiles() {
       const rows = filteredProfiles();
       $("profileCount").textContent = `${rows.length}/${state.profiles.length}`;
       $("profiles").innerHTML = rows.length ? rows.map((p) => {
         const status = state.statuses[p.name];
+        const ready = !!status?.ready;
+        const syncAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能上传/下载。\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button><button data-terminal=\"" + escapeAttr(p.name) + "\">终端</button></div></td>" +
+          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + syncAttrs + ">上传/下载</button><button data-terminal=\"" + escapeAttr(p.name) + "\">终端</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -874,6 +921,15 @@
       document.querySelectorAll("[data-start]").forEach((button) => {
         button.addEventListener("click", () => {
           startTunnel(button.getAttribute("data-start"));
+        });
+      });
+      document.querySelectorAll("[data-sync]").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (button.disabled) {
+            setStatus("Mac 未 ready，不能上传/下载。");
+            return;
+          }
+          openSync(button.getAttribute("data-sync"));
         });
       });
       document.querySelectorAll("[data-terminal]").forEach((button) => {
@@ -932,9 +988,16 @@
       const p = selectedProfile();
       $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
       const disabled = !p;
+      const syncDisabled = disabled || state.busy || (p && !profileReady(p.name));
       for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
+      $("syncBtn").disabled = syncDisabled;
+      $("syncPushBtn").disabled = syncDisabled;
+      $("syncPullBtn").disabled = syncDisabled;
+      $("syncRefreshHistoryBtn").disabled = disabled || state.busy;
+      $("syncTitle").textContent = p ? ("上传/下载 · " + p.name) : "上传/下载";
+      $("syncReadyHint").textContent = p && !profileReady(p.name) ? "Mac 未 ready，不能上传/下载。" : "";
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
@@ -1063,6 +1126,115 @@
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("连接失败");
+      } finally {
+        setBusy(false);
+        renderProfiles();
+        renderSelected();
+      }
+    }
+
+    async function openSync(profile) {
+      if (!profile) return;
+      state.selected = profile;
+      showView("syncView");
+      renderProfiles();
+      renderSelected();
+      await loadSyncHistory();
+    }
+
+    async function loadSyncHistory() {
+      const p = selectedProfile();
+      if (!p) return;
+      try {
+        const body = await api("/api/sync/history?profile=" + encodeURIComponent(p.name));
+        state.syncHistory = body.data.items || [];
+        renderSyncHistory();
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("同步历史读取失败");
+      }
+    }
+
+    function renderSyncHistory() {
+      const items = state.syncHistory || [];
+      $("syncHistory").innerHTML = items.length ? items.map((item) => {
+        const label = item.direction === "push" ? "上传" : "下载";
+        const from = item.direction === "push" ? item.local_path : item.remote_path;
+        const to = item.direction === "push" ? item.remote_path : item.local_path;
+        return "<div class=\"sync-history-item\">" +
+          "<div><span class=\"badge " + (item.direction === "push" ? "wait" : "ready") + "\">" + escapeHTML(label) + "</span> <span class=\"muted\">" + escapeHTML(formatTime(item.updated_at || item.created_at)) + "</span></div>" +
+          "<code>" + escapeHTML(from || "-") + " -> " + escapeHTML(to || "-") + "</code>" +
+          "<div class=\"sync-history-actions\"><button data-sync-use=\"" + escapeAttr(item.id) + "\">使用</button><button data-sync-delete=\"" + escapeAttr(item.id) + "\">删除</button></div>" +
+        "</div>";
+      }).join("") : "<div class=\"muted\">还没有上传/下载记录。</div>";
+      document.querySelectorAll("[data-sync-use]").forEach((button) => {
+        button.addEventListener("click", () => useSyncHistory(button.getAttribute("data-sync-use")));
+      });
+      document.querySelectorAll("[data-sync-delete]").forEach((button) => {
+        button.addEventListener("click", () => deleteSyncHistory(button.getAttribute("data-sync-delete")));
+      });
+    }
+
+    function useSyncHistory(id) {
+      const item = (state.syncHistory || []).find((entry) => entry.id === id);
+      if (!item) return;
+      if (item.direction === "push") {
+        $("syncPushLocalPath").value = item.local_path || "";
+        $("syncPushRemotePath").value = item.remote_path || "";
+      } else {
+        $("syncPullRemotePath").value = item.remote_path || "";
+        $("syncPullLocalPath").value = item.local_path || "";
+      }
+      setStatus("已填充同步记录");
+    }
+
+    async function deleteSyncHistory(id) {
+      if (!id) return;
+      setBusy(true, "正在删除同步记录...");
+      try {
+        await api("/api/sync/history/delete", {
+          method: "POST",
+          body: JSON.stringify({ id })
+        });
+        await loadSyncHistory();
+        setStatus("同步记录已删除");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("同步记录删除失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function runSync(direction) {
+      const p = selectedProfile();
+      if (!p) return;
+      if (!profileReady(p.name)) {
+        setStatus("Mac 未 ready，不能上传/下载。");
+        return;
+      }
+      const payload = { profile: p.name };
+      if (direction === "push") {
+        payload.local_path = $("syncPushLocalPath").value.trim();
+        payload.remote_path = $("syncPushRemotePath").value.trim();
+      } else {
+        payload.remote_path = $("syncPullRemotePath").value.trim();
+        payload.local_path = $("syncPullLocalPath").value.trim();
+      }
+      setBusy(true, direction === "push" ? "正在上传..." : "正在下载...");
+      setStatus(direction === "push" ? "上传中..." : "下载中...");
+      try {
+        const body = await api("/api/sync/" + direction, {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        setOutput((body.output || "") + (body.error || ""));
+        setStatus(direction === "push" ? "上传完成" : "下载完成");
+        await Promise.all([loadSyncHistory(), loadEvents(false)]);
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus(direction === "push" ? "上传失败" : "下载失败");
       } finally {
         setBusy(false);
         renderProfiles();
@@ -1452,6 +1624,19 @@
     $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
     $("previewDestroyBtn").addEventListener("click", () => runAWS("destroy", false));
     $("confirmDestroyBtn").addEventListener("click", () => runAWS("destroy", true));
+    $("syncBtn").addEventListener("click", () => {
+      const p = selectedProfile();
+      if (!p) return;
+      if (!profileReady(p.name)) {
+        setStatus("Mac 未 ready，不能上传/下载。");
+        return;
+      }
+      openSync(p.name);
+    });
+    $("syncBackBtn").addEventListener("click", () => showView("operationsView"));
+    $("syncRefreshHistoryBtn").addEventListener("click", loadSyncHistory);
+    $("syncPushBtn").addEventListener("click", () => runSync("push"));
+    $("syncPullBtn").addEventListener("click", () => runSync("pull"));
     $("terminalBtn").addEventListener("click", () => {
       const p = selectedProfile();
       if (p) openTerminal(p.name);

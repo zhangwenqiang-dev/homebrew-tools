@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -664,6 +665,79 @@ func TestAppWebTerminalCheckReady(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("terminal check missing %q:\n%s", want, rec.Body.String())
 		}
+	}
+}
+
+func TestAppWebSyncPushRequiresReadyAndSavesHistory(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	localFile := filepath.Join(dir, "build.zip")
+	writeFile(t, localFile, "zip")
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-ready",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+				Tags:                managedTestTags(),
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-ready", PublicIP: "54.1.2.3", AllocationID: "eipalloc-1"},
+		}}, nil
+	}
+	body := strings.NewReader(fmt.Sprintf(`{"profile":"xcode-vnc","local_path":%q,"remote_path":"~/Downloads/"}`, localFile))
+	req := httptest.NewRequest(http.MethodPost, "/api/sync/push", body)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Push:") || !strings.Contains(rec.Body.String(), localFile) {
+		t.Fatalf("push body = %s", rec.Body.String())
+	}
+	if !containsString(runner.rsync, localFile) || !containsString(runner.rsync, "user@mac-host.example.com:~/Downloads/") {
+		t.Fatalf("rsync args = %#v", runner.rsync)
+	}
+	items, err := app.SyncHistory.List("xcode-vnc", 10)
+	if err != nil {
+		t.Fatalf("history list: %v", err)
+	}
+	if len(items) != 1 || items[0].Direction != "push" || items[0].LocalPath != localFile || items[0].RemotePath != "~/Downloads/" {
+		t.Fatalf("history items = %+v", items)
+	}
+}
+
+func TestAppWebSyncPullBlocksWhenNotReady(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	body := strings.NewReader(`{"profile":"xcode-vnc","remote_path":"~/Downloads/","local_path":"."}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/sync/pull", body)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "aws mac is not ready") {
+		t.Fatalf("pull body = %s", rec.Body.String())
+	}
+	if len(runner.rsync) != 0 {
+		t.Fatalf("rsync should not run: %#v", runner.rsync)
 	}
 }
 
@@ -1867,7 +1941,8 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 				return time.Date(2026, 7, 1, 12, 30, 45, 0, time.UTC)
 			},
 		},
-		KnownHosts: filepath.Join(stateDir, ".ssh", "known_hosts"),
+		SyncHistory: NewSyncHistoryStore(filepath.Join(stateDir, "sync-history.json")),
+		KnownHosts:  filepath.Join(stateDir, ".ssh", "known_hosts"),
 	}
 }
 
