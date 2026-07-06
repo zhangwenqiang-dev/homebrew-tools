@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -738,6 +739,39 @@ func TestAppWebSyncPullBlocksWhenNotReady(t *testing.T) {
 	}
 	if len(runner.rsync) != 0 {
 		t.Fatalf("rsync should not run: %#v", runner.rsync)
+	}
+}
+
+func TestAppWebLocalListRoots(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	req := httptest.NewRequest(http.MethodGet, "/api/local/list", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"entries"`) || !strings.Contains(rec.Body.String(), `"path":""`) {
+		t.Fatalf("local roots body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebLocalListRejectsHiddenPath(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	hiddenPath := filepath.Join(mustGetwd(t), ".git")
+	req := httptest.NewRequest(http.MethodGet, "/api/local/list?path="+url.QueryEscape(hiddenPath), nil)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "outside allowed local directories") {
+		t.Fatalf("hidden path body = %s", rec.Body.String())
 	}
 }
 
@@ -2014,4 +2048,13 @@ func writeFile(t *testing.T, path, data string) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
 }

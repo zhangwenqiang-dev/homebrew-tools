@@ -313,6 +313,32 @@
     .sync-history-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
     .sync-history-item code { overflow-wrap: anywhere; white-space: normal; }
     .sync-history-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .path-row { display: flex; gap: 8px; align-items: center; }
+    .path-row input { flex: 1; min-width: 0; }
+    .picker-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background: rgba(16, 24, 40, .34);
+    }
+    .picker-card {
+      width: min(94vw, 720px);
+      max-height: min(86vh, 720px);
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 20px 60px rgba(16, 24, 40, .22);
+      overflow: hidden;
+    }
+    .picker-path { padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--muted); overflow-wrap: anywhere; }
+    .picker-list { padding: 8px; overflow: auto; display: grid; gap: 6px; }
+    .picker-entry { justify-content: flex-start; text-align: left; min-height: 34px; }
+    .picker-actions { padding: 10px 12px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       .app-layout { flex-direction: column; }
@@ -330,6 +356,20 @@
     <div class="loading-card">
       <span class="spinner"></span>
       <strong id="loadingTitle">处理中...</strong>
+    </div>
+  </div>
+  <div id="localPickerLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="localPickerTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="localPickerTitle">选择本机目录</h2>
+        <button id="localPickerCloseBtn">关闭</button>
+      </div>
+      <div id="localPickerPath" class="picker-path">常用位置</div>
+      <div id="localPickerList" class="picker-list"></div>
+      <div class="picker-actions">
+        <button id="localPickerUpBtn">上一级</button>
+        <button id="localPickerSelectBtn" class="primary">选择当前目录</button>
+      </div>
     </div>
   </div>
   <div id="authScreen" class="auth-screen">
@@ -470,14 +510,20 @@
           <div class="sync-grid">
             <div class="sync-panel">
               <h2>上传到 Mac</h2>
-              <input id="syncPushLocalPath" placeholder="本地路径，空则使用 cm web 当前目录">
+              <div class="path-row">
+                <input id="syncPushLocalPath" placeholder="本地路径，空则使用 cm web 当前目录">
+                <button id="syncPushBrowseBtn">选择</button>
+              </div>
               <input id="syncPushRemotePath" placeholder="远程目录，空则 ~/Downloads/">
               <button id="syncPushBtn" class="primary">开始上传</button>
             </div>
             <div class="sync-panel">
               <h2>下载到本机</h2>
               <input id="syncPullRemotePath" placeholder="远程路径，空则 ~/Downloads/">
-              <input id="syncPullLocalPath" placeholder="本地目录，空则使用 cm web 当前目录">
+              <div class="path-row">
+                <input id="syncPullLocalPath" placeholder="本地目录，空则使用 cm web 当前目录">
+                <button id="syncPullBrowseBtn">选择</button>
+              </div>
               <button id="syncPullBtn" class="primary">开始下载</button>
             </div>
           </div>
@@ -588,7 +634,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, syncHistory: [], terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -597,11 +643,11 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
-      document.querySelectorAll("[data-profile], [data-status], [data-start], [data-sync], [data-terminal], [data-sync-use], [data-sync-delete]").forEach((button) => {
+      document.querySelectorAll("[data-profile], [data-start], [data-sync], [data-terminal], [data-sync-use], [data-sync-delete]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -891,14 +937,14 @@
       $("profiles").innerHTML = rows.length ? rows.map((p) => {
         const status = state.statuses[p.name];
         const ready = !!status?.ready;
-        const syncAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能传输。\"";
+        const readyAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能执行该操作。\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-status=\"" + escapeAttr(p.name) + "\">状态</button><button data-start=\"" + escapeAttr(p.name) + "\">连接</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + syncAttrs + ">传输</button><button data-terminal=\"" + escapeAttr(p.name) + "\">终端</button></div></td>" +
+          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-start=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">连接</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">传输</button><button data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">终端</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -909,17 +955,12 @@
           renderSelected();
         });
       });
-      document.querySelectorAll("[data-status]").forEach((button) => {
-        button.addEventListener("click", () => {
-          state.selected = button.getAttribute("data-status");
-          showView("operationsView");
-          renderProfiles();
-          renderSelected();
-          loadStatus();
-        });
-      });
       document.querySelectorAll("[data-start]").forEach((button) => {
         button.addEventListener("click", () => {
+          if (button.disabled) {
+            setStatus("Mac 未 ready，不能连接。");
+            return;
+          }
           startTunnel(button.getAttribute("data-start"));
         });
       });
@@ -934,6 +975,10 @@
       });
       document.querySelectorAll("[data-terminal]").forEach((button) => {
         button.addEventListener("click", () => {
+          if (button.disabled) {
+            setStatus("Mac 未 ready，不能打开终端。");
+            return;
+          }
           openTerminal(button.getAttribute("data-terminal"));
         });
       });
@@ -988,13 +1033,16 @@
       const p = selectedProfile();
       $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
       const disabled = !p;
-      const syncDisabled = disabled || state.busy || (p && !profileReady(p.name));
+      const readyActionDisabled = disabled || state.busy || (p && !profileReady(p.name));
       for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
-      $("syncBtn").disabled = syncDisabled;
-      $("syncPushBtn").disabled = syncDisabled;
-      $("syncPullBtn").disabled = syncDisabled;
+      $("syncBtn").disabled = readyActionDisabled;
+      $("syncPushBtn").disabled = readyActionDisabled;
+      $("syncPullBtn").disabled = readyActionDisabled;
+      $("syncPushBrowseBtn").disabled = readyActionDisabled;
+      $("syncPullBrowseBtn").disabled = readyActionDisabled;
+      $("terminalBtn").disabled = readyActionDisabled;
       $("syncRefreshHistoryBtn").disabled = disabled || state.busy;
       $("syncTitle").textContent = p ? ("传输 · " + p.name) : "传输";
       $("syncReadyHint").textContent = p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : "";
@@ -1140,6 +1188,51 @@
       renderProfiles();
       renderSelected();
       await loadSyncHistory();
+    }
+
+    async function openLocalPicker(target) {
+      state.picker.target = target;
+      $("localPickerLayer").classList.remove("hidden");
+      await loadLocalPicker("");
+    }
+
+    function closeLocalPicker() {
+      $("localPickerLayer").classList.add("hidden");
+      state.picker = { target: "", path: "", parent: "", entries: [] };
+    }
+
+    async function loadLocalPicker(path) {
+      try {
+        const query = path ? "?path=" + encodeURIComponent(path) : "";
+        const body = await api("/api/local/list" + query);
+        const data = body.data || {};
+        state.picker.path = data.path || "";
+        state.picker.parent = data.parent || "";
+        state.picker.entries = data.entries || [];
+        renderLocalPicker();
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("本机目录读取失败");
+      }
+    }
+
+    function renderLocalPicker() {
+      $("localPickerPath").textContent = state.picker.path || "常用位置";
+      $("localPickerUpBtn").disabled = !state.picker.parent;
+      $("localPickerSelectBtn").disabled = !state.picker.path;
+      $("localPickerList").innerHTML = state.picker.entries.length ? state.picker.entries.map((entry) =>
+        "<button class=\"picker-entry\" data-local-path=\"" + escapeAttr(entry.path) + "\">" + escapeHTML(entry.name || entry.path) + "</button>"
+      ).join("") : "<div class=\"muted\">没有可进入的子目录。</div>";
+      document.querySelectorAll("[data-local-path]").forEach((button) => {
+        button.addEventListener("click", () => loadLocalPicker(button.getAttribute("data-local-path")));
+      });
+    }
+
+    function selectLocalPickerPath() {
+      if (!state.picker.path || !state.picker.target) return;
+      $(state.picker.target).value = state.picker.path;
+      closeLocalPicker();
+      setStatus("已选择本机目录");
     }
 
     async function loadSyncHistory() {
@@ -1635,8 +1728,18 @@
     });
     $("syncBackBtn").addEventListener("click", () => showView("operationsView"));
     $("syncRefreshHistoryBtn").addEventListener("click", loadSyncHistory);
+    $("syncPushBrowseBtn").addEventListener("click", () => openLocalPicker("syncPushLocalPath"));
+    $("syncPullBrowseBtn").addEventListener("click", () => openLocalPicker("syncPullLocalPath"));
     $("syncPushBtn").addEventListener("click", () => runSync("push"));
     $("syncPullBtn").addEventListener("click", () => runSync("pull"));
+    $("localPickerCloseBtn").addEventListener("click", closeLocalPicker);
+    $("localPickerUpBtn").addEventListener("click", () => {
+      if (state.picker.parent) loadLocalPicker(state.picker.parent);
+    });
+    $("localPickerSelectBtn").addEventListener("click", selectLocalPickerPath);
+    $("localPickerLayer").addEventListener("click", (event) => {
+      if (event.target === $("localPickerLayer")) closeLocalPicker();
+    });
     $("terminalBtn").addEventListener("click", () => {
       const p = selectedProfile();
       if (p) openTerminal(p.name);
