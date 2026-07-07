@@ -106,6 +106,22 @@ func (s MySQLMemberStore) EnsureSchema() error {
 			updated_at VARCHAR(64) NOT NULL,
 			INDEX idx_cm_profile_owners_member_id (member_id)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS cm_profiles (
+			name VARCHAR(255) PRIMARY KEY,
+			apple_email VARCHAR(255) NULL,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			profile_yaml MEDIUMTEXT NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
+			updated_at VARCHAR(64) NOT NULL,
+			INDEX idx_cm_profiles_apple_email (apple_email)
+		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS cm_profile_members (
+			profile_name VARCHAR(255) NOT NULL,
+			member_id VARCHAR(128) NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
+			PRIMARY KEY (profile_name, member_id),
+			INDEX idx_cm_profile_members_member_id (member_id)
+		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS cm_settings (
 			setting_key VARCHAR(128) PRIMARY KEY,
 			setting_value TEXT NULL
@@ -141,7 +157,7 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 		return MemberData{}, err
 	}
 	defer db.Close()
-	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
+	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
 	rows, err := db.Query(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), created_at, updated_at FROM cm_members ORDER BY email`)
 	if err != nil {
 		return MemberData{}, err
@@ -183,6 +199,36 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 			return MemberData{}, err
 		}
 		out.ProfileOwners = append(out.ProfileOwners, owner)
+	}
+	if err := rows.Close(); err != nil {
+		return MemberData{}, err
+	}
+	rows, err = db.Query(`SELECT name, COALESCE(apple_email, ''), enabled, profile_yaml, created_at, updated_at FROM cm_profiles ORDER BY name`)
+	if err != nil {
+		return MemberData{}, err
+	}
+	for rows.Next() {
+		var profile ManagedProfile
+		if err := rows.Scan(&profile.Name, &profile.AppleEmail, &profile.Enabled, &profile.ProfileYAML, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
+			rows.Close()
+			return MemberData{}, err
+		}
+		out.Profiles = append(out.Profiles, profile)
+	}
+	if err := rows.Close(); err != nil {
+		return MemberData{}, err
+	}
+	rows, err = db.Query(`SELECT profile_name, member_id, created_at FROM cm_profile_members ORDER BY profile_name, member_id`)
+	if err != nil {
+		return MemberData{}, err
+	}
+	for rows.Next() {
+		var access ProfileAccess
+		if err := rows.Scan(&access.ProfileName, &access.MemberID, &access.CreatedAt); err != nil {
+			rows.Close()
+			return MemberData{}, err
+		}
+		out.ProfileAccess = append(out.ProfileAccess, access)
 	}
 	if err := rows.Close(); err != nil {
 		return MemberData{}, err
@@ -247,7 +293,7 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"cm_events", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+	for _, table := range []string{"cm_events", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
 			return err
 		}
@@ -267,6 +313,18 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 	for _, owner := range data.ProfileOwners {
 		if _, err := tx.Exec(`INSERT INTO cm_profile_owners (profile_name, member_id, updated_at) VALUES (?, ?, ?)`,
 			owner.ProfileName, owner.MemberID, owner.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	for _, profile := range data.Profiles {
+		if _, err := tx.Exec(`INSERT INTO cm_profiles (name, apple_email, enabled, profile_yaml, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			profile.Name, profile.AppleEmail, profile.Enabled, profile.ProfileYAML, profile.CreatedAt, profile.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	for _, access := range data.ProfileAccess {
+		if _, err := tx.Exec(`INSERT INTO cm_profile_members (profile_name, member_id, created_at) VALUES (?, ?, ?)`,
+			access.ProfileName, access.MemberID, access.CreatedAt); err != nil {
 			return err
 		}
 	}
@@ -381,6 +439,30 @@ func (s MySQLMemberStore) ProfileOwner(profileName string) (PublicProfileOwner, 
 
 func (s MySQLMemberStore) SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error) {
 	return setProfileOwnerInStore(s, profileName, memberEmail)
+}
+
+func (s MySQLMemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProfile, error) {
+	return listManagedProfilesInStore(s, memberEmail)
+}
+
+func (s MySQLMemberStore) UpsertManagedProfile(profile Profile) (ManagedProfile, error) {
+	return upsertManagedProfileInStore(s, profile)
+}
+
+func (s MySQLMemberStore) DeleteManagedProfile(profileName string) error {
+	return deleteManagedProfileInStore(s, profileName)
+}
+
+func (s MySQLMemberStore) AssignProfileAccess(profileName, memberEmail string) (ProfileAccess, error) {
+	return assignProfileAccessInStore(s, profileName, memberEmail)
+}
+
+func (s MySQLMemberStore) UnassignProfileAccess(profileName, memberEmail string) error {
+	return unassignProfileAccessInStore(s, profileName, memberEmail)
+}
+
+func (s MySQLMemberStore) MembersForProfile(profileName string) ([]PublicMember, error) {
+	return membersForProfileInStore(s, profileName)
 }
 
 func (s MySQLMemberStore) WebSettings() (WebSettings, error) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -333,6 +334,62 @@ func TestAppWebProfileOwnerAPI(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "whh@example.com") || strings.Contains(rec.Body.String(), "old@example.com") {
 		t.Fatalf("profiles body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebManagedProfilesAccessAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+
+	profileYAML := `profiles:
+  managed-usw2:
+    description: Apple account: managed@example.com
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: managed@example.com
+`
+	body := strings.NewReader(`{"profile_yaml":` + strconv.Quote(profileYAML) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/managed-profile/save", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := app.MemberStore.AddMember("User", "user@example.com", "operator"); err != nil {
+		t.Fatalf("add user: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "managed-usw2") {
+		t.Fatalf("ungranted member should not see profile: %s", rec.Body.String())
+	}
+
+	body = strings.NewReader(`{"profile":"managed-usw2","member_email":"admin@example.com","grant":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/managed-profile/access", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grant status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "managed-usw2") {
+		t.Fatalf("granted member list body = %s status=%d", rec.Body.String(), rec.Code)
 	}
 }
 

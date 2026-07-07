@@ -153,7 +153,7 @@ func (a App) webSyncPullHandler(configPath string) http.HandlerFunc {
 }
 
 func (a App) prepareWebSync(r *http.Request, configPath string, req webSyncRequest, direction string) (Profile, string, string, error) {
-	profile, err := a.prepareWebTerminal(r.Context(), configPath, req.Profile)
+	profile, err := a.prepareWebTerminal(r, configPath, req.Profile)
 	if err != nil {
 		return Profile{}, "", "", err
 	}

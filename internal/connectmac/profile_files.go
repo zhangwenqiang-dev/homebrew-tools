@@ -207,6 +207,30 @@ func FormatProfileFile(profile Profile) string {
 	return b.String()
 }
 
+func FormatConfigProfiles(cfg Config) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "profiles:")
+	for _, name := range sortedProfileNames(cfg) {
+		profile, _ := cfg.Profile(name)
+		writeProfileYAML(&b, profile, "  ")
+	}
+	return b.String()
+}
+
+func ParseSingleProfileYAML(data string) (Profile, error) {
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return Profile{}, err
+	}
+	if len(cfg.Profiles) != 1 {
+		return Profile{}, fmt.Errorf("expected exactly one profile, got %d", len(cfg.Profiles))
+	}
+	for _, profile := range cfg.Profiles {
+		return profile, nil
+	}
+	return Profile{}, fmt.Errorf("profile is required")
+}
+
 func writeProfileYAML(b *strings.Builder, profile Profile, indent string) {
 	fmt.Fprintf(b, "%s%s:\n", indent, profile.Name)
 	writeStringField(b, indent+"  ", "description", profile.Description)

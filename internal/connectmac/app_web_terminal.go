@@ -30,7 +30,7 @@ func (a App) webTerminalCheckHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		profile, err := a.prepareWebTerminal(r.Context(), configPath, r.URL.Query().Get("profile"))
+		profile, err := a.prepareWebTerminal(r, configPath, r.URL.Query().Get("profile"))
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
@@ -50,7 +50,7 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		profile, err := a.prepareWebTerminal(r.Context(), configPath, r.URL.Query().Get("profile"))
+		profile, err := a.prepareWebTerminal(r, configPath, r.URL.Query().Get("profile"))
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
@@ -81,12 +81,12 @@ func sameWebOrigin(r *http.Request) bool {
 	return origin == "http://"+r.Host || origin == "https://"+r.Host
 }
 
-func (a App) prepareWebTerminal(ctx context.Context, configPath, profileRef string) (Profile, error) {
+func (a App) prepareWebTerminal(r *http.Request, configPath, profileRef string) (Profile, error) {
 	profileRef = strings.TrimSpace(profileRef)
 	if profileRef == "" {
 		return Profile{}, errors.New("profile is required")
 	}
-	cfg, err := LoadConfig(configPath)
+	cfg, err := a.loadWebConfig(r, configPath)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -100,14 +100,14 @@ func (a App) prepareWebTerminal(ctx context.Context, configPath, profileRef stri
 	if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
 		return Profile{}, fmt.Errorf("profile %s aws config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
 	}
-	_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+	_, status, err := a.AWSService.StatusWithOptions(r.Context(), profile, AWSStatusOptions{IncludeTerminal: false})
 	if err != nil {
 		return Profile{}, fmt.Errorf("aws status failed: %w", err)
 	}
 	if !AWSStatusReady(status) {
 		return Profile{}, fmt.Errorf("aws mac is not ready: %s", AWSReadinessSummary(status))
 	}
-	check, err := a.fixHostKey(ctx, profile)
+	check, err := a.fixHostKey(r.Context(), profile)
 	if err != nil {
 		return Profile{}, err
 	}

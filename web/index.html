@@ -228,6 +228,11 @@
     .member-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
     .member-form input { width: 190px; }
     .member-form select { width: 128px; }
+    .profile-admin { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 10px 12px; border-top: 1px solid var(--line); }
+    .profile-admin textarea { width: 100%; min-height: 220px; resize: vertical; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .profile-admin-list { display: grid; gap: 8px; }
+    .profile-admin-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 8px; }
+    .profile-access { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
     .settings-form label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
     .settings-form input[type="checkbox"] { width: auto; min-height: auto; }
@@ -596,6 +601,29 @@
             </thead>
             <tbody id="members"></tbody>
           </table>
+          <div class="section-head admin-only">
+            <h2>Profiles</h2>
+            <button id="refreshManagedProfilesBtn">刷新 Profile</button>
+          </div>
+          <div class="profile-admin admin-only">
+            <div class="profile-admin-list" id="managedProfiles"></div>
+            <div class="form-grid">
+              <textarea id="managedProfileYaml" placeholder="profiles:
+  example-usw2:
+    description: Apple account: user@example.com
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: user@example.com
+      key_name: maiqi-xcode
+      security_group_id: sg-example
+      elastic_ip_allocation_id: eipalloc-example
+      elastic_ip_public_ip: 1.2.3.4"></textarea>
+              <button id="saveManagedProfileBtn" class="primary">保存 Profile</button>
+              <span class="muted">PEM 路径和 sync 过滤继续读取成员本机配置。</span>
+            </div>
+          </div>
           <div class="section-head">
             <h2>Settings</h2>
             <button id="saveSettingsBtn" class="admin-only">保存设置</button>
@@ -634,7 +662,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], profileOwners: {}, statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -643,7 +671,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "saveManagedProfileBtn", "managedProfileYaml", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -924,7 +952,7 @@
       }
       try {
         if (isAdmin()) {
-          await Promise.all([loadMembers(), loadProfiles(), loadJobs(), loadSettings()]);
+          await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles(), loadJobs(), loadSettings()]);
         } else {
           state.members = [];
           await Promise.all([loadProfiles(), loadJobs(), loadSettings()]);
@@ -1003,6 +1031,16 @@
       renderMembers();
       renderAssignMemberOptions();
       renderSettingsMemberOptions();
+    }
+
+    async function loadManagedProfiles() {
+      if (!isAdmin()) {
+        state.managedProfiles = [];
+        return;
+      }
+      const body = await api("/api/managed-profiles");
+      state.managedProfiles = body.data?.profiles || [];
+      renderManagedProfiles();
     }
 
     async function loadSettings() {
@@ -1093,6 +1131,37 @@
         button.addEventListener("click", () => toggleMember(button.getAttribute("data-member-toggle"), button.getAttribute("data-enabled") === "true"));
       });
       applyRoleVisibility();
+    }
+
+    function renderManagedProfiles() {
+      if (!isAdmin()) return;
+      $("managedProfiles").innerHTML = state.managedProfiles.length ? state.managedProfiles.map((profile) => {
+        const granted = new Set((profile.members || []).map((member) => member.email));
+        const memberButtons = state.members.filter((member) => member.enabled).map((member) => {
+          const hasAccess = granted.has(member.email);
+          return "<button data-profile-access=\"" + escapeAttr(profile.name) + "\" data-member=\"" + escapeAttr(member.email) + "\" data-grant=\"" + String(!hasAccess) + "\">" +
+            escapeHTML((hasAccess ? "移除 " : "授权 ") + (member.name || member.email)) +
+          "</button>";
+        }).join("");
+        return "<div class=\"profile-admin-item\">" +
+          "<div><div class=\"name\">" + escapeHTML(profile.name) + "</div><div class=\"muted\">" + escapeHTML(profile.apple_email || profile.description || "-") + "</div></div>" +
+          "<div class=\"muted\">" + escapeHTML([profile.region, profile.aws_profile, profile.host].filter(Boolean).join(" · ") || "-") + "</div>" +
+          "<div class=\"profile-access\">" + (memberButtons || "<span class=\"muted\">没有可授权成员</span>") + "</div>" +
+          "<div class=\"row-actions\"><button data-profile-edit=\"" + escapeAttr(profile.name) + "\">编辑 YAML</button><button class=\"danger\" data-profile-delete=\"" + escapeAttr(profile.name) + "\">删除</button></div>" +
+        "</div>";
+      }).join("") : "<div class=\"muted\">还没有后台 Profile。</div>";
+      document.querySelectorAll("[data-profile-edit]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const item = state.managedProfiles.find((profile) => profile.name === button.getAttribute("data-profile-edit"));
+          $("managedProfileYaml").value = item?.profile_yaml || "";
+        });
+      });
+      document.querySelectorAll("[data-profile-delete]").forEach((button) => {
+        button.addEventListener("click", () => deleteManagedProfile(button.getAttribute("data-profile-delete")));
+      });
+      document.querySelectorAll("[data-profile-access]").forEach((button) => {
+        button.addEventListener("click", () => setProfileAccess(button.getAttribute("data-profile-access"), button.getAttribute("data-member"), button.getAttribute("data-grant") === "true"));
+      });
     }
 
     function renderSettingsMemberOptions() {
@@ -1645,6 +1714,71 @@
       }
     }
 
+    async function saveManagedProfile() {
+      if (!isAdmin()) return;
+      const profileYAML = $("managedProfileYaml").value.trim();
+      if (!profileYAML) {
+        setStatus("请填写 Profile YAML");
+        return;
+      }
+      setBusy(true, "正在保存 Profile...");
+      try {
+        await api("/api/managed-profile/save", {
+          method: "POST",
+          body: JSON.stringify({ profile_yaml: profileYAML })
+        });
+        $("managedProfileYaml").value = "";
+        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        setStatus("Profile 已保存");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("Profile 保存失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function deleteManagedProfile(profile) {
+      if (!isAdmin() || !profile) return;
+      if (!confirm("确认删除后台 Profile " + profile + "？不会释放 AWS 资源。")) return;
+      setBusy(true, "正在删除 Profile...");
+      try {
+        await api("/api/managed-profile/delete", {
+          method: "POST",
+          body: JSON.stringify({ profile })
+        });
+        if (state.selected === profile) state.selected = "";
+        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        setStatus("Profile 已删除");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("Profile 删除失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function setProfileAccess(profile, memberEmail, grant) {
+      if (!isAdmin() || !profile || !memberEmail) return;
+      setBusy(true, grant ? "正在授权 Profile..." : "正在移除授权...");
+      try {
+        await api("/api/managed-profile/access", {
+          method: "POST",
+          body: JSON.stringify({ profile, member_email: memberEmail, grant })
+        });
+        await loadManagedProfiles();
+        setStatus(grant ? "Profile 已授权" : "Profile 授权已移除");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("Profile 授权更新失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
     async function saveSettings() {
       setBusy(true, "正在保存设置...");
       try {
@@ -1775,7 +1909,10 @@
     $("refresh").addEventListener("click", async () => {
       setBusy(true, "正在刷新数据...");
       try {
-        await loadMembers();
+        if (isAdmin()) {
+          await loadMembers();
+          await loadManagedProfiles();
+        }
         await loadProfiles();
         await loadJobs();
         setStatus("刷新完成");
@@ -1794,6 +1931,20 @@
     $("refreshAccountChallengeBtn").addEventListener("click", () => loadAccountChallenge().catch((err) => { setOutput(String(err.message || err)); setStatus("账号校验题加载失败"); }));
     $("saveAccountEmailBtn").addEventListener("click", saveAccountEmail);
     $("saveSettingsBtn").addEventListener("click", saveSettings);
+    $("saveManagedProfileBtn").addEventListener("click", saveManagedProfile);
+    $("refreshManagedProfilesBtn").addEventListener("click", async () => {
+      setBusy(true, "正在刷新 Profile...");
+      try {
+        await loadManagedProfiles();
+        setStatus("Profile 已刷新");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("Profile 刷新失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    });
     $("currentUserBtn").addEventListener("click", () => showView("userView"));
     $("refreshMembers").addEventListener("click", async () => {
       setBusy(true, "正在刷新成员...");

@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,5 +88,53 @@ func TestMemberStoreCRUDAndEvents(t *testing.T) {
 	}
 	if len(owners) != 0 {
 		t.Fatalf("owners after unassign = %+v", owners)
+	}
+}
+
+func TestMemberStoreManagedProfilesAccess(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	store.Now = func() time.Time {
+		return time.Date(2026, 7, 1, 8, 0, 0, 0, time.UTC)
+	}
+	if _, err := store.AddMember("Admin", "admin@example.com", "admin"); err != nil {
+		t.Fatalf("add admin: %v", err)
+	}
+	if _, err := store.AddMember("User", "user@example.com", "operator"); err != nil {
+		t.Fatalf("add user: %v", err)
+	}
+	profile := Profile{Name: "apple-usw2", Description: "Apple account: apple@example.com"}
+	profile.AWS.AccountEmail = "apple@example.com"
+	profile.AWS.Profile = "cm-xcode"
+	profile.AWS.Region = "us-west-2"
+	record, err := store.UpsertManagedProfile(profile)
+	if err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+	if record.Name != "apple-usw2" || !record.Enabled || !strings.Contains(record.ProfileYAML, "apple-usw2") {
+		t.Fatalf("record = %+v", record)
+	}
+	memberProfiles, err := store.ListManagedProfiles("user@example.com")
+	if err != nil {
+		t.Fatalf("list member profiles: %v", err)
+	}
+	if len(memberProfiles) != 0 {
+		t.Fatalf("member profiles before grant = %+v", memberProfiles)
+	}
+	if _, err := store.AssignProfileAccess("apple-usw2", "user@example.com"); err != nil {
+		t.Fatalf("grant profile: %v", err)
+	}
+	memberProfiles, err = store.ListManagedProfiles("user@example.com")
+	if err != nil {
+		t.Fatalf("list member profiles after grant: %v", err)
+	}
+	if len(memberProfiles) != 1 || memberProfiles[0].Name != "apple-usw2" {
+		t.Fatalf("member profiles after grant = %+v", memberProfiles)
+	}
+	adminProfiles, err := store.ListManagedProfiles("admin@example.com")
+	if err != nil {
+		t.Fatalf("list admin profiles: %v", err)
+	}
+	if len(adminProfiles) != 1 {
+		t.Fatalf("admin profiles = %+v", adminProfiles)
 	}
 }

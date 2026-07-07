@@ -195,6 +195,10 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/member/unassign", a.requireWebRole(a.webMemberAssignHandler(true), "admin"))
 	mux.HandleFunc("/api/profile-owners", a.requireWebRole(a.webProfileOwnersHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/managed-profiles", a.requireWebRole(a.webManagedProfilesHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/managed-profile/save", a.requireWebRole(a.webManagedProfileSaveHandler(), "admin"))
+	mux.HandleFunc("/api/managed-profile/delete", a.requireWebRole(a.webManagedProfileDeleteHandler(), "admin"))
+	mux.HandleFunc("/api/managed-profile/access", a.requireWebRole(a.webManagedProfileAccessHandler(), "admin"))
 	mux.HandleFunc("/api/events", a.requireWebRole(a.webEventsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/jobs", a.requireWebRole(a.webJobsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/job/log", a.requireWebRole(a.webJobLogHandler(), "viewer", "operator", "admin"))
@@ -284,6 +288,8 @@ func isRemoteUserAPIPath(path string) bool {
 		strings.HasPrefix(path, "/api/member/") ||
 		path == "/api/profile-owners" ||
 		strings.HasPrefix(path, "/api/profile-owner/") ||
+		path == "/api/managed-profiles" ||
+		strings.HasPrefix(path, "/api/managed-profile/") ||
 		path == "/api/settings" ||
 		strings.HasPrefix(path, "/api/events")
 }
@@ -353,7 +359,7 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		cfg, err := LoadConfig(configPath)
+		cfg, err := a.loadWebConfig(r, configPath)
 		if err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -377,6 +383,91 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": profiles}})
 	}
+}
+
+func (a App) loadWebConfig(r *http.Request, configPath string) (Config, error) {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return Config{}, err
+	}
+	if strings.TrimSpace(cfg.Server.UserAPI) == "" {
+		return cfg, nil
+	}
+	remoteProfiles, err := a.fetchRemoteManagedProfiles(r, cfg.Server.UserAPI)
+	if err != nil {
+		return cfg, nil
+	}
+	if len(remoteProfiles) == 0 {
+		return Config{Profiles: map[string]Profile{}}, nil
+	}
+	merged := Config{Profiles: map[string]Profile{}}
+	for _, remote := range remoteProfiles {
+		profile, err := ParseSingleProfileYAML(remote.ProfileYAML)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse remote profile %s: %w", remote.Name, err)
+		}
+		if local, ok := cfg.Profile(profile.Name); ok {
+			applyLocalPrivateProfileFields(&profile, local)
+		}
+		if profile.IdentityFile == "" {
+			profile.IdentityFile = cfg.Defaults.IdentityFile
+		}
+		merged.Profiles[profile.Name] = profile
+	}
+	merged.ApplyDefaults()
+	return merged, nil
+}
+
+func (a App) fetchRemoteManagedProfiles(r *http.Request, userAPI string) ([]webManagedProfile, error) {
+	target := strings.TrimRight(userAPI, "/") + "/api/managed-profiles?include_yaml=1"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Data  struct {
+			Profiles []webManagedProfile `json:"profiles"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	if !body.OK {
+		if body.Error == "" {
+			body.Error = resp.Status
+		}
+		return nil, errors.New(body.Error)
+	}
+	return body.Data.Profiles, nil
+}
+
+func applyLocalPrivateProfileFields(remote *Profile, local Profile) {
+	if local.IdentityFile != "" {
+		remote.IdentityFile = local.IdentityFile
+	}
+	if !syncConfigEmpty(local.Sync) {
+		remote.Sync = local.Sync
+	}
+	if local.VNC.Username != "" {
+		remote.VNC = local.VNC
+	}
+}
+
+func syncConfigEmpty(sync SyncConfig) bool {
+	return len(sync.Push.Includes) == 0 &&
+		len(sync.Push.Excludes) == 0 &&
+		len(sync.Pull.Includes) == 0 &&
+		len(sync.Pull.Excludes) == 0
 }
 
 func (a App) webMembersHandler() http.HandlerFunc {
@@ -527,6 +618,141 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 	}
 }
 
+type webManagedProfile struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	AppleEmail  string         `json:"apple_email"`
+	Region      string         `json:"region"`
+	AWSProfile  string         `json:"aws_profile"`
+	Host        string         `json:"host"`
+	Enabled     bool           `json:"enabled"`
+	ProfileYAML string         `json:"profile_yaml,omitempty"`
+	Members     []PublicMember `json:"members,omitempty"`
+	UpdatedAt   string         `json:"updated_at"`
+}
+
+func (a App) webManagedProfilesHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		records, err := a.MemberStore.ListManagedProfiles(member.Email)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		includeYAML := r.URL.Query().Get("include_yaml") == "1"
+		items := make([]webManagedProfile, 0, len(records))
+		for _, record := range records {
+			profile, err := ParseSingleProfileYAML(record.ProfileYAML)
+			if err != nil {
+				continue
+			}
+			item := webManagedProfile{
+				Name:        profile.Name,
+				Description: profile.Description,
+				AppleEmail:  profile.AWS.AccountEmail,
+				Region:      profile.AWS.Region,
+				AWSProfile:  profile.AWS.Profile,
+				Host:        profile.Host,
+				Enabled:     record.Enabled,
+				UpdatedAt:   record.UpdatedAt,
+			}
+			if includeYAML || member.Role == "admin" {
+				item.ProfileYAML = record.ProfileYAML
+			}
+			if member.Role == "admin" {
+				item.Members, _ = a.MemberStore.MembersForProfile(profile.Name)
+			}
+			items = append(items, item)
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": items}})
+	}
+}
+
+func (a App) webManagedProfileSaveHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			ProfileYAML string `json:"profile_yaml"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		profile, err := ParseSingleProfileYAML(req.ProfileYAML)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		record, err := a.MemberStore.UpsertManagedProfile(profile)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profile": record}})
+	}
+}
+
+func (a App) webManagedProfileDeleteHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile string `json:"profile"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if err := a.MemberStore.DeleteManagedProfile(req.Profile); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
+	}
+}
+
+func (a App) webManagedProfileAccessHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile     string `json:"profile"`
+			MemberEmail string `json:"member_email"`
+			Grant       bool   `json:"grant"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		var err error
+		if req.Grant {
+			_, err = a.MemberStore.AssignProfileAccess(req.Profile, req.MemberEmail)
+		} else {
+			err = a.MemberStore.UnassignProfileAccess(req.Profile, req.MemberEmail)
+		}
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
+	}
+}
+
 func (a App) webEventsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -643,7 +869,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			args = append(args, "--confirm")
 		}
 		if req.Confirm && req.Background {
-			resp := a.startWebAWSJob(r.Context(), configPath, command, req.Profile, req.Notify)
+			resp := a.startWebAWSJob(r, configPath, command, req.Profile, req.Notify)
 			a.logWebResponse("web.aws."+command, req.Profile, resp)
 			a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 			writeWebJSON(w, resp)
@@ -655,7 +881,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 				args = append(args, "--notify")
 			}
 		}
-		resp := a.webRunCommand(r.Context(), configPath, args)
+		resp := a.webRunCommand(r, configPath, args)
 		a.logWebResponse("web.aws."+command, req.Profile, resp)
 		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
@@ -682,7 +908,7 @@ func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
-		resp := a.webRunCommand(r.Context(), configPath, []string{"start", req.Profile})
+		resp := a.webRunCommand(r, configPath, []string{"start", req.Profile})
 		a.logWebResponse("web.tunnel.start", req.Profile, resp)
 		a.recordWebEvent(configPath, req.Profile, "start", true, resp)
 		writeWebJSON(w, resp)
@@ -702,7 +928,7 @@ func (a App) assignWebOwnerForOpen(r *http.Request, configPath, profileRef, owne
 	} else {
 		ownerEmail = member.Email
 	}
-	cfg, err := LoadConfig(configPath)
+	cfg, err := a.loadWebConfig(r, configPath)
 	if err != nil {
 		return err
 	}
@@ -742,19 +968,24 @@ func (a App) webJobLogHandler() http.HandlerFunc {
 	}
 }
 
-func (a App) webRunCommand(ctx context.Context, configPath string, args []string) webAPIResponse {
+func (a App) webRunCommand(r *http.Request, configPath string, args []string) webAPIResponse {
+	runConfigPath, cleanup, err := a.webCommandConfigPath(r, configPath)
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	defer cleanup()
 	var out, errOut bytes.Buffer
 	sub := a
 	sub.In = nil
 	sub.Out = &out
 	sub.Err = &errOut
-	code := sub.Run(ctx, append(args, "--config", configPath))
+	code := sub.Run(r.Context(), append(args, "--config", runConfigPath))
 	resp := webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
 	return resp
 }
 
-func (a App) startWebAWSJob(ctx context.Context, configPath, command, profileRef string, notify bool) webAPIResponse {
-	cfg, err := LoadConfig(configPath)
+func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef string, notify bool) webAPIResponse {
+	cfg, err := a.loadWebConfig(r, configPath)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
@@ -773,18 +1004,22 @@ func (a App) startWebAWSJob(ctx context.Context, configPath, command, profileRef
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
+	runConfigPath, _, err := a.writeWebTempConfig(r, configPath)
+	if err != nil {
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
 	jobType := "aws-" + command
 	job, err := a.JobManager.Create(Job{
 		Type:       jobType,
 		Profile:    profile.Name,
 		AppleEmail: plan.AccountEmail,
-		Command:    []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath},
+		Command:    []string{executable, "aws", command, profile.Name, "--confirm", "--config", runConfigPath},
 		Notify:     notify,
 	})
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
-	job, err = a.JobManager.StartRunner(ctx, job)
+	job, err = a.JobManager.StartRunner(r.Context(), job)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
@@ -826,6 +1061,37 @@ func (a App) recordWebEvent(configPath, profileRef, action string, confirmed boo
 		}
 	}
 	_ = a.MemberStore.RecordEvent(event)
+}
+
+func (a App) webCommandConfigPath(r *http.Request, configPath string) (string, func(), error) {
+	cfg, err := LoadConfig(configPath)
+	if err == nil && strings.TrimSpace(cfg.Server.UserAPI) == "" {
+		return configPath, func() {}, nil
+	}
+	path, cleanup, err := a.writeWebTempConfig(r, configPath)
+	return path, cleanup, err
+}
+
+func (a App) writeWebTempConfig(r *http.Request, configPath string) (string, func(), error) {
+	cfg, err := a.loadWebConfig(r, configPath)
+	if err != nil {
+		return "", func() {}, err
+	}
+	file, err := os.CreateTemp("", "cm-web-config-*.yaml")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	if _, err := file.WriteString(FormatConfigProfiles(cfg)); err != nil {
+		file.Close()
+		os.Remove(path)
+		return "", func() {}, err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return "", func() {}, err
+	}
+	return path, func() { _ = os.Remove(path) }, nil
 }
 
 func (a App) logProfileError(action string, profile Profile, message string) {
