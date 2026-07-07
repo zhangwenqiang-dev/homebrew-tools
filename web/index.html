@@ -228,6 +228,10 @@
     .member-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
     .member-form input { width: 190px; }
     .member-form select { width: 128px; }
+    .member-profile-editor { display: grid; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); background: #fbfcfe; }
+    .member-profile-options { display: flex; flex-wrap: wrap; gap: 8px; }
+    .member-profile-options label { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; }
+    .member-profile-options input { width: auto; min-height: auto; }
     .profile-admin { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 10px 12px; border-top: 1px solid var(--line); }
     .profile-admin textarea { width: 100%; min-height: 220px; resize: vertical; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .profile-admin-list { display: grid; gap: 8px; }
@@ -593,14 +597,15 @@
           <table>
             <thead>
               <tr>
-                <th style="width: 30%">成员</th>
-                <th style="width: 18%">角色</th>
-                <th style="width: 34%">Apple 账号</th>
+                <th style="width: 28%">成员</th>
+                <th style="width: 14%">角色</th>
+                <th style="width: 40%">可用 Profile</th>
                 <th style="width: 18%">状态</th>
               </tr>
             </thead>
             <tbody id="members"></tbody>
           </table>
+          <div id="memberProfileEditor" class="member-profile-editor admin-only hidden"></div>
           <div class="section-head admin-only">
             <h2>Profiles</h2>
             <button id="refreshManagedProfilesBtn">刷新 Profile</button>
@@ -672,7 +677,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -681,7 +686,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "saveManagedProfileBtn", "saveManagedProfileStatusBtn", "managedProfileStatusSelect", "managedProfileStatusValue", "managedProfileYaml", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "saveManagedProfileBtn", "saveManagedProfileStatusBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "managedProfileStatusSelect", "managedProfileStatusValue", "managedProfileYaml", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -696,6 +701,9 @@
         button.disabled = busy;
       });
       document.querySelectorAll("[data-profile-status]").forEach((button) => {
+        button.disabled = busy;
+      });
+      document.querySelectorAll("[data-member-profiles]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -1055,6 +1063,7 @@
       state.managedProfiles = body.data?.profiles || [];
       renderManagedProfiles();
       renderManagedProfileStatusOptions();
+      renderMembers();
     }
 
     async function loadSettings() {
@@ -1133,37 +1142,36 @@
 
     function renderMembers() {
       $("members").innerHTML = state.members.length ? state.members.map((member) => {
-        const accounts = (member.assignments || []).map((item) => item.apple_email + "(" + item.relation + ")").join(", ");
+        const profileNames = profileNamesForMember(member.email);
+        const profileSummary = profileNames.length ? profileNames.map((name) => "<span class=\"pill\">" + escapeHTML(name) + "</span>").join(" ") : "<span class=\"muted\">未配置</span>";
         return "<tr>" +
           "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
           "<td>" + escapeHTML(member.role || "-") + "</td>" +
-          "<td>" + escapeHTML(accounts || (member.has_password ? "可登录" : "-")) + "</td>" +
+          "<td><div class=\"profile-access\">" + profileSummary + (isAdmin() ? "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置 Profile</button>" : "") + "</div></td>" +
           "<td>" + (isAdmin() ? "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" : escapeHTML(member.enabled ? "启用" : "停用")) + "</td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
       document.querySelectorAll("[data-member-toggle]").forEach((button) => {
         button.addEventListener("click", () => toggleMember(button.getAttribute("data-member-toggle"), button.getAttribute("data-enabled") === "true"));
       });
+      document.querySelectorAll("[data-member-profiles]").forEach((button) => {
+        button.addEventListener("click", () => openMemberProfileEditor(button.getAttribute("data-member-profiles")));
+      });
+      renderMemberProfileEditor();
       applyRoleVisibility();
     }
 
     function renderManagedProfiles() {
       if (!isAdmin()) return;
       $("managedProfiles").innerHTML = state.managedProfiles.length ? state.managedProfiles.map((profile) => {
-        const granted = new Set((profile.members || []).map((member) => member.email));
-        const memberButtons = state.members.filter((member) => member.enabled).map((member) => {
-          const hasAccess = granted.has(member.email);
-          return "<button data-profile-access=\"" + escapeAttr(profile.name) + "\" data-member=\"" + escapeAttr(member.email) + "\" data-grant=\"" + String(!hasAccess) + "\">" +
-            escapeHTML((hasAccess ? "移除 " : "授权 ") + (member.name || member.email)) +
-          "</button>";
-        }).join("");
+        const grantedCount = (profile.members || []).length;
         const statusLabel = profile.enabled ? "正常" : "停用";
         const statusClass = profile.enabled ? "ready" : "stopped";
         const nextEnabled = !profile.enabled;
         return "<div class=\"profile-admin-item\">" +
           "<div><div class=\"name\">" + escapeHTML(profile.name) + " <span class=\"badge " + statusClass + "\">" + statusLabel + "</span></div><div class=\"muted\">" + escapeHTML(profile.apple_email || profile.description || "-") + "</div></div>" +
           "<div class=\"muted\">" + escapeHTML([profile.region, profile.aws_profile, profile.host].filter(Boolean).join(" · ") || "-") + "</div>" +
-          "<div class=\"profile-access\">" + (memberButtons || "<span class=\"muted\">没有可授权成员</span>") + "</div>" +
+          "<div class=\"muted\">已分配成员：" + grantedCount + " 个。请在成员列表中配置某个成员可用的 Profile。</div>" +
           "<div class=\"row-actions\"><button data-profile-status=\"" + escapeAttr(profile.name) + "\" data-enabled=\"" + String(nextEnabled) + "\">" + (profile.enabled ? "停用" : "恢复正常") + "</button><button data-profile-edit=\"" + escapeAttr(profile.name) + "\">编辑 YAML</button><button class=\"danger\" data-profile-delete=\"" + escapeAttr(profile.name) + "\">删除</button></div>" +
         "</div>";
       }).join("") : "<div class=\"muted\">还没有后台 Profile。</div>";
@@ -1179,10 +1187,47 @@
       document.querySelectorAll("[data-profile-delete]").forEach((button) => {
         button.addEventListener("click", () => deleteManagedProfile(button.getAttribute("data-profile-delete")));
       });
-      document.querySelectorAll("[data-profile-access]").forEach((button) => {
-        button.addEventListener("click", () => setProfileAccess(button.getAttribute("data-profile-access"), button.getAttribute("data-member"), button.getAttribute("data-grant") === "true"));
-      });
       renderManagedProfileStatusOptions();
+    }
+
+    function profileNamesForMember(memberEmail) {
+      return state.managedProfiles.filter((profile) =>
+        (profile.members || []).some((member) => member.email === memberEmail)
+      ).map((profile) => profile.name).sort((a, b) => a.localeCompare(b));
+    }
+
+    function openMemberProfileEditor(memberEmail) {
+      state.selectedMemberProfileEmail = memberEmail || "";
+      renderMembers();
+    }
+
+    function closeMemberProfileEditor() {
+      state.selectedMemberProfileEmail = "";
+      renderMembers();
+    }
+
+    function renderMemberProfileEditor() {
+      const box = $("memberProfileEditor");
+      if (!box) return;
+      const member = state.members.find((item) => item.email === state.selectedMemberProfileEmail);
+      if (!isAdmin() || !member) {
+        box.classList.add("hidden");
+        box.innerHTML = "";
+        return;
+      }
+      const selected = new Set(profileNamesForMember(member.email));
+      const options = state.managedProfiles.length ? state.managedProfiles.map((profile) => {
+        const checked = selected.has(profile.name) ? " checked" : "";
+        const status = profile.enabled ? "" : " · 停用";
+        return "<label><input type=\"checkbox\" data-member-profile-option=\"" + escapeAttr(profile.name) + "\"" + checked + "> " + escapeHTML(profile.name + status) + "</label>";
+      }).join("") : "<span class=\"muted\">还没有可分配的 Profile。</span>";
+      box.classList.remove("hidden");
+      box.innerHTML =
+        "<div><div class=\"name\">配置 " + escapeHTML(member.name || member.email) + " 可用的 Profile</div><div class=\"muted\">" + escapeHTML(member.email || "") + "</div></div>" +
+        "<div class=\"member-profile-options\">" + options + "</div>" +
+        "<div class=\"row-actions\"><button id=\"saveMemberProfilesBtn\" class=\"primary\">保存 Profile 配置</button><button id=\"cancelMemberProfilesBtn\">取消</button></div>";
+      $("saveMemberProfilesBtn").addEventListener("click", saveMemberProfiles);
+      $("cancelMemberProfilesBtn").addEventListener("click", closeMemberProfileEditor);
     }
 
     function renderManagedProfileStatusOptions() {
@@ -1810,6 +1855,27 @@
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("Profile 状态更新失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    async function saveMemberProfiles() {
+      const memberEmail = state.selectedMemberProfileEmail;
+      if (!isAdmin() || !memberEmail) return;
+      const profiles = Array.from(document.querySelectorAll("[data-member-profile-option]:checked")).map((input) => input.getAttribute("data-member-profile-option"));
+      setBusy(true, "正在保存成员 Profile...");
+      try {
+        await api("/api/member/profiles", {
+          method: "POST",
+          body: JSON.stringify({ member_email: memberEmail, profiles })
+        });
+        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        setStatus("成员 Profile 已保存");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("成员 Profile 保存失败");
       } finally {
         setBusy(false);
         renderSelected();

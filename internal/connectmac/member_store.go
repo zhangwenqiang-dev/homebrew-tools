@@ -46,6 +46,7 @@ type MemberRepository interface {
 	DeleteManagedProfile(profileName string) error
 	AssignProfileAccess(profileName, memberEmail string) (ProfileAccess, error)
 	UnassignProfileAccess(profileName, memberEmail string) error
+	SetMemberProfileAccess(memberEmail string, profileNames []string) ([]ProfileAccess, error)
 	MembersForProfile(profileName string) ([]PublicMember, error)
 	WebSettings() (WebSettings, error)
 	UpdateWebSettings(update WebSettings) (WebSettings, error)
@@ -543,6 +544,10 @@ func (s MemberStore) AssignProfileAccess(profileName, memberEmail string) (Profi
 
 func (s MemberStore) UnassignProfileAccess(profileName, memberEmail string) error {
 	return unassignProfileAccessInStore(s, profileName, memberEmail)
+}
+
+func (s MemberStore) SetMemberProfileAccess(memberEmail string, profileNames []string) ([]ProfileAccess, error) {
+	return setMemberProfileAccessInStore(s, memberEmail, profileNames)
 }
 
 func (s MemberStore) MembersForProfile(profileName string) ([]PublicMember, error) {
@@ -1314,6 +1319,59 @@ func unassignProfileAccessInStore(s memberDataStore, profileName, memberEmail st
 	}
 	db.ProfileAccess = out
 	return s.Save(db)
+}
+
+func setMemberProfileAccessInStore(s memberDataStore, memberEmail string, profileNames []string) ([]ProfileAccess, error) {
+	memberEmail = normalizeEmail(memberEmail)
+	if memberEmail == "" {
+		return nil, errors.New("member email is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	member, ok := findMemberByEmail(db, memberEmail)
+	if !ok {
+		return nil, fmt.Errorf("member %s not found", memberEmail)
+	}
+	desired := map[string]bool{}
+	for _, name := range profileNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := findManagedProfileByName(db, name); !ok {
+			return nil, fmt.Errorf("profile %s not found", name)
+		}
+		desired[name] = true
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	out := db.ProfileAccess[:0]
+	existing := map[string]ProfileAccess{}
+	for _, access := range db.ProfileAccess {
+		if access.MemberID != member.ID {
+			out = append(out, access)
+			continue
+		}
+		if desired[access.ProfileName] {
+			existing[access.ProfileName] = access
+			out = append(out, access)
+		}
+	}
+	result := make([]ProfileAccess, 0, len(desired))
+	for profileName := range desired {
+		access, ok := existing[profileName]
+		if !ok {
+			access = ProfileAccess{ProfileName: profileName, MemberID: member.ID, CreatedAt: now}
+			out = append(out, access)
+		}
+		result = append(result, access)
+	}
+	db.ProfileAccess = out
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].ProfileName) < strings.ToLower(result[j].ProfileName)
+	})
+	return result, s.Save(db)
 }
 
 func membersForProfileInStore(s memberDataStore, profileName string) ([]PublicMember, error) {

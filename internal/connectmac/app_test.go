@@ -438,6 +438,77 @@ func TestAppWebManagedProfilesAccessAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebMemberProfilesAPIReplacesMemberAccess(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+
+	for _, profileYAML := range []string{
+		`profiles:
+  first-usw2:
+    description: Apple account: first@example.com
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: first@example.com
+`,
+		`profiles:
+  second-usw2:
+    description: Apple account: second@example.com
+    host: ec2-5-6-7-8.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: second@example.com
+`,
+	} {
+		body := strings.NewReader(`{"profile_yaml":` + strconv.Quote(profileYAML) + `}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/managed-profile/save", body)
+		addWebAuth(t, &app, req, "admin")
+		rec := httptest.NewRecorder()
+		app.newWebHandler(config).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("save profile status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+	body := strings.NewReader(`{"member_email":"admin@example.com","profiles":["first-usw2","second-usw2"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/member/profiles", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member profiles status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "first-usw2") || !strings.Contains(rec.Body.String(), "second-usw2") {
+		t.Fatalf("member should see both profiles body = %s status=%d", rec.Body.String(), rec.Code)
+	}
+
+	body = strings.NewReader(`{"member_email":"admin@example.com","profiles":["second-usw2"]}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/member/profiles", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replace member profiles status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "first-usw2") || !strings.Contains(rec.Body.String(), "second-usw2") {
+		t.Fatalf("member should see only replacement profile body = %s status=%d", rec.Body.String(), rec.Code)
+	}
+}
+
 func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

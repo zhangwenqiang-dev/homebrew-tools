@@ -465,6 +465,10 @@ func (s MySQLMemberStore) UnassignProfileAccess(profileName, memberEmail string)
 	return unassignProfileAccessInStore(s, profileName, memberEmail)
 }
 
+func (s MySQLMemberStore) SetMemberProfileAccess(memberEmail string, profileNames []string) ([]ProfileAccess, error) {
+	return setMemberProfileAccessInStore(s, memberEmail, profileNames)
+}
+
 func (s MySQLMemberStore) MembersForProfile(profileName string) ([]PublicMember, error) {
 	return membersForProfileInStore(s, profileName)
 }
