@@ -742,7 +742,7 @@
       $("accountEmail").value = member.email || "";
       applyRoleVisibility();
       renderUserPage();
-      showView(state.view || "profilesView");
+      showView(state.view || "profilesView", { history: "replace" });
     }
 
     function isAdmin() {
@@ -759,11 +759,11 @@
         el.classList.toggle("hidden", !isAdmin());
       });
       if (!isAdmin() && state.view === "userManagementView") {
-        showView("profilesView");
+        showView("profilesView", { history: "replace" });
       }
     }
 
-    function showView(viewID) {
+    function showView(viewID, options = {}) {
       if (viewID === "userManagementView" && !isAdmin()) {
         viewID = "profilesView";
       }
@@ -777,6 +777,30 @@
       });
       renderSelected();
       renderUserPage();
+      updateBrowserHistory(viewID, options.history);
+    }
+
+    function updateBrowserHistory(viewID, mode) {
+      if (!window.history?.pushState || $("appShell").classList.contains("hidden")) return;
+      const payload = { connectmac: true, view: viewID, selected: state.selected || "" };
+      if (mode === false) return;
+      if (mode === "replace" || !history.state?.connectmac) {
+        history.replaceState(payload, "", window.location.href);
+        return;
+      }
+      if (history.state.view === payload.view && history.state.selected === payload.selected) return;
+      history.pushState(payload, "", window.location.href);
+    }
+
+    function restoreBrowserHistory(event) {
+      const payload = event.state;
+      if (!payload?.connectmac) return;
+      if (typeof payload.selected === "string") {
+        state.selected = payload.selected;
+      }
+      showView(payload.view || "profilesView", { history: false });
+      renderProfiles();
+      renderSelected();
     }
 
     async function loadChallenge() {
@@ -1803,6 +1827,7 @@
     document.querySelectorAll("[data-view]").forEach((button) => {
       button.addEventListener("click", () => showView(button.getAttribute("data-view")));
     });
+    window.addEventListener("popstate", restoreBrowserHistory);
 
     loadClientConfig().then(() => loadAuth()).then((ok) => {
       if (ok) return loadAppData();
