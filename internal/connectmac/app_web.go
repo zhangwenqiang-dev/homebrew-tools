@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -182,6 +183,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler())
 	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
 	mux.HandleFunc("/api/config", a.webConfigHandler(configPath))
+	mux.HandleFunc("/api/user-proxy/", a.webUserProxyHandler(configPath))
 	mux.HandleFunc("/api/auth/update-email", a.requireWebRole(a.webAuthUpdateEmailHandler(), "admin"))
 	mux.HandleFunc("/api/settings", a.requireWebRole(a.webSettingsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
@@ -206,6 +208,80 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/sync/pull", a.requireWebRole(a.webSyncPullHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/local/list", a.requireWebRole(a.webLocalListHandler(), "operator", "admin"))
 	return mux
+}
+
+func (a App) webUserProxyHandler(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cfg, err := LoadConfig(configPath)
+		if err != nil || cfg.Server.UserAPI == "" {
+			writeWebError(w, http.StatusBadGateway, "remote user api is not configured")
+			return
+		}
+		remotePath := strings.TrimPrefix(r.URL.Path, "/api/user-proxy")
+		if !isRemoteUserAPIPath(remotePath) {
+			writeWebError(w, http.StatusForbidden, "path is not allowed")
+			return
+		}
+		target := strings.TrimRight(cfg.Server.UserAPI, "/") + remotePath
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+		if err != nil {
+			writeWebError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		for _, name := range []string{"Accept", "Content-Type", "Cookie"} {
+			if value := r.Header.Get(name); value != "" {
+				req.Header.Set(name, value)
+			}
+		}
+		req.Header.Set("X-Forwarded-Proto", "https")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeWebError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		defer resp.Body.Close()
+		for key, values := range resp.Header {
+			if strings.EqualFold(key, "Set-Cookie") {
+				continue
+			}
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		copyUserProxySessionCookies(w, resp)
+		w.WriteHeader(resp.StatusCode)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			a.logProfileError("user-proxy", Profile{}, err.Error())
+		}
+	}
+}
+
+func copyUserProxySessionCookies(w http.ResponseWriter, resp *http.Response) {
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name != webSessionCookie {
+			continue
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookie.Name,
+			Value:    cookie.Value,
+			Path:     "/",
+			Expires:  cookie.Expires,
+			MaxAge:   cookie.MaxAge,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+}
+
+func isRemoteUserAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/api/auth/") ||
+		path == "/api/members" ||
+		strings.HasPrefix(path, "/api/member/") ||
+		path == "/api/settings" ||
+		strings.HasPrefix(path, "/api/events")
 }
 
 func (a App) webConfigHandler(configPath string) http.HandlerFunc {

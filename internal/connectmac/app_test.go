@@ -337,6 +337,23 @@ profiles:
 	}
 }
 
+func TestAppWebUserProxySessionCookieBecomesSameOrigin(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("Set-Cookie", "cm_session=signed-session; Path=/; HttpOnly; Secure; SameSite=None")
+	rec := httptest.NewRecorder()
+	copyUserProxySessionCookies(rec, resp)
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %+v, want one session cookie", cookies)
+	}
+	if cookies[0].Secure {
+		t.Fatalf("proxied local cookie should not require Secure on local http")
+	}
+	if cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("proxied local cookie SameSite = %v, want Lax", cookies[0].SameSite)
+	}
+}
+
 func TestAppWebMemberAPIs(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

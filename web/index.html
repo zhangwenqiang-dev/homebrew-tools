@@ -682,7 +682,7 @@
     function apiURL(path) {
       const userAPI = (state.clientConfig?.user_api || "").replace(/\/+$/, "");
       if (userAPI && remoteUserAPIPath(path)) {
-        return userAPI + path;
+        return "/api/user-proxy" + path;
       }
       return path;
     }
@@ -690,7 +690,7 @@
     async function api(path, options = {}) {
       const res = await fetch(apiURL(path), {
         headers: { "Content-Type": "application/json" },
-        credentials: remoteUserAPIPath(path) && state.clientConfig?.user_api ? "include" : "same-origin",
+        credentials: "same-origin",
         ...options
       });
       const body = await res.json();
