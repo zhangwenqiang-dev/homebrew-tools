@@ -346,7 +346,7 @@
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       .app-layout { flex-direction: column; }
-      .sidebar { width: 100%; flex-basis: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .sidebar { width: 100%; flex-basis: auto; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
       input { width: min(100%, 280px); }
       .details { grid-template-columns: 1fr; }
       .sync-grid { grid-template-columns: 1fr; }
@@ -468,6 +468,7 @@
     <div class="app-layout">
       <nav class="sidebar" aria-label="管理页面导航">
         <button class="nav-btn active" data-view="profilesView">首页</button>
+        <button class="nav-btn admin-only" data-view="profilesAdminView">Profiles</button>
         <button class="nav-btn admin-only" data-view="userManagementView">用户管理</button>
       </nav>
       <main>
@@ -651,19 +652,6 @@
             </thead>
             <tbody id="members"></tbody>
           </table>
-          <div class="section-head admin-only">
-            <h2>Profiles</h2>
-            <div class="row-actions">
-              <button id="openProfileFormBtn" class="primary">添加 Profile</button>
-              <button id="refreshManagedProfilesBtn">刷新 Profile</button>
-            </div>
-          </div>
-          <div class="profile-admin admin-only">
-            <div class="profile-admin-list" id="managedProfiles"></div>
-            <div class="form-grid">
-              <span class="muted">Profile 通过弹框表单新增或编辑。PEM 路径和 sync 过滤继续读取成员本机配置。</span>
-            </div>
-          </div>
           <div class="section-head">
             <h2>Settings</h2>
             <button id="saveSettingsBtn" class="admin-only">保存设置</button>
@@ -695,6 +683,22 @@
               <strong id="accountChallengeQuestion">校验题加载中...</strong>
               <input id="accountChallengeAnswer" placeholder="校验答案">
               <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="profilesAdminView" class="view hidden admin-only">
+          <div class="section-head">
+            <h2>Profiles</h2>
+            <div class="row-actions">
+              <button id="openProfileFormBtn" class="primary">添加 Profile</button>
+              <button id="refreshManagedProfilesBtn">刷新 Profile</button>
+            </div>
+          </div>
+          <div class="profile-admin">
+            <div class="profile-admin-list" id="managedProfiles"></div>
+            <div class="form-grid">
+              <span class="muted">Profile 通过弹框表单新增或编辑。PEM 路径和 sync 过滤继续读取成员本机配置。</span>
             </div>
           </div>
         </section>
@@ -846,13 +850,13 @@
       document.querySelectorAll(".admin-only").forEach((el) => {
         el.classList.toggle("hidden", !isAdmin());
       });
-      if (!isAdmin() && state.view === "userManagementView") {
+      if (!isAdmin() && (state.view === "userManagementView" || state.view === "profilesAdminView")) {
         showView("profilesView", { history: "replace" });
       }
     }
 
     function showView(viewID, options = {}) {
-      if (viewID === "userManagementView" && !isAdmin()) {
+      if ((viewID === "userManagementView" || viewID === "profilesAdminView") && !isAdmin()) {
         viewID = "profilesView";
       }
       state.view = viewID;
