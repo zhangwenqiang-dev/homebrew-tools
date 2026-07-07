@@ -1,7 +1,11 @@
 .cache/
 .tmp-*
 bin/
+dist/
 .DS_Store
 AGENTS.md
 docs/superpowers/
 scripts/
+!scripts/
+scripts/*
+!scripts/build-deb.sh

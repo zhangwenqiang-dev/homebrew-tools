@@ -12,6 +12,26 @@ go build -o bin/cm ./cmd/cm
 
 For internal installation, copy `bin/cm` to a shared tool path such as `/usr/local/bin/cm`.
 
+Build a Debian package for Linux hosts:
+
+```bash
+make deb VERSION=0.1.76
+make deb-all VERSION=0.1.76
+```
+
+Install the generated package on Ubuntu/Debian:
+
+```bash
+sudo apt install ./dist/cm_0.1.76_arm64.deb
+cm version
+```
+
+The Debian package installs the command as `cm`, stores web assets under `/usr/share/connectmac/web`, exposes them through `/var/lib/connectmac/web`, and installs a `connectmac.service` unit. It does not start the service automatically. To run the web manager on a server:
+
+```bash
+sudo systemctl enable --now connectmac.service
+```
+
 Check the installed version:
 
 ```bash
