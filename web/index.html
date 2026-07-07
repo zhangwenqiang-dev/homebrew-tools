@@ -281,15 +281,6 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .status-line { min-height: 22px; color: var(--muted); }
-    .app-feedback {
-      min-height: 28px;
-      max-width: min(42vw, 520px);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fbfcfe;
-      color: var(--muted);
-      padding: 4px 9px;
-      overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -356,7 +347,6 @@
       header { align-items: flex-start; flex-direction: column; }
       .app-layout { flex-direction: column; }
       .sidebar { width: 100%; flex-basis: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .app-feedback { max-width: 100%; width: 100%; white-space: normal; }
       input { width: min(100%, 280px); }
       .details { grid-template-columns: 1fr; }
       .sync-grid { grid-template-columns: 1fr; }
@@ -466,7 +456,6 @@
     <header>
       <h1>ConnectMac</h1>
       <div class="toolbar">
-        <span id="globalStatusLine" class="app-feedback" aria-live="polite">就绪</span>
         <button id="currentUserBtn" class="user-button" title="用户页">
           <span id="currentUserAvatar" class="avatar">-</span>
           <span id="currentUser" class="user-label">未登录</span>
@@ -752,7 +741,6 @@
 
     function setStatus(text) {
       const value = text || "就绪";
-      $("globalStatusLine").textContent = value;
       $("statusLine").textContent = value;
     }
 
