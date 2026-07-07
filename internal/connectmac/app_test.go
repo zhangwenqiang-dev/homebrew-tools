@@ -391,6 +391,51 @@ func TestAppWebManagedProfilesAccessAPI(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "managed-usw2") {
 		t.Fatalf("granted member list body = %s status=%d", rec.Body.String(), rec.Code)
 	}
+
+	body = strings.NewReader(`{"profile":"managed-usw2","enabled":false}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/managed-profile/status", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disabled member list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "managed-usw2") {
+		t.Fatalf("disabled profile should be hidden from member: %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "managed-usw2") || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Fatalf("admin should see disabled profile body = %s status=%d", rec.Body.String(), rec.Code)
+	}
+
+	body = strings.NewReader(`{"profile":"managed-usw2","enabled":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/managed-profile/status", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "managed-usw2") {
+		t.Fatalf("re-enabled member list body = %s status=%d", rec.Body.String(), rec.Code)
+	}
 }
 
 func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {

@@ -197,6 +197,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/managed-profiles", a.requireWebRole(a.webManagedProfilesHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/managed-profile/save", a.requireWebRole(a.webManagedProfileSaveHandler(), "admin"))
+	mux.HandleFunc("/api/managed-profile/status", a.requireWebRole(a.webManagedProfileStatusHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profile/delete", a.requireWebRole(a.webManagedProfileDeleteHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profile/access", a.requireWebRole(a.webManagedProfileAccessHandler(), "admin"))
 	mux.HandleFunc("/api/events", a.requireWebRole(a.webEventsHandler(), "viewer", "operator", "admin"))
@@ -695,6 +696,29 @@ func (a App) webManagedProfileSaveHandler() http.HandlerFunc {
 			return
 		}
 		record, err := a.MemberStore.UpsertManagedProfile(profile)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profile": record}})
+	}
+}
+
+func (a App) webManagedProfileStatusHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile string `json:"profile"`
+			Enabled bool   `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		record, err := a.MemberStore.SetManagedProfileEnabled(req.Profile, req.Enabled)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return

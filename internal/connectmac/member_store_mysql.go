@@ -449,6 +449,10 @@ func (s MySQLMemberStore) UpsertManagedProfile(profile Profile) (ManagedProfile,
 	return upsertManagedProfileInStore(s, profile)
 }
 
+func (s MySQLMemberStore) SetManagedProfileEnabled(profileName string, enabled bool) (ManagedProfile, error) {
+	return setManagedProfileEnabledInStore(s, profileName, enabled)
+}
+
 func (s MySQLMemberStore) DeleteManagedProfile(profileName string) error {
 	return deleteManagedProfileInStore(s, profileName)
 }

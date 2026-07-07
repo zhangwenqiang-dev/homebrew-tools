@@ -42,6 +42,7 @@ type MemberRepository interface {
 	SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error)
 	ListManagedProfiles(memberEmail string) ([]ManagedProfile, error)
 	UpsertManagedProfile(profile Profile) (ManagedProfile, error)
+	SetManagedProfileEnabled(profileName string, enabled bool) (ManagedProfile, error)
 	DeleteManagedProfile(profileName string) error
 	AssignProfileAccess(profileName, memberEmail string) (ProfileAccess, error)
 	UnassignProfileAccess(profileName, memberEmail string) error
@@ -526,6 +527,10 @@ func (s MemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProfile, 
 
 func (s MemberStore) UpsertManagedProfile(profile Profile) (ManagedProfile, error) {
 	return upsertManagedProfileInStore(s, profile)
+}
+
+func (s MemberStore) SetManagedProfileEnabled(profileName string, enabled bool) (ManagedProfile, error) {
+	return setManagedProfileEnabledInStore(s, profileName, enabled)
 }
 
 func (s MemberStore) DeleteManagedProfile(profileName string) error {
@@ -1201,6 +1206,28 @@ func upsertManagedProfileInStore(s memberDataStore, profile Profile) (ManagedPro
 	}
 	db.Profiles = append(db.Profiles, record)
 	return record, s.Save(db)
+}
+
+func setManagedProfileEnabledInStore(s memberDataStore, profileName string, enabled bool) (ManagedProfile, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ManagedProfile{}, errors.New("profile is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return ManagedProfile{}, err
+	}
+	for i := range db.Profiles {
+		if db.Profiles[i].Name == profileName {
+			db.Profiles[i].Enabled = enabled
+			db.Profiles[i].UpdatedAt = s.currentTime().Format(time.RFC3339)
+			if err := s.Save(db); err != nil {
+				return ManagedProfile{}, err
+			}
+			return db.Profiles[i], nil
+		}
+	}
+	return ManagedProfile{}, fmt.Errorf("profile %s not found", profileName)
 }
 
 func deleteManagedProfileInStore(s memberDataStore, profileName string) error {
