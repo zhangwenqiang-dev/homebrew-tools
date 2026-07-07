@@ -205,6 +205,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/events", a.requireWebRole(a.webEventsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/jobs", a.requireWebRole(a.webJobsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/job/log", a.requireWebRole(a.webJobLogHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/debug/status-config", a.requireWebRole(a.webDebugStatusConfigHandler(configPath), "admin"))
 	mux.HandleFunc("/api/aws/status", a.requireWebRole(a.webAWSStatusHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/aws/open", a.requireWebRole(a.webAWSActionHandler(configPath, "open"), "operator", "admin"))
 	mux.HandleFunc("/api/aws/destroy", a.requireWebRole(a.webAWSActionHandler(configPath, "destroy"), "operator", "admin"))
@@ -864,6 +865,77 @@ func (a App) webJobsHandler() http.HandlerFunc {
 		})
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"jobs": jobs}})
 	}
+}
+
+func (a App) webDebugStatusConfigHandler(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		ref := strings.TrimSpace(r.URL.Query().Get("profile"))
+		rawCfg, rawErr := LoadConfig(configPath)
+		member, memberOK := a.currentWebMember(r)
+		memberEmail := ""
+		memberRole := ""
+		if memberOK {
+			memberEmail = member.Email
+			memberRole = member.Role
+		}
+		managedRecords, managedErr := a.MemberStore.ListManagedProfiles(memberEmail)
+		if managedErr != nil && memberEmail != "" {
+			managedRecords, managedErr = a.MemberStore.ListManagedProfiles("")
+		}
+		effectiveCfg, effectiveErr := a.loadWebConfig(r, configPath)
+		resolveOK := false
+		resolveErr := ""
+		if effectiveErr == nil && ref != "" {
+			if _, err := resolveProfileRef(effectiveCfg, ref); err != nil {
+				resolveErr = err.Error()
+			} else {
+				resolveOK = true
+			}
+		}
+		data := map[string]interface{}{
+			"profile":                     ref,
+			"config_path":                 configPath,
+			"remote_user_api_mode":        a.RemoteUserAPI,
+			"authenticated_member":        memberOK,
+			"member_email":                memberEmail,
+			"member_role":                 memberRole,
+			"managed_profiles_count":      len(managedRecords),
+			"managed_profiles":            managedProfileNames(managedRecords),
+			"effective_profiles_count":    len(effectiveCfg.Profiles),
+			"effective_profiles":          sortedProfileNames(effectiveCfg),
+			"resolve_ok":                  resolveOK,
+			"resolve_error":               resolveErr,
+			"load_config_error":           errorString(rawErr),
+			"load_effective_config_error": errorString(effectiveErr),
+			"managed_profiles_error":      errorString(managedErr),
+		}
+		if rawErr == nil {
+			data["server_user_api_configured"] = strings.TrimSpace(rawCfg.Server.UserAPI) != ""
+			data["local_profiles_count"] = len(rawCfg.Profiles)
+			data["local_profiles"] = sortedProfileNames(rawCfg)
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: data})
+	}
+}
+
+func managedProfileNames(records []ManagedProfile) []string {
+	names := make([]string, 0, len(records))
+	for _, record := range records {
+		names = append(names, record.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
