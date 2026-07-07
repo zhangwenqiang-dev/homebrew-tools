@@ -392,6 +392,10 @@
         <button id="memberProfileCloseBtn">关闭</button>
       </div>
       <div id="memberProfileMember" class="picker-path"></div>
+      <div class="row-actions">
+        <button id="selectAllMemberProfilesBtn">全选</button>
+        <button id="clearMemberProfilesBtn">清空</button>
+      </div>
       <div id="memberProfileOptions" class="picker-list member-profile-options"></div>
       <div class="picker-actions">
         <button id="cancelMemberProfilesBtn">取消</button>
@@ -668,16 +672,6 @@
           <div class="profile-admin admin-only">
             <div class="profile-admin-list" id="managedProfiles"></div>
             <div class="form-grid">
-              <div class="profile-access">
-                <select id="managedProfileStatusSelect">
-                  <option value="">选择已有 Profile</option>
-                </select>
-                <select id="managedProfileStatusValue">
-                  <option value="true">正常</option>
-                  <option value="false">停用</option>
-                </select>
-                <button id="saveManagedProfileStatusBtn">保存状态</button>
-              </div>
               <span class="muted">Profile 通过弹框表单新增或编辑。PEM 路径和 sync 过滤继续读取成员本机配置。</span>
             </div>
           </div>
@@ -728,7 +722,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveManagedProfileStatusBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "managedProfileStatusSelect", "managedProfileStatusValue", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1256,7 +1250,6 @@
       document.querySelectorAll("[data-profile-delete]").forEach((button) => {
         button.addEventListener("click", () => deleteManagedProfile(button.getAttribute("data-profile-delete")));
       });
-      renderManagedProfileStatusOptions();
     }
 
     function profileNamesForMember(memberEmail) {
@@ -1294,19 +1287,11 @@
       $("memberProfileOptions").innerHTML = options;
     }
 
-    function renderManagedProfileStatusOptions() {
+    function setMemberProfileSelections(checked) {
       if (!isAdmin()) return;
-      const select = $("managedProfileStatusSelect");
-      if (!select) return;
-      const current = select.value;
-      select.innerHTML = "<option value=\"\">选择已有 Profile</option>" + state.managedProfiles.map((profile) =>
-        "<option value=\"" + escapeAttr(profile.name) + "\">" + escapeHTML(profile.name + " · " + (profile.enabled ? "正常" : "停用")) + "</option>"
-      ).join("");
-      select.value = state.managedProfiles.some((profile) => profile.name === current) ? current : "";
-      const selected = state.managedProfiles.find((profile) => profile.name === select.value);
-      if (selected) {
-        $("managedProfileStatusValue").value = String(!!selected.enabled);
-      }
+      document.querySelectorAll("[data-member-profile-option]").forEach((input) => {
+        input.checked = checked;
+      });
     }
 
     function renderSettingsMemberOptions() {
@@ -2129,16 +2114,6 @@
       }
     }
 
-    function saveManagedProfileStatus() {
-      const profile = $("managedProfileStatusSelect").value;
-      const enabled = $("managedProfileStatusValue").value === "true";
-      if (!profile) {
-        setStatus("请选择已有 Profile");
-        return;
-      }
-      setManagedProfileStatus(profile, enabled);
-    }
-
     async function setProfileAccess(profile, memberEmail, grant) {
       if (!isAdmin() || !profile || !memberEmail) return;
       setBusy(true, grant ? "正在授权 Profile..." : "正在移除授权...");
@@ -2317,11 +2292,11 @@
     $("profileFormLayer").addEventListener("click", (event) => {
       if (event.target === $("profileFormLayer")) closeProfileForm();
     });
-    $("saveManagedProfileStatusBtn").addEventListener("click", saveManagedProfileStatus);
-    $("managedProfileStatusSelect").addEventListener("change", renderManagedProfileStatusOptions);
     $("saveMemberProfilesBtn").addEventListener("click", saveMemberProfiles);
     $("cancelMemberProfilesBtn").addEventListener("click", closeMemberProfileEditor);
     $("memberProfileCloseBtn").addEventListener("click", closeMemberProfileEditor);
+    $("selectAllMemberProfilesBtn").addEventListener("click", () => setMemberProfileSelections(true));
+    $("clearMemberProfilesBtn").addEventListener("click", () => setMemberProfileSelections(false));
     $("memberProfileLayer").addEventListener("click", (event) => {
       if (event.target === $("memberProfileLayer")) closeMemberProfileEditor();
     });
