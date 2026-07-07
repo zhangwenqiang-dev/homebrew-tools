@@ -514,7 +514,7 @@
               <button id="previewDestroyBtn">预览释放</button>
               <button id="confirmDestroyBtn" class="danger">确认释放</button>
               <button id="syncBtn">传输</button>
-              <button id="terminalBtn">终端</button>
+              <button id="terminalBtn">连接</button>
               <button id="eventsBtn">事件</button>
             </div>
           </div>
@@ -702,7 +702,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -718,8 +718,12 @@
       document.querySelectorAll("[data-profile]").forEach((button) => {
         button.disabled = busy;
       });
-      document.querySelectorAll("[data-start], [data-sync], [data-terminal]").forEach((button) => {
-        const profile = button.getAttribute("data-start") || button.getAttribute("data-sync") || button.getAttribute("data-terminal");
+      document.querySelectorAll("[data-start]").forEach((button) => {
+        const profile = button.getAttribute("data-start");
+        button.disabled = busy || !profileReady(profile) || !profileVNCReady(profile);
+      });
+      document.querySelectorAll("[data-sync], [data-terminal]").forEach((button) => {
+        const profile = button.getAttribute("data-sync") || button.getAttribute("data-terminal");
         button.disabled = busy || !profileReady(profile);
       });
       document.querySelectorAll("[data-sync-use], [data-sync-delete]").forEach((button) => {
@@ -1139,6 +1143,10 @@
       return !!state.statuses[name]?.ready;
     }
 
+    function profileVNCReady(name) {
+      return state.terminalConnectedProfiles.has(name);
+    }
+
     function renderProfiles() {
       const rows = filteredProfiles();
       $("profileCount").textContent = `${rows.length}/${state.profiles.length}`;
@@ -1146,13 +1154,14 @@
         const status = state.statuses[p.name];
         const ready = !!status?.ready;
         const readyAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能执行该操作。\"";
+        const vncAttrs = ready && profileVNCReady(p.name) ? "" : " disabled title=\"" + (ready ? "请先点击连接，连接成功后再打开 VNC。" : "Mac 未 ready，不能打开 VNC。") + "\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
           "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td>" + escapeHTML(p.region || "-") + "</td>" +
           "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-start=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">连接</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">传输</button><button data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">终端</button></div></td>" +
+          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">连接</button><button data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + ">VNC</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">传输</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -1165,11 +1174,16 @@
       });
       document.querySelectorAll("[data-start]").forEach((button) => {
         button.addEventListener("click", () => {
-          if (button.disabled) {
-            setStatus("Mac 未 ready，不能连接。");
+          const profile = button.getAttribute("data-start");
+          if (!profileReady(profile)) {
+            setStatus("Mac 未 ready，不能打开 VNC。");
             return;
           }
-          startTunnel(button.getAttribute("data-start"));
+          if (!profileVNCReady(profile)) {
+            setStatus("请先点击连接，连接成功后再打开 VNC。");
+            return;
+          }
+          startTunnel(profile);
         });
       });
       document.querySelectorAll("[data-sync]").forEach((button) => {
@@ -1184,7 +1198,7 @@
       document.querySelectorAll("[data-terminal]").forEach((button) => {
         button.addEventListener("click", () => {
           if (button.disabled) {
-            setStatus("Mac 未 ready，不能打开终端。");
+            setStatus("Mac 未 ready，不能连接。");
             return;
           }
           openTerminal(button.getAttribute("data-terminal"));
@@ -1455,19 +1469,19 @@
       showView("operationsView");
       renderProfiles();
       renderSelected();
-      setBusy(true, "正在连接...");
-      setStatus("连接中...");
+      setBusy(true, "正在打开 VNC...");
+      setStatus("VNC 打开中...");
       try {
         const body = await api("/api/tunnel/start", {
           method: "POST",
           body: JSON.stringify({ profile })
         });
         setOutput((body.output || "") + (body.error || ""));
-        setStatus(body.ok ? "连接已启动" : "连接失败");
+        setStatus(body.ok ? "VNC 已打开" : "VNC 打开失败");
         await loadEvents(false);
       } catch (err) {
         setOutput(String(err.message || err));
-        setStatus("连接失败");
+        setStatus("VNC 打开失败");
       } finally {
         setBusy(false);
         renderProfiles();
@@ -1674,8 +1688,10 @@
         state.terminal.socket = socket;
         socket.binaryType = "arraybuffer";
         socket.onopen = () => {
+          state.terminalConnectedProfiles.add(profile);
           terminalSetStatus("终端已连接，点击黑色区域后输入命令。");
           $("terminalSurface").focus();
+          renderProfiles();
           renderSelected();
         };
         socket.onmessage = (event) => {
