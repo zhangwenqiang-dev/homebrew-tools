@@ -656,7 +656,7 @@
               <tr>
                 <th style="width: 28%">成员</th>
                 <th style="width: 14%">角色</th>
-                <th style="width: 40%">可用 Profile</th>
+                <th style="width: 40%">配置</th>
                 <th style="width: 18%">状态</th>
               </tr>
             </thead>
@@ -1253,6 +1253,10 @@
     }
 
     function profileNamesForMember(memberEmail) {
+      const member = state.members.find((item) => item.email === memberEmail);
+      if (member && Array.isArray(member.profiles)) {
+        return member.profiles.slice().sort((a, b) => a.localeCompare(b));
+      }
       return state.managedProfiles.filter((profile) =>
         (profile.members || []).some((member) => member.email === memberEmail)
       ).map((profile) => profile.name).sort((a, b) => a.localeCompare(b));
@@ -2040,7 +2044,7 @@
           body: JSON.stringify({ profile_yaml: profileYAML })
         });
         closeProfileForm();
-        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         setStatus("Profile 已保存");
       } catch (err) {
         setOutput(String(err.message || err));

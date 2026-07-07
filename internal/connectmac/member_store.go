@@ -147,6 +147,7 @@ type PublicMember struct {
 type MemberWithAssignments struct {
 	PublicMember
 	Assignments []AppleAccountMember `json:"assignments"`
+	Profiles    []string             `json:"profiles,omitempty"`
 }
 
 func NewMemberStore(path string) MemberStore {
@@ -218,6 +219,12 @@ func (s MemberStore) ListMembers() ([]MemberWithAssignments, error) {
 				item.Assignments = append(item.Assignments, assignment)
 			}
 		}
+		for _, access := range db.ProfileAccess {
+			if access.MemberID == member.ID {
+				item.Profiles = append(item.Profiles, access.ProfileName)
+			}
+		}
+		sort.Strings(item.Profiles)
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {

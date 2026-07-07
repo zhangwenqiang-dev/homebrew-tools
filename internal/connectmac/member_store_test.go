@@ -130,6 +130,20 @@ func TestMemberStoreManagedProfilesAccess(t *testing.T) {
 	if len(memberProfiles) != 1 || memberProfiles[0].Name != "apple-usw2" {
 		t.Fatalf("member profiles after grant = %+v", memberProfiles)
 	}
+	members, err := store.ListMembers()
+	if err != nil {
+		t.Fatalf("list members: %v", err)
+	}
+	var userProfiles []string
+	for _, member := range members {
+		if member.Email == "user@example.com" {
+			userProfiles = member.Profiles
+			break
+		}
+	}
+	if len(userProfiles) != 1 || userProfiles[0] != "apple-usw2" {
+		t.Fatalf("member profile names = %+v", userProfiles)
+	}
 	adminProfiles, err := store.ListManagedProfiles("admin@example.com")
 	if err != nil {
 		t.Fatalf("list admin profiles: %v", err)
