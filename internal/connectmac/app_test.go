@@ -677,6 +677,48 @@ profiles:
 	}
 }
 
+func TestAppWebProfilesUsesManagedProfilesWhenConfigMissing(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "missing", "config.yaml")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	profile, err := ParseSingleProfileYAML(`profiles:
+  managed-missing-config-usw2:
+    description: Apple account: managed-missing-config@example.com
+    host: ec2-1-2-3-6.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: managed-missing-config@example.com
+      key_name: maiqi-xcode
+      security_group_id: sg-example
+      elastic_ip_allocation_id: eipalloc-example
+      elastic_ip_owner_tag:
+        key: Apple
+        value: managed-missing-config@example.com
+      availability_zone_ids:
+        - usw2-az1
+      instance_type_priority:
+        - mac2-m2.metal
+`)
+	if err != nil {
+		t.Fatalf("parse profile: %v", err)
+	}
+	if _, err := app.MemberStore.UpsertManagedProfile(profile); err != nil {
+		t.Fatalf("upsert managed profile: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/profiles", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "managed-missing-config-usw2") {
+		t.Fatalf("profiles body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

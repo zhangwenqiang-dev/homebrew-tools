@@ -399,7 +399,11 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 func (a App) loadWebConfig(r *http.Request, configPath string) (Config, error) {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
-		return Config{}, err
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || !os.IsNotExist(pathErr.Err) {
+			return Config{}, err
+		}
+		cfg = Config{Profiles: map[string]Profile{}}
 	}
 	if strings.TrimSpace(cfg.Server.UserAPI) == "" {
 		member, ok := a.currentWebMember(r)
