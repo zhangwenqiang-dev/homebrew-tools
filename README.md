@@ -32,6 +32,8 @@ The Debian package installs the command as `cm`, stores web assets under `/usr/s
 sudo systemctl enable --now connectmac.service
 ```
 
+The packaged service uses `/var/lib/connectmac` as its working directory and `HOME` so default `~/.connectmac` paths resolve even when systemd does not provide a user home environment. Optional server settings can be placed in `/etc/connectmac/.env`.
+
 Check the installed version:
 
 ```bash

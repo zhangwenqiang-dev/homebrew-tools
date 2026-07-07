@@ -125,6 +125,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+WorkingDirectory=/var/lib/connectmac
+Environment=HOME=/var/lib/connectmac
 EnvironmentFile=-/etc/connectmac/.env
 ExecStart=/usr/sbin/cm web --host 127.0.0.1 --port 18080 --web-dir /var/lib/connectmac/web
 Restart=on-failure
