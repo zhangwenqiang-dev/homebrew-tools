@@ -228,15 +228,19 @@
     .member-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
     .member-form input { width: 190px; }
     .member-form select { width: 128px; }
-    .member-profile-editor { display: grid; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); background: #fbfcfe; }
     .member-profile-options { display: flex; flex-wrap: wrap; gap: 8px; }
     .member-profile-options label { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; }
     .member-profile-options input { width: auto; min-height: auto; }
     .profile-admin { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 10px 12px; border-top: 1px solid var(--line); }
-    .profile-admin textarea { width: 100%; min-height: 220px; resize: vertical; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .profile-admin-list { display: grid; gap: 8px; }
     .profile-admin-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 8px; }
     .profile-access { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .profile-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; overflow: auto; }
+    .profile-form-grid label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    .profile-form-grid input, .profile-form-grid textarea { width: 100%; }
+    .profile-form-grid textarea { min-height: 74px; resize: vertical; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .profile-form-grid .wide { grid-column: 1 / -1; }
+    .profile-form-grid input[type="checkbox"] { width: auto; min-height: auto; }
     .settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
     .settings-form label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
     .settings-form input[type="checkbox"] { width: auto; min-height: auto; }
@@ -378,6 +382,55 @@
       <div class="picker-actions">
         <button id="localPickerUpBtn">上一级</button>
         <button id="localPickerSelectBtn" class="primary">选择当前目录</button>
+      </div>
+    </div>
+  </div>
+  <div id="memberProfileLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="memberProfileTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="memberProfileTitle">配置</h2>
+        <button id="memberProfileCloseBtn">关闭</button>
+      </div>
+      <div id="memberProfileMember" class="picker-path"></div>
+      <div id="memberProfileOptions" class="picker-list member-profile-options"></div>
+      <div class="picker-actions">
+        <button id="cancelMemberProfilesBtn">取消</button>
+        <button id="saveMemberProfilesBtn" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+  <div id="profileFormLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="profileFormTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="profileFormTitle">添加 Profile</h2>
+        <button id="profileFormCloseBtn">关闭</button>
+      </div>
+      <div class="profile-form-grid">
+        <label>Profile 名称<input id="profileFormName" placeholder="iossupport-usw2"></label>
+        <label>Apple 邮箱<input id="profileFormAppleEmail" placeholder="user@example.com"></label>
+        <label class="wide">描述<input id="profileFormDescription" placeholder="苹果账号：user@example.com"></label>
+        <label>SSH User<input id="profileFormUser" placeholder="ec2-user"></label>
+        <label>Host<input id="profileFormHost" placeholder="ec2-1-2-3-4.us-west-2.compute.amazonaws.com"></label>
+        <label>AWS Profile<input id="profileFormAWSProfile" placeholder="cm-user"></label>
+        <label>Region<input id="profileFormRegion" placeholder="us-west-2"></label>
+        <label>Creator<input id="profileFormCreator" placeholder="张文强"></label>
+        <label>Resource Name<input id="profileFormResourceName" placeholder="xcode-user@example.com"></label>
+        <label>Key Name<input id="profileFormKeyName" placeholder="maiqi-xcode"></label>
+        <label>Security Group ID<input id="profileFormSecurityGroup" placeholder="sg-..."></label>
+        <label>Subnet ID<input id="profileFormSubnet" placeholder="subnet-..."></label>
+        <label>Elastic IP Allocation ID<input id="profileFormEIPAllocation" placeholder="eipalloc-..."></label>
+        <label>Elastic IP Public IP<input id="profileFormEIPPublic" placeholder="54.1.2.3"></label>
+        <label>mac_x86 AMI<input id="profileFormAMIX86" placeholder="ami-..."></label>
+        <label>mac_arm AMI<input id="profileFormAMIARM" placeholder="ami-..."></label>
+        <label class="wide">可用区 ID，用逗号分隔<input id="profileFormAZs" placeholder="usw2-az1, usw2-az2"></label>
+        <label class="wide">实例类型优先级，用逗号分隔<input id="profileFormTypes" placeholder="mac2-m2.metal, mac2.metal"></label>
+        <label class="wide">AZ 子网映射，每行 az=subnet<textarea id="profileFormSubnetsByAZ" placeholder="usw2-az1=subnet-..."></textarea></label>
+        <label>VNC 本地端口<input id="profileFormTunnelPort" placeholder="5900"></label>
+        <label><span>允许 Intel fallback</span><input id="profileFormIntelFallback" type="checkbox"></label>
+      </div>
+      <div class="picker-actions">
+        <button id="cancelProfileFormBtn">取消</button>
+        <button id="saveProfileFormBtn" class="primary">保存</button>
       </div>
     </div>
   </div>
@@ -605,10 +658,12 @@
             </thead>
             <tbody id="members"></tbody>
           </table>
-          <div id="memberProfileEditor" class="member-profile-editor admin-only hidden"></div>
           <div class="section-head admin-only">
             <h2>Profiles</h2>
-            <button id="refreshManagedProfilesBtn">刷新 Profile</button>
+            <div class="row-actions">
+              <button id="openProfileFormBtn" class="primary">添加 Profile</button>
+              <button id="refreshManagedProfilesBtn">刷新 Profile</button>
+            </div>
           </div>
           <div class="profile-admin admin-only">
             <div class="profile-admin-list" id="managedProfiles"></div>
@@ -623,20 +678,7 @@
                 </select>
                 <button id="saveManagedProfileStatusBtn">保存状态</button>
               </div>
-              <textarea id="managedProfileYaml" placeholder="profiles:
-  example-usw2:
-    description: Apple account: user@example.com
-    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
-    aws:
-      profile: cm-xcode
-      region: us-west-2
-      account_email: user@example.com
-      key_name: maiqi-xcode
-      security_group_id: sg-example
-      elastic_ip_allocation_id: eipalloc-example
-      elastic_ip_public_ip: 1.2.3.4"></textarea>
-              <button id="saveManagedProfileBtn" class="primary">保存 Profile</button>
-              <span class="muted">PEM 路径和 sync 过滤继续读取成员本机配置。</span>
+              <span class="muted">Profile 通过弹框表单新增或编辑。PEM 路径和 sync 过滤继续读取成员本机配置。</span>
             </div>
           </div>
           <div class="section-head">
@@ -677,7 +719,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -686,7 +728,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "saveManagedProfileBtn", "saveManagedProfileStatusBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "managedProfileStatusSelect", "managedProfileStatusValue", "managedProfileYaml", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveManagedProfileStatusBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "managedProfileStatusSelect", "managedProfileStatusValue", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -726,6 +768,8 @@
         path.startsWith("/api/member/") ||
         path === "/api/profile-owners" ||
         path.startsWith("/api/profile-owner/") ||
+        path === "/api/managed-profiles" ||
+        path.startsWith("/api/managed-profile/") ||
         path === "/api/settings" ||
         path.startsWith("/api/events");
     }
@@ -766,6 +810,13 @@
       if (!state.auth.authenticated) {
         showAuth();
         await loadChallenge();
+        return false;
+      }
+      if (!state.auth.member?.email) {
+        state.auth = { authenticated: false, setup_required: false };
+        showAuth();
+        $("authStatus").textContent = "登录信息不完整，请重新登录。";
+        await loadChallenge().catch(() => {});
         return false;
       }
       showApp();
@@ -855,17 +906,33 @@
     }
 
     async function loadChallenge() {
-      const body = await api("/api/auth/challenge");
-      state.challenge = body.data || {};
-      $("challengeQuestion").textContent = state.challenge.question || "校验题加载失败";
-      $("challengeAnswer").value = "";
+      $("challengeQuestion").textContent = "校验题加载中...";
+      try {
+        const body = await api("/api/auth/challenge");
+        state.challenge = body.data || {};
+        $("challengeQuestion").textContent = state.challenge.question || "校验题加载失败";
+        $("challengeAnswer").value = "";
+      } catch (err) {
+        state.challenge = null;
+        $("challengeQuestion").textContent = "校验题加载失败";
+        $("authStatus").textContent = String(err.message || err);
+        throw err;
+      }
     }
 
     async function loadAccountChallenge() {
-      const body = await api("/api/auth/challenge");
-      state.accountChallenge = body.data || {};
-      $("accountChallengeQuestion").textContent = state.accountChallenge.question || "校验题加载失败";
-      $("accountChallengeAnswer").value = "";
+      $("accountChallengeQuestion").textContent = "校验题加载中...";
+      try {
+        const body = await api("/api/auth/challenge");
+        state.accountChallenge = body.data || {};
+        $("accountChallengeQuestion").textContent = state.accountChallenge.question || "校验题加载失败";
+        $("accountChallengeAnswer").value = "";
+      } catch (err) {
+        state.accountChallenge = null;
+        $("accountChallengeQuestion").textContent = "校验题加载失败";
+        setStatus("账号校验题加载失败");
+        throw err;
+      }
     }
 
     function delay(ms) {
@@ -893,6 +960,9 @@
           body: JSON.stringify(payload)
         });
         state.auth = body.data || {};
+        if (!state.auth.member?.email) {
+          throw new Error("登录信息不完整，请重新登录。");
+        }
         setBusy(true, setupRequired ? "管理员创建成功，正在加载管理页面..." : "登录成功，正在加载管理页面...");
         await Promise.all([loadAppData({ keepBusy: true }), delay(450)]);
         showApp();
@@ -1147,7 +1217,7 @@
         return "<tr>" +
           "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
           "<td>" + escapeHTML(member.role || "-") + "</td>" +
-          "<td><div class=\"profile-access\">" + profileSummary + (isAdmin() ? "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置 Profile</button>" : "") + "</div></td>" +
+          "<td><div class=\"profile-access\">" + profileSummary + (isAdmin() ? "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" : "") + "</div></td>" +
           "<td>" + (isAdmin() ? "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" : escapeHTML(member.enabled ? "启用" : "停用")) + "</td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
@@ -1157,7 +1227,6 @@
       document.querySelectorAll("[data-member-profiles]").forEach((button) => {
         button.addEventListener("click", () => openMemberProfileEditor(button.getAttribute("data-member-profiles")));
       });
-      renderMemberProfileEditor();
       applyRoleVisibility();
     }
 
@@ -1172,7 +1241,7 @@
           "<div><div class=\"name\">" + escapeHTML(profile.name) + " <span class=\"badge " + statusClass + "\">" + statusLabel + "</span></div><div class=\"muted\">" + escapeHTML(profile.apple_email || profile.description || "-") + "</div></div>" +
           "<div class=\"muted\">" + escapeHTML([profile.region, profile.aws_profile, profile.host].filter(Boolean).join(" · ") || "-") + "</div>" +
           "<div class=\"muted\">已分配成员：" + grantedCount + " 个。请在成员列表中配置某个成员可用的 Profile。</div>" +
-          "<div class=\"row-actions\"><button data-profile-status=\"" + escapeAttr(profile.name) + "\" data-enabled=\"" + String(nextEnabled) + "\">" + (profile.enabled ? "停用" : "恢复正常") + "</button><button data-profile-edit=\"" + escapeAttr(profile.name) + "\">编辑 YAML</button><button class=\"danger\" data-profile-delete=\"" + escapeAttr(profile.name) + "\">删除</button></div>" +
+          "<div class=\"row-actions\"><button data-profile-status=\"" + escapeAttr(profile.name) + "\" data-enabled=\"" + String(nextEnabled) + "\">" + (profile.enabled ? "停用" : "恢复正常") + "</button><button data-profile-edit=\"" + escapeAttr(profile.name) + "\">编辑</button><button class=\"danger\" data-profile-delete=\"" + escapeAttr(profile.name) + "\">删除</button></div>" +
         "</div>";
       }).join("") : "<div class=\"muted\">还没有后台 Profile。</div>";
       document.querySelectorAll("[data-profile-status]").forEach((button) => {
@@ -1181,7 +1250,7 @@
       document.querySelectorAll("[data-profile-edit]").forEach((button) => {
         button.addEventListener("click", () => {
           const item = state.managedProfiles.find((profile) => profile.name === button.getAttribute("data-profile-edit"));
-          $("managedProfileYaml").value = item?.profile_yaml || "";
+          openProfileForm(item || null);
         });
       });
       document.querySelectorAll("[data-profile-delete]").forEach((button) => {
@@ -1198,21 +1267,21 @@
 
     function openMemberProfileEditor(memberEmail) {
       state.selectedMemberProfileEmail = memberEmail || "";
-      renderMembers();
+      renderMemberProfileDialog();
+      $("memberProfileLayer").classList.remove("hidden");
     }
 
     function closeMemberProfileEditor() {
       state.selectedMemberProfileEmail = "";
-      renderMembers();
+      $("memberProfileLayer").classList.add("hidden");
+      $("memberProfileMember").textContent = "";
+      $("memberProfileOptions").innerHTML = "";
     }
 
-    function renderMemberProfileEditor() {
-      const box = $("memberProfileEditor");
-      if (!box) return;
+    function renderMemberProfileDialog() {
       const member = state.members.find((item) => item.email === state.selectedMemberProfileEmail);
       if (!isAdmin() || !member) {
-        box.classList.add("hidden");
-        box.innerHTML = "";
+        closeMemberProfileEditor();
         return;
       }
       const selected = new Set(profileNamesForMember(member.email));
@@ -1221,13 +1290,8 @@
         const status = profile.enabled ? "" : " · 停用";
         return "<label><input type=\"checkbox\" data-member-profile-option=\"" + escapeAttr(profile.name) + "\"" + checked + "> " + escapeHTML(profile.name + status) + "</label>";
       }).join("") : "<span class=\"muted\">还没有可分配的 Profile。</span>";
-      box.classList.remove("hidden");
-      box.innerHTML =
-        "<div><div class=\"name\">配置 " + escapeHTML(member.name || member.email) + " 可用的 Profile</div><div class=\"muted\">" + escapeHTML(member.email || "") + "</div></div>" +
-        "<div class=\"member-profile-options\">" + options + "</div>" +
-        "<div class=\"row-actions\"><button id=\"saveMemberProfilesBtn\" class=\"primary\">保存 Profile 配置</button><button id=\"cancelMemberProfilesBtn\">取消</button></div>";
-      $("saveMemberProfilesBtn").addEventListener("click", saveMemberProfiles);
-      $("cancelMemberProfilesBtn").addEventListener("click", closeMemberProfileEditor);
+      $("memberProfileMember").textContent = (member.name || member.email || "") + " · " + (member.email || "");
+      $("memberProfileOptions").innerHTML = options;
     }
 
     function renderManagedProfileStatusOptions() {
@@ -1795,11 +1859,193 @@
       }
     }
 
+    function openProfileForm(profile = null) {
+      state.editingManagedProfile = profile?.name || "";
+      $("profileFormTitle").textContent = profile ? "编辑 Profile" : "添加 Profile";
+      resetProfileForm();
+      if (profile) fillProfileForm(profile);
+      $("profileFormLayer").classList.remove("hidden");
+    }
+
+    function closeProfileForm() {
+      state.editingManagedProfile = "";
+      $("profileFormLayer").classList.add("hidden");
+      resetProfileForm();
+    }
+
+    function resetProfileForm() {
+      for (const id of profileFormFieldIDs()) {
+        const el = $(id);
+        if (el.type === "checkbox") el.checked = false;
+        else el.value = "";
+      }
+      $("profileFormUser").value = "ec2-user";
+      $("profileFormTunnelPort").value = "5900";
+      $("profileFormIntelFallback").checked = true;
+    }
+
+    function profileFormFieldIDs() {
+      return ["profileFormName", "profileFormAppleEmail", "profileFormDescription", "profileFormUser", "profileFormHost", "profileFormAWSProfile", "profileFormRegion", "profileFormCreator", "profileFormResourceName", "profileFormKeyName", "profileFormSecurityGroup", "profileFormSubnet", "profileFormEIPAllocation", "profileFormEIPPublic", "profileFormAMIX86", "profileFormAMIARM", "profileFormAZs", "profileFormTypes", "profileFormSubnetsByAZ", "profileFormTunnelPort", "profileFormIntelFallback"];
+    }
+
+    function fillProfileForm(profile) {
+      const yaml = profile.profile_yaml || "";
+      $("profileFormName").value = profile.name || yamlProfileName(yaml);
+      $("profileFormAppleEmail").value = profile.apple_email || yamlField(yaml, "account_email") || yamlField(yaml, "value");
+      $("profileFormDescription").value = profile.description || yamlField(yaml, "description");
+      $("profileFormUser").value = yamlField(yaml, "user") || "ec2-user";
+      $("profileFormHost").value = profile.host || yamlField(yaml, "host");
+      $("profileFormAWSProfile").value = profile.aws_profile || yamlField(yaml, "profile");
+      $("profileFormRegion").value = profile.region || yamlField(yaml, "region");
+      $("profileFormCreator").value = yamlField(yaml, "creator");
+      $("profileFormResourceName").value = yamlField(yaml, "resource_name");
+      $("profileFormKeyName").value = yamlField(yaml, "key_name");
+      $("profileFormSecurityGroup").value = yamlField(yaml, "security_group_id");
+      $("profileFormSubnet").value = yamlField(yaml, "subnet_id");
+      $("profileFormEIPAllocation").value = yamlField(yaml, "elastic_ip_allocation_id");
+      $("profileFormEIPPublic").value = yamlField(yaml, "elastic_ip_public_ip");
+      $("profileFormAMIX86").value = yamlField(yaml, "mac_x86");
+      $("profileFormAMIARM").value = yamlField(yaml, "mac_arm");
+      $("profileFormAZs").value = yamlList(yaml, "availability_zone_ids").join(", ");
+      $("profileFormTypes").value = yamlList(yaml, "instance_type_priority").join(", ");
+      $("profileFormSubnetsByAZ").value = yamlMap(yaml, "subnets_by_az").map((item) => item.key + "=" + item.value).join("\n");
+      $("profileFormTunnelPort").value = yamlField(yaml, "local_port") || "5900";
+      $("profileFormIntelFallback").checked = yamlField(yaml, "allow_intel_fallback") !== "false";
+    }
+
+    function yamlProfileName(yaml) {
+      const match = yaml.match(/\n  ([^:\n]+):\n/);
+      return match ? match[1].trim() : "";
+    }
+
+    function yamlField(yaml, key) {
+      const pattern = new RegExp("^\\s+" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":\\s*(.*)$", "m");
+      const match = yaml.match(pattern);
+      return match ? unquoteYAMLValue(match[1].trim()) : "";
+    }
+
+    function yamlList(yaml, key) {
+      const lines = yaml.split(/\r?\n/);
+      const out = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (!new RegExp("^\\s+" + key + ":\\s*$").test(lines[i])) continue;
+        const indent = lines[i].match(/^\s*/)[0].length;
+        for (let j = i + 1; j < lines.length; j++) {
+          const line = lines[j];
+          if (!line.trim()) continue;
+          const currentIndent = line.match(/^\s*/)[0].length;
+          if (currentIndent <= indent) break;
+          const item = line.match(/^\s*-\s*(.*)$/);
+          if (item) out.push(unquoteYAMLValue(item[1].trim()));
+        }
+        break;
+      }
+      return out;
+    }
+
+    function yamlMap(yaml, key) {
+      const lines = yaml.split(/\r?\n/);
+      const out = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (!new RegExp("^\\s+" + key + ":\\s*$").test(lines[i])) continue;
+        const indent = lines[i].match(/^\s*/)[0].length;
+        for (let j = i + 1; j < lines.length; j++) {
+          const line = lines[j];
+          if (!line.trim()) continue;
+          const currentIndent = line.match(/^\s*/)[0].length;
+          if (currentIndent <= indent) break;
+          const item = line.match(/^\s*([^:]+):\s*(.*)$/);
+          if (item) out.push({ key: item[1].trim(), value: unquoteYAMLValue(item[2].trim()) });
+        }
+        break;
+      }
+      return out;
+    }
+
+    function unquoteYAMLValue(value) {
+      if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+        return value.slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+      }
+      return value;
+    }
+
+    function yamlQuote(value) {
+      return "\"" + String(value || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"";
+    }
+
+    function commaValues(value) {
+      return value.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+
+    function profileFormYAML() {
+      const name = $("profileFormName").value.trim();
+      const apple = $("profileFormAppleEmail").value.trim();
+      const description = $("profileFormDescription").value.trim() || (apple ? "苹果账号：" + apple : "");
+      const user = $("profileFormUser").value.trim();
+      const host = $("profileFormHost").value.trim();
+      const awsProfile = $("profileFormAWSProfile").value.trim();
+      const region = $("profileFormRegion").value.trim();
+      if (!name || !apple) throw new Error("Profile 名称和 Apple 邮箱必填");
+      const lines = ["profiles:", "  " + name + ":"];
+      const add = (indent, key, value) => { if (String(value || "").trim()) lines.push(indent + key + ": " + yamlQuote(String(value).trim())); };
+      add("    ", "description", description);
+      add("    ", "user", user);
+      add("    ", "host", host);
+      lines.push("    aws:");
+      add("      ", "profile", awsProfile);
+      add("      ", "region", region);
+      add("      ", "resource_name", $("profileFormResourceName").value);
+      add("      ", "creator", $("profileFormCreator").value);
+      add("      ", "account_email", apple);
+      const amiX86 = $("profileFormAMIX86").value.trim();
+      const amiARM = $("profileFormAMIARM").value.trim();
+      if (amiX86 || amiARM) {
+        lines.push("      ami:");
+        add("        ", "mac_x86", amiX86);
+        add("        ", "mac_arm", amiARM);
+      }
+      add("      ", "key_name", $("profileFormKeyName").value);
+      add("      ", "subnet_id", $("profileFormSubnet").value);
+      const subnetLines = $("profileFormSubnetsByAZ").value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (subnetLines.length) {
+        lines.push("      subnets_by_az:");
+        for (const row of subnetLines) {
+          const idx = row.indexOf("=");
+          if (idx > 0) lines.push("        " + row.slice(0, idx).trim() + ": " + yamlQuote(row.slice(idx + 1).trim()));
+        }
+      }
+      add("      ", "security_group_id", $("profileFormSecurityGroup").value);
+      add("      ", "elastic_ip_allocation_id", $("profileFormEIPAllocation").value);
+      add("      ", "elastic_ip_public_ip", $("profileFormEIPPublic").value);
+      if (apple) {
+        lines.push("      elastic_ip_owner_tag:");
+        lines.push("        key: " + yamlQuote("Apple"));
+        lines.push("        value: " + yamlQuote(apple));
+      }
+      for (const [key, values] of [["availability_zone_ids", commaValues($("profileFormAZs").value)], ["instance_type_priority", commaValues($("profileFormTypes").value)]]) {
+        if (values.length) {
+          lines.push("      " + key + ":");
+          values.forEach((value) => lines.push("        - " + yamlQuote(value)));
+        }
+      }
+      lines.push("      allow_intel_fallback: " + String($("profileFormIntelFallback").checked));
+      const tunnelPort = $("profileFormTunnelPort").value.trim();
+      if (tunnelPort) {
+        lines.push("    tunnels:");
+        lines.push("      - local_port: " + tunnelPort);
+        lines.push("        remote_host: " + yamlQuote("localhost"));
+        lines.push("        remote_port: 5900");
+      }
+      return lines.join("\n") + "\n";
+    }
+
     async function saveManagedProfile() {
       if (!isAdmin()) return;
-      const profileYAML = $("managedProfileYaml").value.trim();
-      if (!profileYAML) {
-        setStatus("请填写 Profile YAML");
+      let profileYAML = "";
+      try {
+        profileYAML = profileFormYAML();
+      } catch (err) {
+        setStatus(String(err.message || err));
         return;
       }
       setBusy(true, "正在保存 Profile...");
@@ -1808,7 +2054,7 @@
           method: "POST",
           body: JSON.stringify({ profile_yaml: profileYAML })
         });
-        $("managedProfileYaml").value = "";
+        closeProfileForm();
         await Promise.all([loadManagedProfiles(), loadProfiles()]);
         setStatus("Profile 已保存");
       } catch (err) {
@@ -1872,6 +2118,7 @@
           body: JSON.stringify({ member_email: memberEmail, profiles })
         });
         await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        closeMemberProfileEditor();
         setStatus("成员 Profile 已保存");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -2063,9 +2310,21 @@
     $("refreshAccountChallengeBtn").addEventListener("click", () => loadAccountChallenge().catch((err) => { setOutput(String(err.message || err)); setStatus("账号校验题加载失败"); }));
     $("saveAccountEmailBtn").addEventListener("click", saveAccountEmail);
     $("saveSettingsBtn").addEventListener("click", saveSettings);
-    $("saveManagedProfileBtn").addEventListener("click", saveManagedProfile);
+    $("openProfileFormBtn").addEventListener("click", () => openProfileForm(null));
+    $("saveProfileFormBtn").addEventListener("click", saveManagedProfile);
+    $("cancelProfileFormBtn").addEventListener("click", closeProfileForm);
+    $("profileFormCloseBtn").addEventListener("click", closeProfileForm);
+    $("profileFormLayer").addEventListener("click", (event) => {
+      if (event.target === $("profileFormLayer")) closeProfileForm();
+    });
     $("saveManagedProfileStatusBtn").addEventListener("click", saveManagedProfileStatus);
     $("managedProfileStatusSelect").addEventListener("change", renderManagedProfileStatusOptions);
+    $("saveMemberProfilesBtn").addEventListener("click", saveMemberProfiles);
+    $("cancelMemberProfilesBtn").addEventListener("click", closeMemberProfileEditor);
+    $("memberProfileCloseBtn").addEventListener("click", closeMemberProfileEditor);
+    $("memberProfileLayer").addEventListener("click", (event) => {
+      if (event.target === $("memberProfileLayer")) closeMemberProfileEditor();
+    });
     $("refreshManagedProfilesBtn").addEventListener("click", async () => {
       setBusy(true, "正在刷新 Profile...");
       try {
@@ -2168,6 +2427,7 @@
       if (ok) return loadAppData();
       return null;
     }).catch((err) => {
+      $("challengeQuestion").textContent = "校验题加载失败";
       $("authStatus").textContent = String(err.message || err);
       showAuth();
     });

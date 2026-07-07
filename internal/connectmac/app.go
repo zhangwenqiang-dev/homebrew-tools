@@ -21,38 +21,40 @@ type Runner interface {
 type ExecRunner struct{}
 
 type App struct {
-	In            io.Reader
-	Out           io.Writer
-	Err           io.Writer
-	Version       string
-	Runner        Runner
-	Validator     Validator
-	StateManager  StateManager
-	JobManager    JobManager
-	AWSService    AWSService
-	WebDir        string
-	MemberStore   MemberRepository
-	LogManager    LogManager
-	SyncHistory   SyncHistoryStore
-	KnownHosts    string
-	RemoteUserAPI bool
+	In                 io.Reader
+	Out                io.Writer
+	Err                io.Writer
+	Version            string
+	Runner             Runner
+	Validator          Validator
+	StateManager       StateManager
+	JobManager         JobManager
+	AWSService         AWSService
+	WebDir             string
+	MemberStore        MemberRepository
+	LogManager         LogManager
+	SyncHistory        SyncHistoryStore
+	KnownHosts         string
+	RemoteUserAPI      bool
+	LoginConfigCleanup bool
 }
 
 func NewApp(out, err io.Writer) App {
 	return App{
-		In:           os.Stdin,
-		Out:          out,
-		Err:          err,
-		Version:      "dev",
-		Runner:       ExecRunner{},
-		Validator:    NewValidator(),
-		StateManager: NewStateManager(DefaultStateDir),
-		JobManager:   NewJobManager(DefaultJobDir),
-		AWSService:   NewAWSService(),
-		MemberStore:  NewMemberStore(DefaultMemberDataPath),
-		LogManager:   NewLogManager(DefaultLogDir),
-		SyncHistory:  NewSyncHistoryStore(DefaultSyncHistoryPath),
-		KnownHosts:   "~/.ssh/known_hosts",
+		In:                 os.Stdin,
+		Out:                out,
+		Err:                err,
+		Version:            "dev",
+		Runner:             ExecRunner{},
+		Validator:          NewValidator(),
+		StateManager:       NewStateManager(DefaultStateDir),
+		JobManager:         NewJobManager(DefaultJobDir),
+		AWSService:         NewAWSService(),
+		MemberStore:        NewMemberStore(DefaultMemberDataPath),
+		LogManager:         NewLogManager(DefaultLogDir),
+		SyncHistory:        NewSyncHistoryStore(DefaultSyncHistoryPath),
+		KnownHosts:         "~/.ssh/known_hosts",
+		LoginConfigCleanup: true,
 	}
 }
 

@@ -58,7 +58,7 @@ func (a App) webAuthChallengeHandler() http.HandlerFunc {
 	}
 }
 
-func (a App) webAuthSetupHandler() http.HandlerFunc {
+func (a App) webAuthSetupHandler(configPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -97,11 +97,12 @@ func (a App) webAuthSetupHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		a.cleanupLocalConfigAfterLogin(configPath)
 		writeWebJSON(w, webAPIResponse{OK: true, Data: webAuthMember{Authenticated: true, Member: publicMember(member)}})
 	}
 }
 
-func (a App) webAuthLoginHandler() http.HandlerFunc {
+func (a App) webAuthLoginHandler(configPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -134,6 +135,7 @@ func (a App) webAuthLoginHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		a.cleanupLocalConfigAfterLogin(configPath)
 		writeWebJSON(w, webAPIResponse{OK: true, Data: webAuthMember{Authenticated: true, Member: publicMember(member)}})
 	}
 }

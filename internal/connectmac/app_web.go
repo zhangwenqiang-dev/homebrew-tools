@@ -175,12 +175,13 @@ func (a App) newWebHandler(configPath string) http.Handler {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 	})
 	mux.HandleFunc("/api/auth/me", a.webAuthMeHandler())
 	mux.HandleFunc("/api/auth/challenge", a.webAuthChallengeHandler())
-	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler())
-	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler())
+	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler(configPath))
+	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler(configPath))
 	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
 	mux.HandleFunc("/api/config", a.webConfigHandler(configPath))
 	mux.HandleFunc("/api/user-proxy/", a.webUserProxyHandler(configPath))
@@ -260,11 +261,18 @@ func (a App) webUserProxyHandler(configPath string) http.HandlerFunc {
 			}
 		}
 		copyUserProxySessionCookies(w, resp)
+		if isUserProxyLoginSuccess(remotePath, resp.StatusCode) {
+			a.cleanupLocalConfigAfterLogin(configPath)
+		}
 		w.WriteHeader(resp.StatusCode)
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			a.logProfileError("user-proxy", Profile{}, err.Error())
 		}
 	}
+}
+
+func isUserProxyLoginSuccess(path string, status int) bool {
+	return status >= 200 && status < 300 && (path == "/api/auth/login" || path == "/api/auth/setup")
 }
 
 func copyUserProxySessionCookies(w http.ResponseWriter, resp *http.Response) {
@@ -393,7 +401,18 @@ func (a App) loadWebConfig(r *http.Request, configPath string) (Config, error) {
 		return Config{}, err
 	}
 	if strings.TrimSpace(cfg.Server.UserAPI) == "" {
-		return cfg, nil
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			return cfg, nil
+		}
+		records, err := a.MemberStore.ListManagedProfiles(member.Email)
+		if err != nil {
+			return cfg, nil
+		}
+		if len(records) == 0 {
+			return cfg, nil
+		}
+		return a.mergeManagedProfileRecords(cfg, records)
 	}
 	remoteProfiles, err := a.fetchRemoteManagedProfiles(r, cfg.Server.UserAPI)
 	if err != nil {
@@ -402,11 +421,20 @@ func (a App) loadWebConfig(r *http.Request, configPath string) (Config, error) {
 	if len(remoteProfiles) == 0 {
 		return Config{Profiles: map[string]Profile{}}, nil
 	}
-	merged := Config{Profiles: map[string]Profile{}}
+	records := make([]ManagedProfile, 0, len(remoteProfiles))
 	for _, remote := range remoteProfiles {
-		profile, err := ParseSingleProfileYAML(remote.ProfileYAML)
+		records = append(records, ManagedProfile{Name: remote.Name, ProfileYAML: remote.ProfileYAML})
+	}
+	return a.mergeManagedProfileRecords(cfg, records)
+}
+
+func (a App) mergeManagedProfileRecords(cfg Config, records []ManagedProfile) (Config, error) {
+	merged := Config{Profiles: map[string]Profile{}}
+	merged.Defaults = cfg.Defaults
+	for _, record := range records {
+		profile, err := ParseSingleProfileYAML(record.ProfileYAML)
 		if err != nil {
-			return Config{}, fmt.Errorf("parse remote profile %s: %w", remote.Name, err)
+			return Config{}, fmt.Errorf("parse managed profile %s: %w", record.Name, err)
 		}
 		if local, ok := cfg.Profile(profile.Name); ok {
 			applyLocalPrivateProfileFields(&profile, local)
@@ -848,7 +876,7 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
-		cfg, err := LoadConfig(configPath)
+		cfg, err := a.loadWebConfig(r, configPath)
 		if err != nil {
 			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.status", Profile: ref, Message: err.Error()})
 			writeWebError(w, http.StatusInternalServerError, err.Error())

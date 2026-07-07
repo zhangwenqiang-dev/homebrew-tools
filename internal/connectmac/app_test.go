@@ -509,6 +509,120 @@ func TestAppWebMemberProfilesAPIReplacesMemberAccess(t *testing.T) {
 	}
 }
 
+func TestCleanupDefaultLocalConfigProfilesBacksUpAndClearsProfiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".connectmac")
+	profilesDir := filepath.Join(configDir, "profiles")
+	configPath := filepath.Join(configDir, "config.yaml")
+	writeFile(t, configPath, `server:
+  user_api: https://cm.example.com
+defaults:
+  user: ec2-user
+  identity_file: ~/.ssh/member.pem
+  aws:
+    amis_by_region:
+      us-west-2:
+        mac_x86: ami-x86
+        mac_arm: ami-arm
+profiles:
+  old-usw2:
+    description: old local profile
+    host: old.example.com
+`)
+	writeFile(t, filepath.Join(profilesDir, "extra.yaml"), `profiles:
+  extra-usw2:
+    description: extra local profile
+    host: extra.example.com
+`)
+
+	backup, err := cleanupDefaultLocalConfigProfiles(DefaultConfigPath, time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if backup == "" {
+		t.Fatalf("expected backup path")
+	}
+	if _, err := os.Stat(filepath.Join(backup, "config.yaml")); err != nil {
+		t.Fatalf("backup config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backup, "profiles", "extra.yaml")); err != nil {
+		t.Fatalf("backup profiles: %v", err)
+	}
+	if entries, err := os.ReadDir(profilesDir); err != nil {
+		t.Fatalf("profiles dir after cleanup: %v", err)
+	} else if len(entries) != 0 {
+		t.Fatalf("profiles dir should be empty, got %d entries", len(entries))
+	}
+	cfg, err := LoadConfig(DefaultConfigPath)
+	if err != nil {
+		t.Fatalf("load cleaned config: %v", err)
+	}
+	if cfg.Server.UserAPI != "https://cm.example.com" {
+		t.Fatalf("server user api = %q", cfg.Server.UserAPI)
+	}
+	if cfg.Defaults.IdentityFile != "~/.ssh/member.pem" {
+		t.Fatalf("identity file = %q", cfg.Defaults.IdentityFile)
+	}
+	if len(cfg.Profiles) != 0 {
+		t.Fatalf("profiles after cleanup = %+v", cfg.Profiles)
+	}
+}
+
+func TestAppWebAWSStatusUsesManagedProfilesWhenLocalProfilesAreCleared(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `defaults:
+  user: ec2-user
+  identity_file: `+key+`
+profiles:
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	profile, err := ParseSingleProfileYAML(`profiles:
+  managed-usw2:
+    description: Apple account: managed@example.com
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: managed@example.com
+      key_name: maiqi-xcode
+      security_group_id: sg-example
+      elastic_ip_allocation_id: eipalloc-example
+      elastic_ip_owner_tag:
+        key: Apple
+        value: managed@example.com
+      availability_zone_ids:
+        - usw2-az1
+      instance_type_priority:
+        - mac2-m2.metal
+`)
+	if err != nil {
+		t.Fatalf("parse profile: %v", err)
+	}
+	if _, err := app.MemberStore.UpsertManagedProfile(profile); err != nil {
+		t.Fatalf("upsert managed profile: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/aws/status?profile=managed-usw2", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "no profiles are configured") || strings.Contains(rec.Body.String(), "unknown profile") {
+		t.Fatalf("status used cleared local profiles: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "managed-usw2") {
+		t.Fatalf("status body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
