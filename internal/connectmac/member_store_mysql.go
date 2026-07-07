@@ -100,6 +100,12 @@ func (s MySQLMemberStore) EnsureSchema() error {
 			PRIMARY KEY (apple_email, member_id),
 			INDEX idx_cm_assignments_member_id (member_id)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS cm_profile_owners (
+			profile_name VARCHAR(255) PRIMARY KEY,
+			member_id VARCHAR(128) NOT NULL,
+			updated_at VARCHAR(64) NOT NULL,
+			INDEX idx_cm_profile_owners_member_id (member_id)
+		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS cm_settings (
 			setting_key VARCHAR(128) PRIMARY KEY,
 			setting_value TEXT NULL
@@ -135,7 +141,7 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 		return MemberData{}, err
 	}
 	defer db.Close()
-	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
+	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
 	rows, err := db.Query(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), created_at, updated_at FROM cm_members ORDER BY email`)
 	if err != nil {
 		return MemberData{}, err
@@ -162,6 +168,21 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 			return MemberData{}, err
 		}
 		out.Assignments = append(out.Assignments, assignment)
+	}
+	if err := rows.Close(); err != nil {
+		return MemberData{}, err
+	}
+	rows, err = db.Query(`SELECT profile_name, member_id, updated_at FROM cm_profile_owners ORDER BY profile_name`)
+	if err != nil {
+		return MemberData{}, err
+	}
+	for rows.Next() {
+		var owner ProfileOwner
+		if err := rows.Scan(&owner.ProfileName, &owner.MemberID, &owner.UpdatedAt); err != nil {
+			rows.Close()
+			return MemberData{}, err
+		}
+		out.ProfileOwners = append(out.ProfileOwners, owner)
 	}
 	if err := rows.Close(); err != nil {
 		return MemberData{}, err
@@ -226,7 +247,7 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"cm_events", "cm_assignments", "cm_members", "cm_settings"} {
+	for _, table := range []string{"cm_events", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
 			return err
 		}
@@ -240,6 +261,12 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 	for _, assignment := range data.Assignments {
 		if _, err := tx.Exec(`INSERT INTO cm_assignments (apple_email, member_id, relation, created_at) VALUES (?, ?, ?, ?)`,
 			assignment.AppleEmail, assignment.MemberID, assignment.Relation, assignment.CreatedAt); err != nil {
+			return err
+		}
+	}
+	for _, owner := range data.ProfileOwners {
+		if _, err := tx.Exec(`INSERT INTO cm_profile_owners (profile_name, member_id, updated_at) VALUES (?, ?, ?)`,
+			owner.ProfileName, owner.MemberID, owner.UpdatedAt); err != nil {
 			return err
 		}
 	}
@@ -342,6 +369,18 @@ func (s MySQLMemberStore) UnassignMember(appleEmail, memberEmail string) error {
 
 func (s MySQLMemberStore) MembersForApple(appleEmail string) ([]PublicMember, error) {
 	return membersForAppleInStore(s, appleEmail)
+}
+
+func (s MySQLMemberStore) ProfileOwners() ([]PublicProfileOwner, error) {
+	return profileOwnersInStore(s)
+}
+
+func (s MySQLMemberStore) ProfileOwner(profileName string) (PublicProfileOwner, bool, error) {
+	return profileOwnerInStore(s, profileName)
+}
+
+func (s MySQLMemberStore) SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error) {
+	return setProfileOwnerInStore(s, profileName, memberEmail)
 }
 
 func (s MySQLMemberStore) WebSettings() (WebSettings, error) {

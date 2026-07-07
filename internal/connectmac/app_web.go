@@ -193,6 +193,8 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/member/disable", a.requireWebRole(a.webMemberEnabledHandler(false), "admin"))
 	mux.HandleFunc("/api/member/assign", a.requireWebRole(a.webMemberAssignHandler(false), "admin"))
 	mux.HandleFunc("/api/member/unassign", a.requireWebRole(a.webMemberAssignHandler(true), "admin"))
+	mux.HandleFunc("/api/profile-owners", a.requireWebRole(a.webProfileOwnersHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/events", a.requireWebRole(a.webEventsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/jobs", a.requireWebRole(a.webJobsHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/job/log", a.requireWebRole(a.webJobLogHandler(), "viewer", "operator", "admin"))
@@ -280,6 +282,8 @@ func isRemoteUserAPIPath(path string) bool {
 	return strings.HasPrefix(path, "/api/auth/") ||
 		path == "/api/members" ||
 		strings.HasPrefix(path, "/api/member/") ||
+		path == "/api/profile-owners" ||
+		strings.HasPrefix(path, "/api/profile-owner/") ||
 		path == "/api/settings" ||
 		strings.HasPrefix(path, "/api/events")
 }
@@ -358,6 +362,9 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 		for _, name := range sortedProfileNames(cfg) {
 			profile, _ := cfg.Profile(name)
 			owners, _ := a.MemberStore.MembersForApple(profile.AWS.AccountEmail)
+			if owner, ok, _ := a.MemberStore.ProfileOwner(profile.Name); ok {
+				owners = []PublicMember{owner.Owner}
+			}
 			profiles = append(profiles, webProfile{
 				Name:        profile.Name,
 				Description: profile.Description,
@@ -450,6 +457,7 @@ func (a App) webMemberAssignHandler(unassign bool) http.HandlerFunc {
 			AppleEmail  string `json:"apple_email"`
 			MemberEmail string `json:"member_email"`
 			Relation    string `json:"relation"`
+			Profile     string `json:"profile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
@@ -468,7 +476,54 @@ func (a App) webMemberAssignHandler(unassign bool) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"assignment": assignment}})
+		data := map[string]interface{}{"assignment": assignment}
+		if strings.TrimSpace(req.Profile) != "" {
+			owner, err := a.MemberStore.SetProfileOwner(req.Profile, req.MemberEmail)
+			if err != nil {
+				writeWebError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			data["profile_owner"] = owner
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: data})
+	}
+}
+
+func (a App) webProfileOwnersHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		owners, err := a.MemberStore.ProfileOwners()
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"owners": owners}})
+	}
+}
+
+func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile     string `json:"profile"`
+			MemberEmail string `json:"member_email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		owner, err := a.MemberStore.SetProfileOwner(req.Profile, req.MemberEmail)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"owner": owner}})
 	}
 }
 
@@ -655,7 +710,10 @@ func (a App) assignWebOwnerForOpen(r *http.Request, configPath, profileRef, owne
 	if err != nil {
 		return err
 	}
-	_, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner")
+	if _, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
+		return err
+	}
+	_, err = a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
 	return err
 }
 

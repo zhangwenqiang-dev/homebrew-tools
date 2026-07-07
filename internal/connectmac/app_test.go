@@ -296,6 +296,46 @@ func TestAppWebProfilesAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebProfileOwnerAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("旧负责人", "old@example.com", "operator"); err != nil {
+		t.Fatalf("add old member: %v", err)
+	}
+	if _, err := app.MemberStore.AddMember("王恒辉", "whh@example.com", "operator"); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	if _, err := app.MemberStore.AssignMember("user@example.com", "old@example.com", "owner"); err != nil {
+		t.Fatalf("assign old member: %v", err)
+	}
+
+	body := strings.NewReader(`{"profile":"xcode-vnc","member_email":"whh@example.com"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/profile-owner/set", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"profile_name":"xcode-vnc"`) || !strings.Contains(rec.Body.String(), "whh@example.com") {
+		t.Fatalf("profile owner set body = %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/profiles", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "whh@example.com") || strings.Contains(rec.Body.String(), "old@example.com") {
+		t.Fatalf("profiles body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

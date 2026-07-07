@@ -37,6 +37,9 @@ type MemberRepository interface {
 	AssignMember(appleEmail, memberEmail, relation string) (AppleAccountMember, error)
 	UnassignMember(appleEmail, memberEmail string) error
 	MembersForApple(appleEmail string) ([]PublicMember, error)
+	ProfileOwners() ([]PublicProfileOwner, error)
+	ProfileOwner(profileName string) (PublicProfileOwner, bool, error)
+	SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error)
 	WebSettings() (WebSettings, error)
 	UpdateWebSettings(update WebSettings) (WebSettings, error)
 	EnsureAuthSecret() (string, error)
@@ -45,10 +48,11 @@ type MemberRepository interface {
 }
 
 type MemberData struct {
-	Members     []Member             `json:"members"`
-	Assignments []AppleAccountMember `json:"assignments"`
-	Events      []OperationEvent     `json:"events"`
-	Settings    WebSettings          `json:"settings"`
+	Members       []Member             `json:"members"`
+	Assignments   []AppleAccountMember `json:"assignments"`
+	ProfileOwners []ProfileOwner       `json:"profile_owners"`
+	Events        []OperationEvent     `json:"events"`
+	Settings      WebSettings          `json:"settings"`
 }
 
 type Member struct {
@@ -69,6 +73,18 @@ type AppleAccountMember struct {
 	MemberID   string `json:"member_id"`
 	Relation   string `json:"relation"`
 	CreatedAt  string `json:"created_at"`
+}
+
+type ProfileOwner struct {
+	ProfileName string `json:"profile_name"`
+	MemberID    string `json:"member_id"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type PublicProfileOwner struct {
+	ProfileName string       `json:"profile_name"`
+	Owner       PublicMember `json:"owner"`
+	UpdatedAt   string       `json:"updated_at"`
 }
 
 type OperationEvent struct {
@@ -131,7 +147,7 @@ func (s MemberStore) Load() (MemberData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
+			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
 		}
 		return MemberData{}, err
 	}
@@ -469,6 +485,18 @@ func (s MemberStore) MembersForApple(appleEmail string) ([]PublicMember, error) 
 	return members, nil
 }
 
+func (s MemberStore) ProfileOwners() ([]PublicProfileOwner, error) {
+	return profileOwnersInStore(s)
+}
+
+func (s MemberStore) ProfileOwner(profileName string) (PublicProfileOwner, bool, error) {
+	return profileOwnerInStore(s, profileName)
+}
+
+func (s MemberStore) SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error) {
+	return setProfileOwnerInStore(s, profileName, memberEmail)
+}
+
 func (s MemberStore) WebSettings() (WebSettings, error) {
 	db, err := s.Load()
 	if err != nil {
@@ -555,6 +583,9 @@ func normalizeMemberData(db *MemberData) {
 	}
 	if db.Assignments == nil {
 		db.Assignments = []AppleAccountMember{}
+	}
+	if db.ProfileOwners == nil {
+		db.ProfileOwners = []ProfileOwner{}
 	}
 	if db.Events == nil {
 		db.Events = []OperationEvent{}
@@ -940,6 +971,96 @@ func membersForAppleInStore(s memberDataStore, appleEmail string) ([]PublicMembe
 		}
 	}
 	return members, nil
+}
+
+func profileOwnersInStore(s memberDataStore) ([]PublicProfileOwner, error) {
+	db, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PublicProfileOwner, 0, len(db.ProfileOwners))
+	for _, owner := range db.ProfileOwners {
+		if member, ok := findMemberByID(db, owner.MemberID); ok {
+			out = append(out, PublicProfileOwner{
+				ProfileName: owner.ProfileName,
+				Owner:       publicMember(member),
+				UpdatedAt:   owner.UpdatedAt,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].ProfileName) < strings.ToLower(out[j].ProfileName)
+	})
+	return out, nil
+}
+
+func profileOwnerInStore(s memberDataStore, profileName string) (PublicProfileOwner, bool, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return PublicProfileOwner{}, false, nil
+	}
+	db, err := s.Load()
+	if err != nil {
+		return PublicProfileOwner{}, false, err
+	}
+	for _, owner := range db.ProfileOwners {
+		if owner.ProfileName != profileName {
+			continue
+		}
+		member, ok := findMemberByID(db, owner.MemberID)
+		if !ok {
+			return PublicProfileOwner{}, false, nil
+		}
+		return PublicProfileOwner{
+			ProfileName: owner.ProfileName,
+			Owner:       publicMember(member),
+			UpdatedAt:   owner.UpdatedAt,
+		}, true, nil
+	}
+	return PublicProfileOwner{}, false, nil
+}
+
+func setProfileOwnerInStore(s memberDataStore, profileName, memberEmail string) (PublicProfileOwner, error) {
+	profileName = strings.TrimSpace(profileName)
+	memberEmail = normalizeEmail(memberEmail)
+	if profileName == "" {
+		return PublicProfileOwner{}, errors.New("profile is required")
+	}
+	if memberEmail == "" || !strings.Contains(memberEmail, "@") {
+		return PublicProfileOwner{}, errors.New("valid member email is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	member, ok := findMemberByEmail(db, memberEmail)
+	if !ok {
+		return PublicProfileOwner{}, fmt.Errorf("member %s not found", memberEmail)
+	}
+	record := ProfileOwner{
+		ProfileName: profileName,
+		MemberID:    member.ID,
+		UpdatedAt:   s.currentTime().Format(time.RFC3339),
+	}
+	updated := false
+	for i := range db.ProfileOwners {
+		if db.ProfileOwners[i].ProfileName == profileName {
+			db.ProfileOwners[i] = record
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		db.ProfileOwners = append(db.ProfileOwners, record)
+	}
+	if err := s.Save(db); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	return PublicProfileOwner{
+		ProfileName: record.ProfileName,
+		Owner:       publicMember(member),
+		UpdatedAt:   record.UpdatedAt,
+	}, nil
 }
 
 func webSettingsInStore(s memberDataStore) (WebSettings, error) {

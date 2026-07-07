@@ -634,7 +634,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], profileOwners: {}, statuses: {}, selected: "", view: "profilesView", loadingStatus: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -675,6 +675,8 @@
       return path.startsWith("/api/auth/") ||
         path === "/api/members" ||
         path.startsWith("/api/member/") ||
+        path === "/api/profile-owners" ||
+        path.startsWith("/api/profile-owner/") ||
         path === "/api/settings" ||
         path.startsWith("/api/events");
     }
@@ -942,6 +944,8 @@
     async function loadProfiles() {
       const body = await api("/api/profiles");
       state.profiles = body.data.profiles || [];
+      await loadProfileOwners();
+      applyProfileOwners();
       $("profileCount").textContent = String(state.profiles.length);
       if (!state.selected && state.profiles.length) {
         state.selected = state.profiles[0].name;
@@ -949,6 +953,44 @@
       renderProfiles();
       renderSelected();
       refreshVisibleStatuses();
+    }
+
+    async function loadProfileOwners() {
+      if (!state.clientConfig?.user_api) {
+        state.profileOwners = {};
+        return;
+      }
+      try {
+        const body = await api("/api/profile-owners");
+        const owners = body.data?.owners || [];
+        state.profileOwners = {};
+        for (const item of owners) {
+          if (item.profile_name && item.owner) {
+            state.profileOwners[item.profile_name] = item.owner;
+          }
+        }
+      } catch (err) {
+        state.profileOwners = {};
+      }
+    }
+
+    function applyProfileOwners() {
+      for (const profile of state.profiles) {
+        const owner = state.profileOwners[profile.name];
+        if (owner) {
+          profile.owners = [owner];
+        }
+      }
+    }
+
+    async function saveProfileOwner(profileName, memberEmail) {
+      if (!state.clientConfig?.user_api || !profileName || !memberEmail) {
+        return;
+      }
+      await api("/api/profile-owner/set", {
+        method: "POST",
+        body: JSON.stringify({ profile: profileName, member_email: memberEmail })
+      });
     }
 
     async function loadMembers() {
@@ -1195,7 +1237,15 @@
           method: "POST",
           body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true, owner_email: ownerEmail })
         });
-        setOutput((body.output || "") + (body.error || ""));
+        let outputText = (body.output || "") + (body.error || "");
+        if (body.ok && confirm && command === "open" && ownerEmail) {
+          try {
+            await saveProfileOwner(p.name, ownerEmail);
+          } catch (err) {
+            outputText = outputText.trim() + "\n负责人记录写入失败：" + String(err.message || err);
+          }
+        }
+        setOutput(outputText);
         setStatus(body.ok ? (confirm ? "后台任务已启动" : "预览完成") : "失败");
         await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false)]);
       } catch (err) {
@@ -1582,7 +1632,7 @@
       try {
         await api("/api/member/assign", {
           method: "POST",
-          body: JSON.stringify({ apple_email: p.apple_email, member_email: memberEmail, relation: "owner" })
+          body: JSON.stringify({ apple_email: p.apple_email, member_email: memberEmail, relation: "owner", profile: p.name })
         });
         await Promise.all([loadMembers(), loadProfiles()]);
         setStatus("负责人已分配");

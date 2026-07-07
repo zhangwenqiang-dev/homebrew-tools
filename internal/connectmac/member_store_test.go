@@ -33,6 +33,27 @@ func TestMemberStoreCRUDAndEvents(t *testing.T) {
 	if len(owners) != 1 || owners[0].Email != "whh@example.com" {
 		t.Fatalf("owners = %+v", owners)
 	}
+	profileOwner, err := store.SetProfileOwner("apple-usw2", "whh@example.com")
+	if err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	if profileOwner.ProfileName != "apple-usw2" || profileOwner.Owner.Email != "whh@example.com" {
+		t.Fatalf("profile owner = %+v", profileOwner)
+	}
+	profileOwner, ok, err := store.ProfileOwner("apple-usw2")
+	if err != nil {
+		t.Fatalf("profile owner lookup: %v", err)
+	}
+	if !ok || profileOwner.Owner.Email != "whh@example.com" {
+		t.Fatalf("profile owner lookup = %+v ok=%t", profileOwner, ok)
+	}
+	profileOwners, err := store.ProfileOwners()
+	if err != nil {
+		t.Fatalf("profile owners: %v", err)
+	}
+	if len(profileOwners) != 1 || profileOwners[0].ProfileName != "apple-usw2" {
+		t.Fatalf("profile owners = %+v", profileOwners)
+	}
 	disabled, err := store.SetMemberEnabled("whh@example.com", false)
 	if err != nil {
 		t.Fatalf("disable member: %v", err)
