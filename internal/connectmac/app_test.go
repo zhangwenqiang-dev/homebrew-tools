@@ -623,6 +623,60 @@ profiles:
 	}
 }
 
+func TestAppWebAWSStatusFallsBackToManagedProfilesWithoutLocalAuth(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `defaults:
+  user: ec2-user
+  identity_file: `+key+`
+profiles:
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.RemoteUserAPI = true
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	profile, err := ParseSingleProfileYAML(`profiles:
+  managed-no-auth-usw2:
+    description: Apple account: managed-no-auth@example.com
+    host: ec2-1-2-3-5.us-west-2.compute.amazonaws.com
+    aws:
+      profile: cm-xcode
+      region: us-west-2
+      account_email: managed-no-auth@example.com
+      key_name: maiqi-xcode
+      security_group_id: sg-example
+      elastic_ip_allocation_id: eipalloc-example
+      elastic_ip_owner_tag:
+        key: Apple
+        value: managed-no-auth@example.com
+      availability_zone_ids:
+        - usw2-az1
+      instance_type_priority:
+        - mac2-m2.metal
+`)
+	if err != nil {
+		t.Fatalf("parse profile: %v", err)
+	}
+	if _, err := app.MemberStore.UpsertManagedProfile(profile); err != nil {
+		t.Fatalf("upsert managed profile: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/aws/status?profile=managed-no-auth-usw2", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "no profiles are configured") || strings.Contains(rec.Body.String(), "unknown profile") {
+		t.Fatalf("status used cleared local profiles: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "managed-no-auth-usw2") {
+		t.Fatalf("status body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

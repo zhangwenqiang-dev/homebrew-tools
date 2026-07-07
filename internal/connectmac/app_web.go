@@ -402,10 +402,11 @@ func (a App) loadWebConfig(r *http.Request, configPath string) (Config, error) {
 	}
 	if strings.TrimSpace(cfg.Server.UserAPI) == "" {
 		member, ok := a.currentWebMember(r)
-		if !ok {
-			return cfg, nil
+		memberEmail := ""
+		if ok {
+			memberEmail = member.Email
 		}
-		records, err := a.MemberStore.ListManagedProfiles(member.Email)
+		records, err := a.MemberStore.ListManagedProfiles(memberEmail)
 		if err != nil {
 			return cfg, nil
 		}
