@@ -92,6 +92,10 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	if opts.Dir != "" {
 		a.WebDir = opts.Dir
 	}
+	if cfg, err := LoadConfig(configPath); err == nil && cfg.Server.UserAPI != "" {
+		a.RemoteUserAPI = true
+		fmt.Fprintf(a.Out, "ConnectMac user API: %s\n", cfg.Server.UserAPI)
+	}
 	if store, ok, err := NewMySQLMemberStoreFromEnv(); err != nil {
 		fmt.Fprintf(a.Err, "mysql member store failed: %v\n", err)
 		return 1

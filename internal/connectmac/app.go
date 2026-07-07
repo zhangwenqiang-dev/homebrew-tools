@@ -21,20 +21,21 @@ type Runner interface {
 type ExecRunner struct{}
 
 type App struct {
-	In           io.Reader
-	Out          io.Writer
-	Err          io.Writer
-	Version      string
-	Runner       Runner
-	Validator    Validator
-	StateManager StateManager
-	JobManager   JobManager
-	AWSService   AWSService
-	WebDir       string
-	MemberStore  MemberRepository
-	LogManager   LogManager
-	SyncHistory  SyncHistoryStore
-	KnownHosts   string
+	In            io.Reader
+	Out           io.Writer
+	Err           io.Writer
+	Version       string
+	Runner        Runner
+	Validator     Validator
+	StateManager  StateManager
+	JobManager    JobManager
+	AWSService    AWSService
+	WebDir        string
+	MemberStore   MemberRepository
+	LogManager    LogManager
+	SyncHistory   SyncHistoryStore
+	KnownHosts    string
+	RemoteUserAPI bool
 }
 
 func NewApp(out, err io.Writer) App {

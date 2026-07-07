@@ -296,6 +296,24 @@ func TestAppWebProfilesAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebProfilesAPISkipsLocalAuthWithRemoteUserAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.RemoteUserAPI = true
+	req := httptest.NewRequest(http.MethodGet, "/api/profiles", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "xcode-vnc") {
+		t.Fatalf("profiles body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebConfigAPI(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")

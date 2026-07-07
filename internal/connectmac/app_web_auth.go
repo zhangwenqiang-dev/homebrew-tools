@@ -238,6 +238,10 @@ func (a App) webSettingsHandler() http.HandlerFunc {
 
 func (a App) requireWebRole(next http.HandlerFunc, roles ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if a.RemoteUserAPI {
+			next(w, r)
+			return
+		}
 		if _, ok := a.requireWebRoleValue(r, roles...); !ok {
 			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
