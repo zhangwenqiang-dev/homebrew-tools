@@ -1605,11 +1605,11 @@
 
     async function runAWS(command, confirm = false) {
       const p = selectedProfile();
-      if (!p) return;
+      if (!p) return false;
       const ownerEmail = $("assignMemberSelect").value;
       if (confirm && command === "open" && isAdmin() && !ownerEmail) {
         setStatus("管理员确认打开前必须选择负责人");
-        return;
+        return false;
       }
       setBusy(true, confirm ? "正在启动后台任务..." : "正在生成预览...");
       setStatus(confirm ? "后台任务启动中..." : "预览中...");
@@ -1620,11 +1620,19 @@
         });
         let outputText = (body.output || "") + (body.error || "");
         setOutput(outputText);
+        if (confirm && !$("awsConfirmLayer").classList.contains("hidden")) {
+          $("awsConfirmOutput").textContent = outputText;
+        }
         setStatus(body.ok ? (confirm ? "后台任务已启动" : "预览完成") : "失败");
         await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false), confirm ? loadProfiles() : Promise.resolve()]);
+        return true;
       } catch (err) {
         setOutput(String(err.message || err));
+        if (confirm && !$("awsConfirmLayer").classList.contains("hidden")) {
+          $("awsConfirmOutput").textContent = String(err.message || err);
+        }
         setStatus("失败");
+        return false;
       } finally {
         setBusy(false);
         renderProfiles();
@@ -1684,9 +1692,11 @@
         closeAWSConfirm();
         return;
       }
-      closeAWSConfirm();
-      await runAWS(pending.command, true);
-      state.pendingAWS = null;
+      const ok = await runAWS(pending.command, true);
+      if (ok) {
+        closeAWSConfirm();
+        state.pendingAWS = null;
+      }
     }
 
     async function startTunnel(profile) {
