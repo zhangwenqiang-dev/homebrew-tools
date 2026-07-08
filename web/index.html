@@ -352,6 +352,45 @@
       .sync-grid { grid-template-columns: 1fr; }
       pre { max-height: 420px; }
     }
+    @media (max-width: 720px) {
+      body { font-size: 13px; }
+      header { gap: 10px; padding: 10px 12px; }
+      .user-label { max-width: 150px; }
+      .app-layout { padding: 8px; gap: 8px; }
+      .section-head { align-items: stretch; flex-direction: column; }
+      .toolbar, .row-actions { width: 100%; }
+      .toolbar input, .toolbar select, .toolbar button { width: 100%; }
+      table, thead, tbody, tr, th, td { display: block; width: 100%; }
+      thead { display: none; }
+      tr {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      td {
+        min-height: 32px;
+        display: grid;
+        grid-template-columns: 86px minmax(0, 1fr);
+        gap: 8px;
+        padding: 6px 0;
+        border-bottom: 0;
+      }
+      td::before {
+        content: attr(data-label);
+        color: var(--muted);
+        font-weight: 650;
+      }
+      td[colspan] {
+        display: block;
+      }
+      td[colspan]::before {
+        content: "";
+        display: none;
+      }
+      .row-actions button { flex: 1 1 86px; }
+      .local-action { display: none !important; }
+      .profile-admin { grid-template-columns: 1fr; padding: 8px; }
+      .profile-form-grid, .settings-form, .account-form { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -570,8 +609,8 @@
               <button id="confirmOpenBtn" class="primary">确认打开</button>
               <button id="previewDestroyBtn">预览释放</button>
               <button id="confirmDestroyBtn" class="danger">确认释放</button>
-              <button id="syncBtn">传输</button>
-              <button id="terminalBtn">连接</button>
+              <button id="syncBtn" class="local-action">传输</button>
+              <button id="terminalBtn" class="local-action">连接</button>
               <button id="eventsBtn">事件</button>
             </div>
           </div>
@@ -1215,12 +1254,12 @@
         const readyAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能执行该操作。\"";
         const vncAttrs = ready && profileVNCReady(p.name) ? "" : " disabled title=\"" + (ready ? "请先点击连接，连接成功后再打开 VNC。" : "Mac 未 ready，不能打开 VNC。") + "\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
-          "<td><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
-          "<td>" + escapeHTML(p.apple_email || "-") + "</td>" +
-          "<td>" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
-          "<td>" + escapeHTML(p.region || "-") + "</td>" +
-          "<td>" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">连接</button><button data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + ">VNC</button><button data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">传输</button></div></td>" +
+          "<td data-label=\"Profile\"><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
+          "<td data-label=\"Apple\">" + escapeHTML(p.apple_email || "-") + "</td>" +
+          "<td data-label=\"负责人\">" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
+          "<td data-label=\"Region\">" + escapeHTML(p.region || "-") + "</td>" +
+          "<td data-label=\"状态\">" + statusBadge(status) + statusDetail(status) + "</td>" +
+          "<td data-label=\"操作\"><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button class=\"local-action\" data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">连接</button><button class=\"local-action\" data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + ">VNC</button><button class=\"local-action\" data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">传输</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -1276,10 +1315,10 @@
           "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" +
           "</div>" : "-";
         return "<tr>" +
-          "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
-          "<td>" + escapeHTML(member.role || "-") + "</td>" +
-          "<td><span class=\"badge " + enabledClass + "\">" + enabledText + "</span></td>" +
-          "<td>" + actions + "</td>" +
+          "<td data-label=\"成员\"><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
+          "<td data-label=\"角色\">" + escapeHTML(member.role || "-") + "</td>" +
+          "<td data-label=\"状态\"><span class=\"badge " + enabledClass + "\">" + enabledText + "</span></td>" +
+          "<td data-label=\"操作\">" + actions + "</td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
       document.querySelectorAll("[data-member-toggle]").forEach((button) => {
@@ -1407,10 +1446,19 @@
       const p = selectedProfile();
       $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
       const disabled = !p;
-      const readyActionDisabled = disabled || state.busy || (p && !profileReady(p.name));
-      for (const id of ["statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "terminalBtn", "eventsBtn"]) {
+      const status = p ? state.statuses[p.name] : null;
+      const statusKnown = !!status && status.decision !== "error" && !status.error;
+      const isReady = statusKnown && status.ready === true;
+      const readyActionDisabled = disabled || state.busy || !isReady;
+      const openDisabled = disabled || state.busy || !statusKnown || isReady;
+      const destroyDisabled = disabled || state.busy || !statusKnown || !isReady;
+      for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
+      $("previewOpenBtn").disabled = openDisabled;
+      $("confirmOpenBtn").disabled = openDisabled;
+      $("previewDestroyBtn").disabled = destroyDisabled;
+      $("confirmDestroyBtn").disabled = destroyDisabled;
       $("syncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled;
       $("syncPullBtn").disabled = readyActionDisabled;
@@ -1423,7 +1471,6 @@
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
-      const status = p ? state.statuses[p.name] : null;
       $("decisionValue").textContent = status ? statusLabel(status) + (status.detail ? " · " + status.detail : "") : "-";
       $("readyValue").textContent = status ? String(!!status.ready) : "-";
       $("ipValue").textContent = status?.elastic_ip?.public_ip || firstInstanceIP(status) || "-";
@@ -2394,11 +2441,11 @@
       const jobs = body.data.jobs || [];
       $("jobs").innerHTML = jobs.length ? jobs.map((job) =>
         "<tr>" +
-          "<td>" + escapeHTML(job.id || "-") + "</td>" +
-          "<td>" + escapeHTML(job.profile || "-") + "</td>" +
-          "<td>" + jobBadge(job.status) + "</td>" +
-          "<td>" + escapeHTML(formatTime(job.started_at)) + "</td>" +
-          "<td><button data-job-log=\"" + escapeAttr(job.id || "") + "\">查看</button></td>" +
+          "<td data-label=\"Job\">" + escapeHTML(job.id || "-") + "</td>" +
+          "<td data-label=\"Profile\">" + escapeHTML(job.profile || "-") + "</td>" +
+          "<td data-label=\"状态\">" + jobBadge(job.status) + "</td>" +
+          "<td data-label=\"开始时间\">" + escapeHTML(formatTime(job.started_at)) + "</td>" +
+          "<td data-label=\"操作\"><button data-job-log=\"" + escapeAttr(job.id || "") + "\">查看</button></td>" +
         "</tr>"
       ).join("") : "<tr><td colspan=\"5\" class=\"muted\">No jobs.</td></tr>";
       document.querySelectorAll("[data-job-log]").forEach((button) => {
