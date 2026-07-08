@@ -407,6 +407,10 @@ func (s MySQLMemberStore) SetMemberPassword(emailOrUsername, password string) er
 	return setMemberPasswordInStore(s, emailOrUsername, password)
 }
 
+func (s MySQLMemberStore) UpdateMember(emailOrUsername, name, email, role string) (Member, error) {
+	return updateMemberInStore(s, emailOrUsername, name, email, role)
+}
+
 func (s MySQLMemberStore) UpdateMemberEmail(memberID, newEmail string) (Member, error) {
 	return updateMemberEmailInStore(s, memberID, newEmail)
 }

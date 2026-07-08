@@ -805,13 +805,31 @@ func TestAppWebMemberAPIs(t *testing.T) {
 		t.Fatalf("member password not updated ok=%t err=%v", ok, err)
 	}
 
+	body = strings.NewReader(`{"original_email":"whh@example.com","name":"王恒辉2","email":"whh2@example.com","role":"viewer"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/member/update", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update member status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
 	body = strings.NewReader(`{"apple_email":"user@example.com","member_email":"whh@example.com","relation":"owner"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/member/assign", body)
 	addWebAuth(t, &app, req, "admin")
 	rec = httptest.NewRecorder()
 	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("assign should not accept old member email after update")
+	}
+
+	body = strings.NewReader(`{"apple_email":"user@example.com","member_email":"whh2@example.com","relation":"owner"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/member/assign", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("assign status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("assign updated member status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/members", nil)
@@ -821,7 +839,7 @@ func TestAppWebMemberAPIs(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	for _, want := range []string{"whh@example.com", "user@example.com", "owner"} {
+	for _, want := range []string{"whh2@example.com", "王恒辉2", "viewer", "user@example.com", "owner"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("members body missing %q:\n%s", want, rec.Body.String())
 		}

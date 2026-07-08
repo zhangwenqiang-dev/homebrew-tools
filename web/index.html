@@ -419,7 +419,7 @@
       <div class="profile-form-grid">
         <label>成员姓名<input id="memberName" placeholder="成员姓名"></label>
         <label>成员邮箱<input id="memberEmail" placeholder="成员邮箱"></label>
-        <label>登录密码<input id="memberPassword" type="password" placeholder="可选，至少 8 位"></label>
+        <label id="memberPasswordField">登录密码<input id="memberPassword" type="password" placeholder="可选，至少 8 位"></label>
         <label>角色<select id="memberRole">
           <option value="operator">operator</option>
           <option value="admin">admin</option>
@@ -684,10 +684,10 @@
           <table>
             <thead>
               <tr>
-                <th style="width: 28%">成员</th>
+                <th style="width: 30%">成员</th>
                 <th style="width: 14%">角色</th>
-                <th style="width: 40%">配置</th>
-                <th style="width: 18%">状态</th>
+                <th style="width: 14%">状态</th>
+                <th style="width: 42%">操作</th>
               </tr>
             </thead>
             <tbody id="members"></tbody>
@@ -746,7 +746,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -779,7 +779,7 @@
       document.querySelectorAll("[data-member-profiles]").forEach((button) => {
         button.disabled = busy;
       });
-      document.querySelectorAll("[data-member-password], [data-member-toggle]").forEach((button) => {
+      document.querySelectorAll("[data-member-edit], [data-member-password], [data-member-toggle]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -1255,13 +1255,19 @@
 
     function renderMembers() {
       $("members").innerHTML = state.members.length ? state.members.map((member) => {
-        const profileNames = profileNamesForMember(member.email);
-        const profileSummary = profileNames.length ? profileNames.map((name) => "<span class=\"pill\">" + escapeHTML(name) + "</span>").join(" ") : "<span class=\"muted\">未配置</span>";
+        const enabledText = member.enabled ? "启用" : "停用";
+        const enabledClass = member.enabled ? "ready" : "stopped";
+        const actions = isAdmin() ? "<div class=\"row-actions\">" +
+          "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" +
+          "<button data-member-edit=\"" + escapeAttr(member.email || "") + "\">修改</button>" +
+          "<button data-member-password=\"" + escapeAttr(member.email || "") + "\">改密码</button>" +
+          "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" +
+          "</div>" : "-";
         return "<tr>" +
           "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
           "<td>" + escapeHTML(member.role || "-") + "</td>" +
-          "<td><div class=\"profile-access\">" + profileSummary + (isAdmin() ? "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" : "") + "</div></td>" +
-          "<td>" + (isAdmin() ? "<div class=\"row-actions\"><button data-member-password=\"" + escapeAttr(member.email || "") + "\">改密码</button><button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button></div>" : escapeHTML(member.enabled ? "启用" : "停用")) + "</td>" +
+          "<td><span class=\"badge " + enabledClass + "\">" + enabledText + "</span></td>" +
+          "<td>" + actions + "</td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
       document.querySelectorAll("[data-member-toggle]").forEach((button) => {
@@ -1269,6 +1275,12 @@
       });
       document.querySelectorAll("[data-member-password]").forEach((button) => {
         button.addEventListener("click", () => resetMemberPassword(button.getAttribute("data-member-password")));
+      });
+      document.querySelectorAll("[data-member-edit]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const member = state.members.find((item) => item.email === button.getAttribute("data-member-edit"));
+          openMemberForm(member || null);
+        });
       });
       document.querySelectorAll("[data-member-profiles]").forEach((button) => {
         button.addEventListener("click", () => openMemberProfileEditor(button.getAttribute("data-member-profiles")));
@@ -1832,24 +1844,33 @@
       renderSelected();
     }
 
-    function openMemberForm() {
-      $("memberName").value = "";
-      $("memberEmail").value = "";
+    function openMemberForm(member = null) {
+      state.editingMemberEmail = member?.email || "";
+      $("memberFormTitle").textContent = member ? "修改成员" : "添加成员";
+      $("addMemberBtn").textContent = member ? "保存成员" : "添加成员";
+      $("memberName").value = member?.name || "";
+      $("memberEmail").value = member?.email || "";
       $("memberPassword").value = "";
-      $("memberRole").value = "operator";
+      $("memberRole").value = member?.role || "operator";
+      $("memberPasswordField").classList.toggle("hidden", !!member);
       $("memberFormLayer").classList.remove("hidden");
       setTimeout(() => $("memberName").focus(), 0);
     }
 
     function closeMemberForm() {
+      state.editingMemberEmail = "";
       $("memberFormLayer").classList.add("hidden");
+      $("memberFormTitle").textContent = "添加成员";
+      $("addMemberBtn").textContent = "添加成员";
       $("memberName").value = "";
       $("memberEmail").value = "";
       $("memberPassword").value = "";
       $("memberRole").value = "operator";
+      $("memberPasswordField").classList.remove("hidden");
     }
 
     async function addMember() {
+      const editingEmail = state.editingMemberEmail;
       const name = $("memberName").value.trim();
       const email = $("memberEmail").value.trim();
       const password = $("memberPassword").value;
@@ -1858,21 +1879,21 @@
         setStatus("成员姓名和邮箱必填");
         return;
       }
-      setBusy(true, "正在添加成员...");
+      setBusy(true, editingEmail ? "正在保存成员..." : "正在添加成员...");
       try {
-        await api("/api/member/add", {
+        await api(editingEmail ? "/api/member/update" : "/api/member/add", {
           method: "POST",
-          body: JSON.stringify({ name, email, role, password })
+          body: JSON.stringify(editingEmail ? { original_email: editingEmail, name, email, role } : { name, email, role, password })
         });
         $("memberName").value = "";
         $("memberEmail").value = "";
         $("memberPassword").value = "";
         closeMemberForm();
         await loadMembers();
-        setStatus("成员已添加");
+        setStatus(editingEmail ? "成员已保存" : "成员已添加");
       } catch (err) {
         setOutput(String(err.message || err));
-        setStatus("成员添加失败");
+        setStatus(editingEmail ? "成员保存失败" : "成员添加失败");
       } finally {
         setBusy(false);
         renderSelected();
@@ -2480,7 +2501,7 @@
     });
     $("currentUserBtn").addEventListener("click", () => showView("userView"));
     $("changeOwnPasswordBtn").addEventListener("click", changeOwnPassword);
-    $("openMemberFormBtn").addEventListener("click", openMemberForm);
+    $("openMemberFormBtn").addEventListener("click", () => openMemberForm(null));
     $("cancelMemberFormBtn").addEventListener("click", closeMemberForm);
     $("memberFormCloseBtn").addEventListener("click", closeMemberForm);
     $("memberFormLayer").addEventListener("click", (event) => {

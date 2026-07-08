@@ -191,6 +191,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/members", a.requireWebRole(a.webMembersHandler(), "admin"))
 	mux.HandleFunc("/api/member/add", a.requireWebRole(a.webMemberAddHandler(), "admin"))
+	mux.HandleFunc("/api/member/update", a.requireWebRole(a.webMemberUpdateHandler(), "admin"))
 	mux.HandleFunc("/api/member/password", a.requireWebRole(a.webMemberPasswordHandler(), "admin"))
 	mux.HandleFunc("/api/member/enable", a.requireWebRole(a.webMemberEnabledHandler(true), "admin"))
 	mux.HandleFunc("/api/member/disable", a.requireWebRole(a.webMemberEnabledHandler(false), "admin"))
@@ -546,6 +547,31 @@ func (a App) webMemberAddHandler() http.HandlerFunc {
 		} else {
 			member, err = a.MemberStore.AddMember(req.Name, req.Email, req.Role)
 		}
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"member": member}})
+	}
+}
+
+func (a App) webMemberUpdateHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			OriginalEmail string `json:"original_email"`
+			Name          string `json:"name"`
+			Email         string `json:"email"`
+			Role          string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		member, err := a.MemberStore.UpdateMember(req.OriginalEmail, req.Name, req.Email, req.Role)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return

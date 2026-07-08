@@ -30,6 +30,7 @@ type MemberRepository interface {
 	AddMemberWithPassword(name, email, role, password string) (Member, error)
 	SetupAdmin(name, email, password string) (Member, error)
 	SetMemberPassword(emailOrUsername, password string) error
+	UpdateMember(emailOrUsername, name, email, role string) (Member, error)
 	UpdateMemberEmail(memberID, newEmail string) (Member, error)
 	VerifyMemberPassword(emailOrUsername, password string) (Member, bool, error)
 	HasPasswordMembers() (bool, error)
@@ -393,6 +394,10 @@ func (s MemberStore) UpdateMemberEmail(memberID, newEmail string) (Member, error
 		db.Settings.DefaultOwnerEmail = newEmail
 	}
 	return db.Members[targetIdx], s.Save(db)
+}
+
+func (s MemberStore) UpdateMember(emailOrUsername, name, email, role string) (Member, error) {
+	return updateMemberInStore(s, emailOrUsername, name, email, role)
 }
 
 func (s MemberStore) VerifyMemberPassword(emailOrUsername, password string) (Member, bool, error) {
@@ -926,6 +931,52 @@ func updateMemberEmailInStore(s memberDataStore, memberID, newEmail string) (Mem
 	db.Members[targetIdx].UpdatedAt = s.currentTime().Format(time.RFC3339)
 	if strings.EqualFold(db.Settings.DefaultOwnerEmail, oldEmail) {
 		db.Settings.DefaultOwnerEmail = newEmail
+	}
+	return db.Members[targetIdx], s.Save(db)
+}
+
+func updateMemberInStore(s memberDataStore, emailOrUsername, name, email, role string) (Member, error) {
+	emailOrUsername = strings.TrimSpace(emailOrUsername)
+	name = strings.TrimSpace(name)
+	email = normalizeEmail(email)
+	role = normalizeMemberRole(role)
+	if emailOrUsername == "" {
+		return Member{}, errors.New("member email is required")
+	}
+	if name == "" {
+		return Member{}, errors.New("name is required")
+	}
+	if email == "" || !strings.Contains(email, "@") {
+		return Member{}, errors.New("valid email is required")
+	}
+	if role == "" {
+		return Member{}, errors.New("role must be admin, operator, or viewer")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return Member{}, err
+	}
+	targetIdx := -1
+	for i, member := range db.Members {
+		if strings.EqualFold(member.Email, emailOrUsername) || strings.EqualFold(member.Username, emailOrUsername) || member.ID == emailOrUsername {
+			targetIdx = i
+			continue
+		}
+		if strings.EqualFold(member.Email, email) || strings.EqualFold(member.Username, email) {
+			return Member{}, fmt.Errorf("member %s already exists", email)
+		}
+	}
+	if targetIdx < 0 {
+		return Member{}, fmt.Errorf("member %s not found", emailOrUsername)
+	}
+	oldEmail := db.Members[targetIdx].Email
+	db.Members[targetIdx].Name = name
+	db.Members[targetIdx].Email = email
+	db.Members[targetIdx].Username = email
+	db.Members[targetIdx].Role = role
+	db.Members[targetIdx].UpdatedAt = s.currentTime().Format(time.RFC3339)
+	if strings.EqualFold(db.Settings.DefaultOwnerEmail, oldEmail) {
+		db.Settings.DefaultOwnerEmail = email
 	}
 	return db.Members[targetIdx], s.Save(db)
 }
