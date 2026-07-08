@@ -22,6 +22,7 @@ type Config struct {
 
 type ServerConfig struct {
 	UserAPI string
+	Token   string
 }
 
 type ProfileDefaults struct {
@@ -181,6 +182,9 @@ func mergeConfigs(dst *Config, src Config, source string) error {
 
 func mergeServer(dst *ServerConfig, src ServerConfig, source string) error {
 	if err := mergeDefaultString(&dst.UserAPI, src.UserAPI, "server.user_api", source); err != nil {
+		return err
+	}
+	if err := mergeDefaultString(&dst.Token, src.Token, "server.token", source); err != nil {
 		return err
 	}
 	return nil
@@ -901,6 +905,8 @@ func applyServerField(server *ServerConfig, line string) error {
 	switch key {
 	case "user_api":
 		server.UserAPI = strings.TrimRight(value, "/")
+	case "token":
+		server.Token = value
 	default:
 		return fmt.Errorf("unsupported server field %q", key)
 	}

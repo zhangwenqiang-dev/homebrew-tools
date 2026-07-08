@@ -113,6 +113,13 @@ func (s MCPServer) handleTool(ctx context.Context, params json.RawMessage) (inte
 	if err != nil {
 		return mcpUserError("config", err), nil
 	}
+	if cfg.Server.UserAPI != "" && hasCLIRemoteAuth(s.ConfigPath, cfg) {
+		remoteCfg, err := s.App.loadRemoteListConfig(ctx, s.ConfigPath, cfg)
+		if err != nil {
+			return mcpUserError("config", err), nil
+		}
+		cfg = remoteCfg
+	}
 	switch call.Name {
 	case "cm_list_profiles":
 		return mcpText(listProfilesText(cfg)), nil

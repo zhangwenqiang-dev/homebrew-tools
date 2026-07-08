@@ -127,13 +127,13 @@ func TestAppListFormatsProfilesAsTable(t *testing.T) {
 }
 
 func TestAppListFetchesRemoteProfiles(t *testing.T) {
-	var seenCookie string
+	var seenAuth string
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenCookie = r.Header.Get("Cookie")
+		seenAuth = r.Header.Get("Authorization")
 		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
 			t.Fatalf("unexpected request path = %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
-		if seenCookie != "cm_session=signed-session" {
+		if seenAuth != "Bearer cm_api_remote" {
 			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
 		}
@@ -154,10 +154,10 @@ func TestAppListFetchesRemoteProfiles(t *testing.T) {
 	config := filepath.Join(dir, "config.yaml")
 	writeFile(t, config, `server:
   user_api: `+remote.URL+`
+  token: cm_api_remote
 defaults:
   identity_file: ~/.ssh/local.pem
 `)
-	writeFile(t, filepath.Join(dir, "session"), "signed-session")
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
 	if code := app.Run(context.Background(), []string{"list", "--config", config}); code != 0 {
@@ -180,7 +180,7 @@ func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"list", "--config", config}); code == 0 {
 		t.Fatalf("list code = 0, want failure")
 	}
-	if !strings.Contains(errOut.String(), "remote profile list requires login session") {
+	if !strings.Contains(errOut.String(), "remote profile list requires server.token") {
 		t.Fatalf("err = %q", errOut.String())
 	}
 }
@@ -494,6 +494,55 @@ func TestAppWebManagedProfilesAccessAPI(t *testing.T) {
 	app.newWebHandler(config).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "managed-usw2") {
 		t.Fatalf("re-enabled member list body = %s status=%d", rec.Body.String(), rec.Code)
+	}
+}
+
+func TestAppWebAPITokenCanListManagedProfiles(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	profileYAML := `profiles:
+  token-usw2:
+    description: Apple account: token@example.com
+    aws:
+      region: us-west-2
+      account_email: token@example.com
+`
+	body := strings.NewReader(`{"profile_yaml":` + strconv.Quote(profileYAML) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/managed-profile/save", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(`{}`))
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var bodyResp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bodyResp); err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
+	if !strings.HasPrefix(bodyResp.Data.Token, webAPITokenPrefix) {
+		t.Fatalf("token = %q", bodyResp.Data.Token)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	req.Header.Set("Authorization", "Bearer "+bodyResp.Data.Token)
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "token-usw2") {
+		t.Fatalf("token list body = %s status=%d", rec.Body.String(), rec.Code)
 	}
 }
 

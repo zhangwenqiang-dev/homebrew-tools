@@ -71,6 +71,7 @@ Example profile:
 ```yaml
 server:
   user_api: https://cm.hsgitlab.xyz
+  token: cm_api_xxx
 
 defaults:
   user: ec2-user
@@ -143,6 +144,8 @@ profiles:
         remote_host: localhost
         remote_port: 5900
 ```
+
+`server.token` is optional for local-only use. When `server.user_api` points to a shared ConnectMac server, generate a member token in the web UI and put it here so `cm list`, `cm mcp`, and other CLI flows can read remote profiles without a browser session.
 
 AMI defaults are resolved in this order: `profile.aws.ami`, then `defaults.aws.amis_by_region[profile.aws.region]`, then legacy `defaults.aws.ami`.
 

@@ -16,6 +16,7 @@ import (
 )
 
 const webSessionCookie = "cm_session"
+const webAPITokenPrefix = "cm_api_"
 
 type webAuthMember struct {
 	Member        PublicMember `json:"member,omitempty"`
@@ -247,6 +248,26 @@ func (a App) webAuthChangePasswordHandler() http.HandlerFunc {
 	}
 }
 
+func (a App) webAuthTokenHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.requireWebRoleValue(r, "viewer", "operator", "admin")
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		token, err := a.newWebAPIToken(member)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"token": token}})
+	}
+}
+
 func (a App) webSettingsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -307,11 +328,38 @@ func (a App) requireWebRoleValue(r *http.Request, roles ...string) (Member, bool
 }
 
 func (a App) currentWebMember(r *http.Request) (Member, bool) {
+	if member, ok := a.currentWebTokenMember(r); ok {
+		return member, true
+	}
 	cookie, err := r.Cookie(webSessionCookie)
 	if err != nil || cookie.Value == "" {
 		return Member{}, false
 	}
 	email, ok := a.verifyWebSession(cookie.Value)
+	if !ok {
+		return Member{}, false
+	}
+	db, err := a.MemberStore.Load()
+	if err != nil {
+		return Member{}, false
+	}
+	member, ok := findMemberByEmailOrUsername(db, email)
+	if !ok || !member.Enabled {
+		return Member{}, false
+	}
+	return member, true
+}
+
+func (a App) currentWebTokenMember(r *http.Request) (Member, bool) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if auth == "" {
+		return Member{}, false
+	}
+	parts := strings.Fields(auth)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return Member{}, false
+	}
+	email, ok := a.verifyWebAPIToken(parts[1])
 	if !ok {
 		return Member{}, false
 	}
@@ -410,6 +458,46 @@ func (a App) verifyWebSession(value string) (string, bool) {
 	payload := parts[0] + "|" + parts[1]
 	expected := signWebValue(secret, payload)
 	if !hmac.Equal([]byte(expected), []byte(parts[2])) {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func (a App) newWebAPIToken(member Member) (string, error) {
+	secret, err := a.MemberStore.EnsureAuthSecret()
+	if err != nil {
+		return "", err
+	}
+	nonce, err := randomToken(18)
+	if err != nil {
+		return "", err
+	}
+	issuedAt := strconv.FormatInt(time.Now().Unix(), 10)
+	payload := normalizeEmail(member.Email) + "|" + issuedAt + "|" + nonce
+	sig := signWebValue(secret, payload)
+	return webAPITokenPrefix + base64.RawURLEncoding.EncodeToString([]byte(payload+"|"+sig)), nil
+}
+
+func (a App) verifyWebAPIToken(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, webAPITokenPrefix) {
+		value = strings.TrimPrefix(value, webAPITokenPrefix)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return "", false
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 4 {
+		return "", false
+	}
+	secret, err := a.MemberStore.EnsureAuthSecret()
+	if err != nil {
+		return "", false
+	}
+	payload := parts[0] + "|" + parts[1] + "|" + parts[2]
+	expected := signWebValue(secret, payload)
+	if !hmac.Equal([]byte(expected), []byte(parts[3])) {
 		return "", false
 	}
 	return parts[0], true

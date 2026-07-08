@@ -185,6 +185,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler(configPath))
 	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
 	mux.HandleFunc("/api/auth/change-password", a.requireWebRole(a.webAuthChangePasswordHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/auth/token", a.requireWebRole(a.webAuthTokenHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/config", a.webConfigHandler(configPath))
 	mux.HandleFunc("/api/user-proxy/", a.webUserProxyHandler(configPath))
 	mux.HandleFunc("/api/auth/update-email", a.requireWebRole(a.webAuthUpdateEmailHandler(), "admin"))
@@ -194,6 +195,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/member/add", a.requireWebRole(a.webMemberAddHandler(), "admin"))
 	mux.HandleFunc("/api/member/update", a.requireWebRole(a.webMemberUpdateHandler(), "admin"))
 	mux.HandleFunc("/api/member/password", a.requireWebRole(a.webMemberPasswordHandler(), "admin"))
+	mux.HandleFunc("/api/member/token", a.requireWebRole(a.webMemberTokenHandler(), "admin"))
 	mux.HandleFunc("/api/member/enable", a.requireWebRole(a.webMemberEnabledHandler(true), "admin"))
 	mux.HandleFunc("/api/member/disable", a.requireWebRole(a.webMemberEnabledHandler(false), "admin"))
 	mux.HandleFunc("/api/member/assign", a.requireWebRole(a.webMemberAssignHandler(false), "admin"))
@@ -468,6 +470,9 @@ func (a App) fetchRemoteManagedProfiles(r *http.Request, userAPI string) ([]webM
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -605,6 +610,38 @@ func (a App) webMemberPasswordHandler() http.HandlerFunc {
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true})
+	}
+}
+
+func (a App) webMemberTokenHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		db, err := a.MemberStore.Load()
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		member, ok := findMemberByEmailOrUsername(db, req.Email)
+		if !ok || !member.Enabled {
+			writeWebError(w, http.StatusBadRequest, "member not found or disabled")
+			return
+		}
+		token, err := a.newWebAPIToken(member)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"token": token, "member": publicMember(member)}})
 	}
 }
 

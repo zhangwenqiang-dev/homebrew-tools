@@ -468,6 +468,23 @@
       </div>
     </div>
   </div>
+  <div id="apiTokenLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="apiTokenTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="apiTokenTitle">访问令牌</h2>
+        <button id="apiTokenCloseBtn">关闭</button>
+      </div>
+      <div id="apiTokenMember" class="picker-path"></div>
+      <div class="output">
+        <div class="status-line">令牌只显示这一次，请保存到本机配置。</div>
+        <pre id="apiTokenOutput"></pre>
+      </div>
+      <div class="picker-actions">
+        <button id="copyAPITokenBtn">复制</button>
+        <button id="closeAPITokenBtn" class="primary">完成</button>
+      </div>
+    </div>
+  </div>
   <div id="awsConfirmLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="awsConfirmTitle">
     <div class="picker-card">
       <div class="section-head">
@@ -737,7 +754,10 @@
           </div>
           <div class="section-head">
             <h2>修改密码</h2>
-            <button id="openOwnPasswordBtn" class="primary">修改密码</button>
+            <div class="row-actions">
+              <button id="generateOwnTokenBtn">生成令牌</button>
+              <button id="openOwnPasswordBtn" class="primary">修改密码</button>
+            </div>
           </div>
         </section>
 
@@ -823,7 +843,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -847,7 +867,7 @@
       document.querySelectorAll("[data-member-profiles]").forEach((button) => {
         button.disabled = busy;
       });
-      document.querySelectorAll("[data-member-edit], [data-member-password], [data-member-toggle]").forEach((button) => {
+      document.querySelectorAll("[data-member-edit], [data-member-password], [data-member-token], [data-member-toggle]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -1371,6 +1391,7 @@
           "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" +
           "<button data-member-edit=\"" + escapeAttr(member.email || "") + "\">修改</button>" +
           "<button data-member-password=\"" + escapeAttr(member.email || "") + "\">改密码</button>" +
+          "<button data-member-token=\"" + escapeAttr(member.email || "") + "\">令牌</button>" +
           "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" +
           "</div>" : "-";
         return "<tr>" +
@@ -1385,6 +1406,9 @@
       });
       document.querySelectorAll("[data-member-password]").forEach((button) => {
         button.addEventListener("click", () => resetMemberPassword(button.getAttribute("data-member-password")));
+      });
+      document.querySelectorAll("[data-member-token]").forEach((button) => {
+        button.addEventListener("click", () => generateMemberToken(button.getAttribute("data-member-token")));
       });
       document.querySelectorAll("[data-member-edit]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -2232,6 +2256,63 @@
       }
     }
 
+    async function generateOwnToken() {
+      setBusy(true, "正在生成令牌...");
+      try {
+        const body = await api("/api/auth/token", { method: "POST", body: "{}" });
+        showAPIToken(state.auth?.member || {}, body.data?.token || "");
+        setStatus("令牌已生成");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("令牌生成失败");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function generateMemberToken(email) {
+      if (!isAdmin() || !email) return;
+      setBusy(true, "正在生成成员令牌...");
+      try {
+        const body = await api("/api/member/token", {
+          method: "POST",
+          body: JSON.stringify({ email })
+        });
+        showAPIToken(body.data?.member || { email }, body.data?.token || "");
+        setStatus("成员令牌已生成");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("成员令牌生成失败");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function showAPIToken(member, token) {
+      const userAPI = (state.clientConfig?.user_api || window.location.origin || "").replace(/\/+$/, "");
+      $("apiTokenMember").textContent = (member.name || member.email || "-") + " · " + (member.email || "-");
+      $("apiTokenOutput").textContent = "server:\n  user_api: " + userAPI + "\n  token: " + token + "\n";
+      $("apiTokenLayer").classList.remove("hidden");
+    }
+
+    function closeAPIToken() {
+      $("apiTokenLayer").classList.add("hidden");
+      $("apiTokenMember").textContent = "";
+      $("apiTokenOutput").textContent = "";
+    }
+
+    async function copyAPIToken() {
+      const text = $("apiTokenOutput").textContent || "";
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus("令牌配置已复制");
+      } catch (err) {
+        setOutput(text);
+        setStatus("复制失败，已输出到日志区域");
+      }
+    }
+
     function openProfileForm(profile = null) {
       state.editingManagedProfile = profile?.name || "";
       $("profileFormTitle").textContent = profile ? "编辑 Profile" : "添加 Profile";
@@ -2716,12 +2797,19 @@
       }
     });
     $("currentUserBtn").addEventListener("click", () => showView("userView"));
+    $("generateOwnTokenBtn").addEventListener("click", generateOwnToken);
     $("openOwnPasswordBtn").addEventListener("click", openOwnPasswordEditor);
     $("changeOwnPasswordBtn").addEventListener("click", changeOwnPassword);
     $("cancelOwnPasswordBtn").addEventListener("click", closeOwnPasswordEditor);
     $("ownPasswordCloseBtn").addEventListener("click", closeOwnPasswordEditor);
     $("ownPasswordLayer").addEventListener("click", (event) => {
       if (event.target === $("ownPasswordLayer")) closeOwnPasswordEditor();
+    });
+    $("copyAPITokenBtn").addEventListener("click", copyAPIToken);
+    $("closeAPITokenBtn").addEventListener("click", closeAPIToken);
+    $("apiTokenCloseBtn").addEventListener("click", closeAPIToken);
+    $("apiTokenLayer").addEventListener("click", (event) => {
+      if (event.target === $("apiTokenLayer")) closeAPIToken();
     });
     ["userCurrentPassword", "userNewPassword", "userConfirmPassword"].forEach((id) => {
       $(id).addEventListener("keydown", (event) => {

@@ -24,15 +24,19 @@ func (a App) runList(ctx context.Context, configPath string, cfg Config) int {
 }
 
 func (a App) loadRemoteListConfig(ctx context.Context, configPath string, cfg Config) (Config, error) {
-	session, err := cliWebSession(configPath)
-	if err != nil {
-		return Config{}, err
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.Server.UserAPI, "/")+"/api/managed-profiles?include_yaml=1", nil)
 	if err != nil {
 		return Config{}, err
 	}
-	req.Header.Set("Cookie", webSessionCookie+"="+session)
+	if token := strings.TrimSpace(cfg.Server.Token); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		session, err := cliWebSession(configPath)
+		if err != nil {
+			return Config{}, err
+		}
+		req.Header.Set("Cookie", webSessionCookie+"="+session)
+	}
 	records, err := a.fetchRemoteManagedProfiles(req, cfg.Server.UserAPI)
 	if err != nil {
 		return Config{}, fmt.Errorf("fetch remote profiles from %s: %w", strings.TrimRight(cfg.Server.UserAPI, "/"), err)
@@ -55,7 +59,7 @@ func cliWebSession(configPath string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(filepath.Dir(expanded), "session"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("remote profile list requires login session; set CM_SESSION or create %s", filepath.Join(filepath.Dir(expanded), "session"))
+			return "", fmt.Errorf("remote profile list requires server.token, CM_SESSION, or %s", filepath.Join(filepath.Dir(expanded), "session"))
 		}
 		return "", fmt.Errorf("read session file: %w", err)
 	}
@@ -63,6 +67,18 @@ func cliWebSession(configPath string) (string, error) {
 		return value, nil
 	}
 	return "", fmt.Errorf("remote profile list requires a non-empty cm_session value")
+}
+
+func hasCLIRemoteAuth(configPath string, cfg Config) bool {
+	if strings.TrimSpace(cfg.Server.Token) != "" || normalizeCLISessionValue(os.Getenv("CM_SESSION")) != "" {
+		return true
+	}
+	expanded, err := ExpandPath(configPath)
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(expanded), "session"))
+	return err == nil && normalizeCLISessionValue(string(data)) != ""
 }
 
 func normalizeCLISessionValue(value string) string {

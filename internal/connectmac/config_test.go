@@ -256,6 +256,7 @@ func TestLoadConfigMergesServerConfig(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`
 server:
   user_api: https://cm.hsgitlab.xyz/
+  token: cm_api_local
 profiles:
   base:
     description: Base profile
@@ -268,6 +269,9 @@ profiles:
 	}
 	if cfg.Server.UserAPI != "https://cm.hsgitlab.xyz" {
 		t.Fatalf("server user_api = %q, want https://cm.hsgitlab.xyz", cfg.Server.UserAPI)
+	}
+	if cfg.Server.Token != "cm_api_local" {
+		t.Fatalf("server token = %q, want cm_api_local", cfg.Server.Token)
 	}
 }
 
