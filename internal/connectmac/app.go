@@ -91,7 +91,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 		if code != 0 {
 			return code
 		}
-		return a.runList(cfg)
+		return a.runList(ctx, configPath, cfg)
 	case "profile":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {

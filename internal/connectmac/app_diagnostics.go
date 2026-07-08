@@ -3,15 +3,77 @@ package connectmac
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-func (a App) runList(cfg Config) int {
+func (a App) runList(ctx context.Context, configPath string, cfg Config) int {
+	if strings.TrimSpace(cfg.Server.UserAPI) != "" {
+		remoteCfg, err := a.loadRemoteListConfig(ctx, configPath, cfg)
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		cfg = remoteCfg
+	}
 	fmt.Fprint(a.Out, listProfilesText(cfg))
 	return 0
+}
+
+func (a App) loadRemoteListConfig(ctx context.Context, configPath string, cfg Config) (Config, error) {
+	session, err := cliWebSession(configPath)
+	if err != nil {
+		return Config{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.Server.UserAPI, "/")+"/api/managed-profiles?include_yaml=1", nil)
+	if err != nil {
+		return Config{}, err
+	}
+	req.Header.Set("Cookie", webSessionCookie+"="+session)
+	records, err := a.fetchRemoteManagedProfiles(req, cfg.Server.UserAPI)
+	if err != nil {
+		return Config{}, fmt.Errorf("fetch remote profiles from %s: %w", strings.TrimRight(cfg.Server.UserAPI, "/"), err)
+	}
+	managed := make([]ManagedProfile, 0, len(records))
+	for _, record := range records {
+		managed = append(managed, ManagedProfile{Name: record.Name, ProfileYAML: record.ProfileYAML})
+	}
+	return a.mergeManagedProfileRecords(cfg, managed)
+}
+
+func cliWebSession(configPath string) (string, error) {
+	if value := normalizeCLISessionValue(os.Getenv("CM_SESSION")); value != "" {
+		return value, nil
+	}
+	expanded, err := ExpandPath(configPath)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(expanded), "session"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("remote profile list requires login session; set CM_SESSION or create %s", filepath.Join(filepath.Dir(expanded), "session"))
+		}
+		return "", fmt.Errorf("read session file: %w", err)
+	}
+	if value := normalizeCLISessionValue(string(data)); value != "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("remote profile list requires a non-empty cm_session value")
+}
+
+func normalizeCLISessionValue(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, webSessionCookie+"=") {
+		value = strings.TrimPrefix(value, webSessionCookie+"=")
+		if idx := strings.Index(value, ";"); idx >= 0 {
+			value = value[:idx]
+		}
+	}
+	return strings.TrimSpace(value)
 }
 func (a App) runDoctor(configPath string, args []string) int {
 	fix := false

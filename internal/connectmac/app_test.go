@@ -115,7 +115,7 @@ func TestAppListFormatsProfilesAsTable(t *testing.T) {
 	}}
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
-	if code := app.runList(cfg); code != 0 {
+	if code := app.runList(context.Background(), DefaultConfigPath, cfg); code != 0 {
 		t.Fatalf("list code = %d", code)
 	}
 	text := out.String()
@@ -123,6 +123,65 @@ func TestAppListFormatsProfilesAsTable(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("list output missing %q: %q", want, text)
 		}
+	}
+}
+
+func TestAppListFetchesRemoteProfiles(t *testing.T) {
+	var seenCookie string
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenCookie = r.Header.Get("Cookie")
+		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
+			t.Fatalf("unexpected request path = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if seenCookie != "cm_session=signed-session" {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{{
+			Name: "remote-usw2",
+			ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    aws:
+      account_email: remote@example.com
+      region: us-west-2
+`,
+		}}}})
+	}))
+	defer remote.Close()
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `server:
+  user_api: `+remote.URL+`
+defaults:
+  identity_file: ~/.ssh/local.pem
+`)
+	writeFile(t, filepath.Join(dir, "session"), "signed-session")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"list", "--config", config}); code != 0 {
+		t.Fatalf("list code = %d, err = %s", code, errOut.String())
+	}
+	text := out.String()
+	if !strings.Contains(text, "remote-usw2") || !strings.Contains(text, "Apple account: remote@example.com") {
+		t.Fatalf("list output = %q", text)
+	}
+}
+
+func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `server:
+  user_api: https://cm.example.com
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"list", "--config", config}); code == 0 {
+		t.Fatalf("list code = 0, want failure")
+	}
+	if !strings.Contains(errOut.String(), "remote profile list requires login session") {
+		t.Fatalf("err = %q", errOut.String())
 	}
 }
 
