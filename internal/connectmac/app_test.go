@@ -1074,6 +1074,12 @@ func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("Owner", "admin@example.com", "admin"); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "admin@example.com"); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
 	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"notify":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/aws/destroy", body)
 	addWebAuth(t, &app, req, "admin")
@@ -1094,6 +1100,11 @@ func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Action != "destroy" || !events[0].Confirmed || events[0].Profile != "xcode-vnc" {
 		t.Fatalf("events = %+v", events)
+	}
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if ok {
+		t.Fatalf("profile owner should be cleared after confirmed destroy")
 	}
 }
 
@@ -1116,6 +1127,11 @@ func TestAppWebOpenConfirmStartsBackgroundJobWhenRequested(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("open response missing %q:\n%s", want, text)
 		}
+	}
+	if owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if !ok || owner.Owner.Email != "admin@example.com" {
+		t.Fatalf("profile owner after open = %+v ok=%v", owner, ok)
 	}
 }
 
@@ -1170,6 +1186,11 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("operator was not assigned as owner: %+v", owners)
+	}
+	if owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if !ok || owner.Owner.Email != "operator@example.com" {
+		t.Fatalf("profile owner after operator open = %+v ok=%v", owner, ok)
 	}
 }
 

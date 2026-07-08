@@ -1066,8 +1066,8 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
-		if command == "open" && req.Confirm {
-			if err := a.assignWebOwnerForOpen(r, configPath, req.Profile, req.OwnerEmail); err != nil {
+		if req.Confirm {
+			if err := a.validateWebAWSOwner(r, command, req.OwnerEmail); err != nil {
 				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.open", Profile: req.Profile, Message: err.Error()})
 				writeWebError(w, http.StatusBadRequest, err.Error())
 				return
@@ -1079,6 +1079,12 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		}
 		if req.Confirm && req.Background {
 			resp := a.startWebAWSJob(r, configPath, command, req.Profile, req.Notify)
+			if resp.OK {
+				if err := a.afterConfirmedWebAWSAction(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
+					resp.Output = strings.TrimSpace(resp.Output+"\n"+resp.Error) + "\n负责人记录更新失败：" + err.Error()
+					resp.Error = ""
+				}
+			}
 			a.logWebResponse("web.aws."+command, req.Profile, resp)
 			a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 			writeWebJSON(w, resp)
@@ -1091,6 +1097,12 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			}
 		}
 		resp := a.webRunCommand(r, configPath, args)
+		if resp.OK && req.Confirm {
+			if err := a.afterConfirmedWebAWSAction(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
+				resp.Output = strings.TrimSpace(resp.Output+"\n"+resp.Error) + "\n负责人记录更新失败：" + err.Error()
+				resp.Error = ""
+			}
+		}
 		a.logWebResponse("web.aws."+command, req.Profile, resp)
 		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
@@ -1124,19 +1136,21 @@ func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {
 	}
 }
 
-func (a App) assignWebOwnerForOpen(r *http.Request, configPath, profileRef, ownerEmail string) error {
+func (a App) validateWebAWSOwner(r *http.Request, command, ownerEmail string) error {
 	member, ok := a.currentWebMember(r)
 	if !ok {
 		return errors.New("login required")
 	}
-	if member.Role == "admin" {
+	if command == "open" && member.Role == "admin" {
 		ownerEmail = normalizeEmail(ownerEmail)
 		if ownerEmail == "" {
 			return errors.New("owner_email is required when admin confirms open")
 		}
-	} else {
-		ownerEmail = member.Email
 	}
+	return nil
+}
+
+func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, profileRef, ownerEmail string) error {
 	cfg, err := a.loadWebConfig(r, configPath)
 	if err != nil {
 		return err
@@ -1145,11 +1159,26 @@ func (a App) assignWebOwnerForOpen(r *http.Request, configPath, profileRef, owne
 	if err != nil {
 		return err
 	}
-	if _, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
+	switch command {
+	case "open":
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			return errors.New("login required")
+		}
+		if member.Role != "admin" {
+			ownerEmail = member.Email
+		}
+		ownerEmail = normalizeEmail(ownerEmail)
+		if _, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
+			return err
+		}
+		_, err = a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
 		return err
+	case "destroy":
+		return a.MemberStore.ClearProfileOwner(profile.Name)
+	default:
+		return nil
 	}
-	_, err = a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
-	return err
 }
 
 func (a App) webJobLogHandler() http.HandlerFunc {

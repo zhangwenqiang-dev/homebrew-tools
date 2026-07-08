@@ -41,6 +41,7 @@ type MemberRepository interface {
 	ProfileOwners() ([]PublicProfileOwner, error)
 	ProfileOwner(profileName string) (PublicProfileOwner, bool, error)
 	SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error)
+	ClearProfileOwner(profileName string) error
 	ListManagedProfiles(memberEmail string) ([]ManagedProfile, error)
 	UpsertManagedProfile(profile Profile) (ManagedProfile, error)
 	SetManagedProfileEnabled(profileName string, enabled bool) (ManagedProfile, error)
@@ -532,6 +533,10 @@ func (s MemberStore) ProfileOwner(profileName string) (PublicProfileOwner, bool,
 
 func (s MemberStore) SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error) {
 	return setProfileOwnerInStore(s, profileName, memberEmail)
+}
+
+func (s MemberStore) ClearProfileOwner(profileName string) error {
+	return clearProfileOwnerInStore(s, profileName)
 }
 
 func (s MemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProfile, error) {
@@ -1191,6 +1196,25 @@ func setProfileOwnerInStore(s memberDataStore, profileName, memberEmail string) 
 		Owner:       publicMember(member),
 		UpdatedAt:   record.UpdatedAt,
 	}, nil
+}
+
+func clearProfileOwnerInStore(s memberDataStore, profileName string) error {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return errors.New("profile is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return err
+	}
+	out := db.ProfileOwners[:0]
+	for _, owner := range db.ProfileOwners {
+		if owner.ProfileName != profileName {
+			out = append(out, owner)
+		}
+	}
+	db.ProfileOwners = out
+	return s.Save(db)
 }
 
 func listManagedProfilesInStore(s memberDataStore, memberEmail string) ([]ManagedProfile, error) {

@@ -625,9 +625,8 @@
             <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
             <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
             <div class="metric admin-only">
-              <span>分配负责人</span>
+              <span>确认打开负责人</span>
               <select id="assignMemberSelect" class="inline-select"></select>
-              <button id="assignOwnerBtn">分配</button>
             </div>
           </div>
           <div class="output">
@@ -810,7 +809,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1230,16 +1229,6 @@
       }
     }
 
-    async function saveProfileOwner(profileName, memberEmail) {
-      if (!state.clientConfig?.user_api || !profileName || !memberEmail) {
-        return;
-      }
-      await api("/api/profile-owner/set", {
-        method: "POST",
-        body: JSON.stringify({ profile: profileName, member_email: memberEmail })
-      });
-    }
-
     async function loadMembers() {
       if (!isAdmin()) {
         state.members = [];
@@ -1483,7 +1472,6 @@
         "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
       ).join("") : "<option value=\"\">没有可用成员</option>";
       select.disabled = state.busy || !enabledMembers.length || !selectedProfile();
-      $("assignOwnerBtn").disabled = state.busy || !enabledMembers.length || !selectedProfile();
     }
 
     function renderSelected() {
@@ -1608,16 +1596,9 @@
           body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true, owner_email: ownerEmail })
         });
         let outputText = (body.output || "") + (body.error || "");
-        if (body.ok && confirm && command === "open" && ownerEmail) {
-          try {
-            await saveProfileOwner(p.name, ownerEmail);
-          } catch (err) {
-            outputText = outputText.trim() + "\n负责人记录写入失败：" + String(err.message || err);
-          }
-        }
         setOutput(outputText);
         setStatus(body.ok ? (confirm ? "后台任务已启动" : "预览完成") : "失败");
-        await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false)]);
+        await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false), confirm ? loadProfiles() : Promise.resolve()]);
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("失败");
@@ -2172,27 +2153,6 @@
       }
     }
 
-    async function assignOwner() {
-      const p = selectedProfile();
-      const memberEmail = $("assignMemberSelect").value;
-      if (!p || !p.apple_email || !memberEmail) return;
-      setBusy(true, "正在分配负责人...");
-      try {
-        await api("/api/member/assign", {
-          method: "POST",
-          body: JSON.stringify({ apple_email: p.apple_email, member_email: memberEmail, relation: "owner", profile: p.name })
-        });
-        await Promise.all([loadMembers(), loadProfiles()]);
-        setStatus("负责人已分配");
-      } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("负责人分配失败");
-      } finally {
-        setBusy(false);
-        renderSelected();
-      }
-    }
-
     function openProfileForm(profile = null) {
       state.editingManagedProfile = profile?.name || "";
       $("profileFormTitle").textContent = profile ? "编辑 Profile" : "添加 Profile";
@@ -2714,7 +2674,6 @@
       }
     });
     $("addMemberBtn").addEventListener("click", addMember);
-    $("assignOwnerBtn").addEventListener("click", assignOwner);
     $("eventsBtn").addEventListener("click", () => loadEvents(true));
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });

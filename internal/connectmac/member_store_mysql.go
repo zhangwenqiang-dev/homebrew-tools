@@ -451,6 +451,10 @@ func (s MySQLMemberStore) SetProfileOwner(profileName, memberEmail string) (Publ
 	return setProfileOwnerInStore(s, profileName, memberEmail)
 }
 
+func (s MySQLMemberStore) ClearProfileOwner(profileName string) error {
+	return clearProfileOwnerInStore(s, profileName)
+}
+
 func (s MySQLMemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProfile, error) {
 	return listManagedProfilesInStore(s, memberEmail)
 }
