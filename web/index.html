@@ -814,7 +814,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -910,7 +910,8 @@
       return body;
     }
 
-    async function detectLocalAgent() {
+    async function detectLocalAgent(options = {}) {
+      const wasOnline = state.localAgent.online;
       try {
         await localAgentAPI("/health");
         state.localAgent.online = true;
@@ -920,6 +921,18 @@
       renderLocalAgentStatus();
       renderProfiles();
       renderSelected();
+      if (options.reloadOnDisconnect && wasOnline && !state.localAgent.online) {
+        setStatus("本机代理已断开，正在刷新页面...");
+        setTimeout(() => window.location.reload(), 800);
+      }
+      return state.localAgent.online;
+    }
+
+    function startLocalAgentMonitor() {
+      if (state.localAgentMonitor) return;
+      state.localAgentMonitor = window.setInterval(() => {
+        detectLocalAgent({ reloadOnDisconnect: true }).catch(() => {});
+      }, 5000);
     }
 
     function renderLocalAgentStatus() {
@@ -2810,6 +2823,7 @@
     window.addEventListener("popstate", restoreBrowserHistory);
 
     renderLocalAgentStatus();
+    startLocalAgentMonitor();
     detectLocalAgent();
     loadClientConfig().then(() => loadAuth()).then((ok) => {
       if (ok) return loadAppData().then(() => detectLocalAgent());
