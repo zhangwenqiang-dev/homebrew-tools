@@ -921,9 +921,8 @@
       renderLocalAgentStatus();
       renderProfiles();
       renderSelected();
-      if (options.reloadOnDisconnect && wasOnline && !state.localAgent.online) {
-        setStatus("本机代理已断开，正在刷新页面...");
-        setTimeout(() => window.location.reload(), 800);
+      if (options.refreshOnDisconnect && wasOnline && !state.localAgent.online) {
+        setStatus("本机代理已断开，已刷新本地操作状态");
       }
       return state.localAgent.online;
     }
@@ -931,7 +930,7 @@
     function startLocalAgentMonitor() {
       if (state.localAgentMonitor) return;
       state.localAgentMonitor = window.setInterval(() => {
-        detectLocalAgent({ reloadOnDisconnect: true }).catch(() => {});
+        detectLocalAgent({ refreshOnDisconnect: true }).catch(() => {});
       }, 5000);
     }
 
