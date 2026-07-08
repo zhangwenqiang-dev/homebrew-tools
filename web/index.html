@@ -468,6 +468,22 @@
       </div>
     </div>
   </div>
+  <div id="awsConfirmLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="awsConfirmTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="awsConfirmTitle">操作预览</h2>
+        <button id="awsConfirmCloseBtn">关闭</button>
+      </div>
+      <div class="output">
+        <div id="awsConfirmHint" class="status-line"></div>
+        <pre id="awsConfirmOutput"></pre>
+      </div>
+      <div class="picker-actions">
+        <button id="cancelAWSConfirmBtn">取消</button>
+        <button id="runAWSConfirmBtn" class="primary">确认执行</button>
+      </div>
+    </div>
+  </div>
   <div id="memberFormLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="memberFormTitle">
     <div class="picker-card">
       <div class="section-head">
@@ -609,10 +625,8 @@
             <div class="toolbar">
               <button id="backHomeBtn">返回首页</button>
               <button id="statusBtn">状态</button>
-              <button id="previewOpenBtn">预览打开</button>
-              <button id="confirmOpenBtn" class="primary">确认打开</button>
-              <button id="previewDestroyBtn">预览释放</button>
-              <button id="confirmDestroyBtn" class="danger">确认释放</button>
+              <button id="openMacBtn" class="primary">打开</button>
+              <button id="releaseMacBtn" class="danger">释放</button>
               <button id="syncBtn" class="local-action">传输</button>
               <button id="terminalBtn" class="local-action">连接</button>
               <button id="eventsBtn">事件</button>
@@ -800,7 +814,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -809,7 +823,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1487,10 +1501,8 @@
       for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
-      $("previewOpenBtn").disabled = openDisabled;
-      $("confirmOpenBtn").disabled = openDisabled;
-      $("previewDestroyBtn").disabled = destroyDisabled;
-      $("confirmDestroyBtn").disabled = destroyDisabled;
+      $("openMacBtn").disabled = openDisabled;
+      $("releaseMacBtn").disabled = destroyDisabled;
       $("syncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled;
       $("syncPullBtn").disabled = readyActionDisabled;
@@ -1587,7 +1599,6 @@
         setStatus("管理员确认打开前必须选择负责人");
         return;
       }
-      if (confirm && !confirmAWS(command, p)) return;
       setBusy(true, confirm ? "正在启动后台任务..." : "正在生成预览...");
       setStatus(confirm ? "后台任务启动中..." : "预览中...");
       try {
@@ -1607,6 +1618,63 @@
         renderProfiles();
         renderSelected();
       }
+    }
+
+    async function previewAWS(command) {
+      const p = selectedProfile();
+      if (!p) return;
+      state.pendingAWS = null;
+      closeAWSConfirm();
+      setBusy(true, command === "open" ? "正在预览打开..." : "正在预览释放...");
+      setStatus(command === "open" ? "预览打开中..." : "预览释放中...");
+      try {
+        const ownerEmail = $("assignMemberSelect").value;
+        const body = await api("/api/aws/" + command, {
+          method: "POST",
+          body: JSON.stringify({ profile: p.name, confirm: false, background: false, notify: true, owner_email: ownerEmail })
+        });
+        const outputText = (body.output || "") + (body.error || "");
+        setOutput(outputText);
+        state.pendingAWS = { command, profile: p.name };
+        showAWSConfirm(command, p, outputText);
+        setStatus(command === "open" ? "打开预览完成" : "释放预览完成");
+        await Promise.all([refreshStatus(p.name, false), loadEvents(false)]);
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus(command === "open" ? "打开预览失败" : "释放预览失败");
+      } finally {
+        setBusy(false);
+        renderProfiles();
+        renderSelected();
+      }
+    }
+
+    function showAWSConfirm(command, profile, outputText) {
+      const isDestroy = command === "destroy";
+      $("awsConfirmTitle").textContent = isDestroy ? "释放预览" : "打开预览";
+      const email = profile.apple_email || profile.name;
+      const owner = !isDestroy && isAdmin() ? "负责人：" + ($("assignMemberSelect").selectedOptions[0]?.textContent || $("assignMemberSelect").value || "-") + "。" : "";
+      $("awsConfirmHint").textContent = (isDestroy ? "确认释放 " : "确认打开 ") + email + " 的 Mac？" + owner;
+      $("awsConfirmOutput").textContent = outputText || "";
+      $("runAWSConfirmBtn").textContent = isDestroy ? "确认释放" : "确认打开";
+      $("runAWSConfirmBtn").classList.toggle("danger", isDestroy);
+      $("runAWSConfirmBtn").classList.toggle("primary", !isDestroy);
+      $("awsConfirmLayer").classList.remove("hidden");
+    }
+
+    function closeAWSConfirm() {
+      $("awsConfirmLayer").classList.add("hidden");
+    }
+
+    async function confirmPendingAWS() {
+      const pending = state.pendingAWS;
+      if (!pending) {
+        closeAWSConfirm();
+        return;
+      }
+      closeAWSConfirm();
+      await runAWS(pending.command, true);
+      state.pendingAWS = null;
     }
 
     async function startTunnel(profile) {
@@ -1961,15 +2029,6 @@
         return event.key;
       }
       return "";
-    }
-
-    function confirmAWS(command, profile) {
-      const email = profile.apple_email || profile.name;
-      if (command === "destroy") {
-        return window.confirm("确认释放 " + email + " 的 Mac？\n\nElastic IP 会保留。\n该操作会启动后台任务。");
-      }
-      const owner = isAdmin() ? ("\n负责人：" + ($("assignMemberSelect").selectedOptions[0]?.textContent || $("assignMemberSelect").value)) : "";
-      return window.confirm("确认打开 " + email + " 的 Mac？" + owner + "\n\n如果需要创建或等待资源，会启动后台任务。");
     }
 
     async function loadStatus() {
@@ -2680,10 +2739,17 @@
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("backHomeBtn").addEventListener("click", () => showView("profilesView"));
     $("statusBtn").addEventListener("click", loadStatus);
-    $("previewOpenBtn").addEventListener("click", () => runAWS("open", false));
-    $("confirmOpenBtn").addEventListener("click", () => runAWS("open", true));
-    $("previewDestroyBtn").addEventListener("click", () => runAWS("destroy", false));
-    $("confirmDestroyBtn").addEventListener("click", () => runAWS("destroy", true));
+    $("openMacBtn").addEventListener("click", () => previewAWS("open"));
+    $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
+    $("runAWSConfirmBtn").addEventListener("click", confirmPendingAWS);
+    $("cancelAWSConfirmBtn").addEventListener("click", () => { state.pendingAWS = null; closeAWSConfirm(); });
+    $("awsConfirmCloseBtn").addEventListener("click", () => { state.pendingAWS = null; closeAWSConfirm(); });
+    $("awsConfirmLayer").addEventListener("click", (event) => {
+      if (event.target === $("awsConfirmLayer")) {
+        state.pendingAWS = null;
+        closeAWSConfirm();
+      }
+    });
     $("syncBtn").addEventListener("click", () => {
       const p = selectedProfile();
       if (!p) return;
