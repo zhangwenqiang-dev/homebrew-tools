@@ -2105,11 +2105,8 @@
           method: "POST",
           body: JSON.stringify(editingEmail ? { original_email: editingEmail, name, email, role } : { name, email, role, password })
         });
-        $("memberName").value = "";
-        $("memberEmail").value = "";
-        $("memberPassword").value = "";
-        closeMemberForm();
         await loadMembers();
+        closeMemberForm();
         setStatus(editingEmail ? "成员已保存" : "成员已添加");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -2177,6 +2174,7 @@
           method: "POST",
           body: JSON.stringify({ email, password })
         });
+        await loadMembers();
         closeMemberPasswordEditor();
         setStatus("成员密码已修改");
       } catch (err) {
