@@ -620,28 +620,19 @@ func (a App) webMemberTokenHandler() http.HandlerFunc {
 			return
 		}
 		var req struct {
-			Email string `json:"email"`
+			Email  string `json:"email"`
+			Action string `json:"action"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
-		db, err := a.MemberStore.Load()
+		data, err := a.applyWebAPITokenAction(req.Email, req.Action)
 		if err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
+			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		member, ok := findMemberByEmailOrUsername(db, req.Email)
-		if !ok || !member.Enabled {
-			writeWebError(w, http.StatusBadRequest, "member not found or disabled")
-			return
-		}
-		token, err := a.newWebAPIToken(member)
-		if err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"token": token, "member": publicMember(member)}})
+		writeWebJSON(w, webAPIResponse{OK: true, Data: data})
 	}
 }
 

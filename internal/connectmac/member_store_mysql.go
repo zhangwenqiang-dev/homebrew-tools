@@ -73,6 +73,11 @@ func (s MySQLMemberStore) open() (*sql.DB, error) {
 	return db, nil
 }
 
+func mysqlColumnExistsError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1060
+}
+
 func (s MySQLMemberStore) EnsureSchema() error {
 	db, err := s.open()
 	if err != nil {
@@ -89,6 +94,8 @@ func (s MySQLMemberStore) EnsureSchema() error {
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			password_hash TEXT NULL,
 			password_salt TEXT NULL,
+			api_token_hash TEXT NULL,
+			api_token_at VARCHAR(64) NULL,
 			created_at VARCHAR(64) NOT NULL,
 			updated_at VARCHAR(64) NOT NULL
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
@@ -145,6 +152,14 @@ func (s MySQLMemberStore) EnsureSchema() error {
 			return err
 		}
 	}
+	for _, stmt := range []string{
+		`ALTER TABLE cm_members ADD COLUMN api_token_hash TEXT NULL`,
+		`ALTER TABLE cm_members ADD COLUMN api_token_at VARCHAR(64) NULL`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !mysqlColumnExistsError(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -158,13 +173,13 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 	}
 	defer db.Close()
 	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
-	rows, err := db.Query(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), created_at, updated_at FROM cm_members ORDER BY email`)
+	rows, err := db.Query(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), COALESCE(api_token_hash, ''), COALESCE(api_token_at, ''), created_at, updated_at FROM cm_members ORDER BY email`)
 	if err != nil {
 		return MemberData{}, err
 	}
 	for rows.Next() {
 		var member Member
-		if err := rows.Scan(&member.ID, &member.Name, &member.Email, &member.Username, &member.Role, &member.Enabled, &member.PasswordHash, &member.PasswordSalt, &member.CreatedAt, &member.UpdatedAt); err != nil {
+		if err := rows.Scan(&member.ID, &member.Name, &member.Email, &member.Username, &member.Role, &member.Enabled, &member.PasswordHash, &member.PasswordSalt, &member.APITokenHash, &member.APITokenAt, &member.CreatedAt, &member.UpdatedAt); err != nil {
 			rows.Close()
 			return MemberData{}, err
 		}
@@ -299,8 +314,8 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 		}
 	}
 	for _, member := range data.Members {
-		if _, err := tx.Exec(`INSERT INTO cm_members (id, name, email, username, role, enabled, password_hash, password_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			member.ID, member.Name, member.Email, member.Username, member.Role, member.Enabled, member.PasswordHash, member.PasswordSalt, member.CreatedAt, member.UpdatedAt); err != nil {
+		if _, err := tx.Exec(`INSERT INTO cm_members (id, name, email, username, role, enabled, password_hash, password_salt, api_token_hash, api_token_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			member.ID, member.Name, member.Email, member.Username, member.Role, member.Enabled, member.PasswordHash, member.PasswordSalt, member.APITokenHash, member.APITokenAt, member.CreatedAt, member.UpdatedAt); err != nil {
 			return err
 		}
 	}

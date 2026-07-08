@@ -481,6 +481,8 @@
       </div>
       <div class="picker-actions">
         <button id="copyAPITokenBtn">复制</button>
+        <button id="regenerateAPITokenBtn">重新生成</button>
+        <button id="deleteAPITokenBtn" class="danger">删除 token</button>
         <button id="closeAPITokenBtn" class="primary">完成</button>
       </div>
     </div>
@@ -834,7 +836,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -843,7 +845,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1391,7 +1393,7 @@
           "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" +
           "<button data-member-edit=\"" + escapeAttr(member.email || "") + "\">修改</button>" +
           "<button data-member-password=\"" + escapeAttr(member.email || "") + "\">改密码</button>" +
-          "<button data-member-token=\"" + escapeAttr(member.email || "") + "\">令牌</button>" +
+          "<button data-member-token=\"" + escapeAttr(member.email || "") + "\">" + (member.has_api_token ? "令牌已生成" : "生成令牌") + "</button>" +
           "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" +
           "</div>" : "-";
         return "<tr>" +
@@ -1568,6 +1570,7 @@
       $("userEmailValue").textContent = member.email || "-";
       $("userRoleValue").textContent = member.role || "-";
       $("userSelectedProfileValue").textContent = p ? `${p.name} · ${p.apple_email || "-"}` : "-";
+      $("generateOwnTokenBtn").textContent = member.has_api_token ? "查看令牌" : "生成令牌";
     }
 
     function statusBadge(status) {
@@ -2257,41 +2260,62 @@
     }
 
     async function generateOwnToken() {
-      setBusy(true, "正在生成令牌...");
-      try {
-        const body = await api("/api/auth/token", { method: "POST", body: "{}" });
-        showAPIToken(state.auth?.member || {}, body.data?.token || "");
-        setStatus("令牌已生成");
-      } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("令牌生成失败");
-      } finally {
-        setBusy(false);
+      const member = state.auth?.member || {};
+      if (member.has_api_token) {
+        showAPIToken(member, "");
+        return;
       }
+      await runAPITokenAction("generate", true, member.email);
     }
 
     async function generateMemberToken(email) {
       if (!isAdmin() || !email) return;
-      setBusy(true, "正在生成成员令牌...");
+      const member = state.members.find((item) => item.email === email) || { email };
+      if (member.has_api_token) {
+        showAPIToken(member, "");
+        return;
+      }
+      await runAPITokenAction("generate", false, email);
+    }
+
+    async function runAPITokenAction(action, self, email) {
+      setBusy(true, action === "delete" ? "正在删除令牌..." : "正在生成令牌...");
       try {
-        const body = await api("/api/member/token", {
+        const body = await api(self ? "/api/auth/token" : "/api/member/token", {
           method: "POST",
-          body: JSON.stringify({ email })
+          body: JSON.stringify(self ? { action } : { email, action })
         });
-        showAPIToken(body.data?.member || { email }, body.data?.token || "");
-        setStatus("成员令牌已生成");
+        const member = body.data?.member || { email };
+        if (self) state.auth.member = member;
+        else await loadMembers();
+        showAPIToken(member, body.data?.token || "");
+        setStatus(action === "delete" ? "令牌已删除" : "令牌已生成");
       } catch (err) {
         setOutput(String(err.message || err));
-        setStatus("成员令牌生成失败");
+        setStatus(action === "delete" ? "令牌删除失败" : "令牌生成失败");
       } finally {
         setBusy(false);
+        renderUser();
+        renderMembers();
       }
     }
 
     function showAPIToken(member, token) {
       const userAPI = (state.clientConfig?.user_api || window.location.origin || "").replace(/\/+$/, "");
+      state.selectedTokenEmail = member.email || "";
+      state.selectedTokenSelf = state.auth?.member?.email === member.email;
       $("apiTokenMember").textContent = (member.name || member.email || "-") + " · " + (member.email || "-");
-      $("apiTokenOutput").textContent = "server:\n  user_api: " + userAPI + "\n  token: " + token + "\n";
+      if (token) {
+        $("apiTokenOutput").textContent = "server:\n  user_api: " + userAPI + "\n  token: " + token + "\n";
+        $("copyAPITokenBtn").disabled = false;
+      } else if (member.has_api_token) {
+        $("apiTokenOutput").textContent = "令牌已生成" + (member.api_token_at ? "\n生成时间: " + member.api_token_at : "") + "\n\n出于安全原因，旧 token 明文不会再次显示。";
+        $("copyAPITokenBtn").disabled = true;
+      } else {
+        $("apiTokenOutput").textContent = "还没有生成令牌。";
+        $("copyAPITokenBtn").disabled = true;
+      }
+      $("deleteAPITokenBtn").disabled = !member.has_api_token && !token;
       $("apiTokenLayer").classList.remove("hidden");
     }
 
@@ -2299,6 +2323,8 @@
       $("apiTokenLayer").classList.add("hidden");
       $("apiTokenMember").textContent = "";
       $("apiTokenOutput").textContent = "";
+      state.selectedTokenEmail = "";
+      state.selectedTokenSelf = false;
     }
 
     async function copyAPIToken() {
@@ -2311,6 +2337,16 @@
         setOutput(text);
         setStatus("复制失败，已输出到日志区域");
       }
+    }
+
+    function regenerateAPIToken() {
+      if (!state.selectedTokenEmail) return;
+      runAPITokenAction("generate", state.selectedTokenSelf, state.selectedTokenEmail);
+    }
+
+    function deleteAPIToken() {
+      if (!state.selectedTokenEmail) return;
+      runAPITokenAction("delete", state.selectedTokenSelf, state.selectedTokenEmail);
     }
 
     function openProfileForm(profile = null) {
@@ -2806,6 +2842,8 @@
       if (event.target === $("ownPasswordLayer")) closeOwnPasswordEditor();
     });
     $("copyAPITokenBtn").addEventListener("click", copyAPIToken);
+    $("regenerateAPITokenBtn").addEventListener("click", regenerateAPIToken);
+    $("deleteAPITokenBtn").addEventListener("click", deleteAPIToken);
     $("closeAPITokenBtn").addEventListener("click", closeAPIToken);
     $("apiTokenCloseBtn").addEventListener("click", closeAPIToken);
     $("apiTokenLayer").addEventListener("click", (event) => {

@@ -259,12 +259,16 @@ func (a App) webAuthTokenHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
 		}
-		token, err := a.newWebAPIToken(member)
+		var req struct {
+			Action string `json:"action"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		data, err := a.applyWebAPITokenAction(member.Email, req.Action)
 		if err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"token": token}})
+		writeWebJSON(w, webAPIResponse{OK: true, Data: data})
 	}
 }
 
@@ -359,15 +363,11 @@ func (a App) currentWebTokenMember(r *http.Request) (Member, bool) {
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return Member{}, false
 	}
-	email, ok := a.verifyWebAPIToken(parts[1])
-	if !ok {
-		return Member{}, false
-	}
 	db, err := a.MemberStore.Load()
 	if err != nil {
 		return Member{}, false
 	}
-	member, ok := findMemberByEmailOrUsername(db, email)
+	member, ok := verifyMemberAPIToken(db, parts[1])
 	if !ok || !member.Enabled {
 		return Member{}, false
 	}
@@ -463,44 +463,82 @@ func (a App) verifyWebSession(value string) (string, bool) {
 	return parts[0], true
 }
 
-func (a App) newWebAPIToken(member Member) (string, error) {
-	secret, err := a.MemberStore.EnsureAuthSecret()
-	if err != nil {
-		return "", err
+func (a App) applyWebAPITokenAction(email, action string) (map[string]interface{}, error) {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "generate"
 	}
-	nonce, err := randomToken(18)
+	db, err := a.MemberStore.Load()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	issuedAt := strconv.FormatInt(time.Now().Unix(), 10)
-	payload := normalizeEmail(member.Email) + "|" + issuedAt + "|" + nonce
-	sig := signWebValue(secret, payload)
-	return webAPITokenPrefix + base64.RawURLEncoding.EncodeToString([]byte(payload+"|"+sig)), nil
+	idx, ok := findMemberIndexByEmailOrUsername(db, email)
+	if !ok || !db.Members[idx].Enabled {
+		return nil, errors.New("member not found or disabled")
+	}
+	member := db.Members[idx]
+	data := map[string]interface{}{"member": publicMember(member)}
+	switch action {
+	case "status":
+		return data, nil
+	case "delete":
+		member.APITokenHash = ""
+		member.APITokenAt = ""
+	case "generate":
+		token, err := newMemberAPIToken(member)
+		if err != nil {
+			return nil, err
+		}
+		member.APITokenHash = hashAPIToken(token)
+		member.APITokenAt = time.Now().Format(time.RFC3339)
+		data["token"] = token
+	default:
+		return nil, fmt.Errorf("unknown token action %q", action)
+	}
+	member.UpdatedAt = time.Now().Format(time.RFC3339)
+	db.Members[idx] = member
+	if err := a.MemberStore.Save(db); err != nil {
+		return nil, err
+	}
+	data["member"] = publicMember(member)
+	return data, nil
 }
 
-func (a App) verifyWebAPIToken(value string) (string, bool) {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, webAPITokenPrefix) {
-		value = strings.TrimPrefix(value, webAPITokenPrefix)
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(value)
+func newMemberAPIToken(member Member) (string, error) {
+	nonce, err := randomToken(32)
 	if err != nil {
-		return "", false
+		return "", err
+	}
+	payload := member.ID + "|" + nonce
+	return webAPITokenPrefix + base64.RawURLEncoding.EncodeToString([]byte(payload)), nil
+}
+
+func verifyMemberAPIToken(db MemberData, value string) (Member, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, webAPITokenPrefix) {
+		return Member{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, webAPITokenPrefix))
+	if err != nil {
+		return Member{}, false
 	}
 	parts := strings.Split(string(raw), "|")
-	if len(parts) != 4 {
-		return "", false
+	if len(parts) != 2 {
+		return Member{}, false
 	}
-	secret, err := a.MemberStore.EnsureAuthSecret()
-	if err != nil {
-		return "", false
+	member, ok := findMemberByID(db, parts[0])
+	if !ok || member.APITokenHash == "" {
+		return Member{}, false
 	}
-	payload := parts[0] + "|" + parts[1] + "|" + parts[2]
-	expected := signWebValue(secret, payload)
-	if !hmac.Equal([]byte(expected), []byte(parts[3])) {
-		return "", false
+	if !hmac.Equal([]byte(member.APITokenHash), []byte(hashAPIToken(value))) {
+		return Member{}, false
 	}
-	return parts[0], true
+	return member, true
+}
+
+func hashAPIToken(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func (a App) newWebChallenge() (map[string]string, error) {

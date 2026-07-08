@@ -76,6 +76,8 @@ type Member struct {
 	Enabled      bool   `json:"enabled"`
 	PasswordHash string `json:"password_hash,omitempty"`
 	PasswordSalt string `json:"password_salt,omitempty"`
+	APITokenHash string `json:"api_token_hash,omitempty"`
+	APITokenAt   string `json:"api_token_at,omitempty"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
 }
@@ -142,6 +144,8 @@ type PublicMember struct {
 	Role        string `json:"role"`
 	Enabled     bool   `json:"enabled"`
 	HasPassword bool   `json:"has_password"`
+	HasAPIToken bool   `json:"has_api_token"`
+	APITokenAt  string `json:"api_token_at,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 }
@@ -757,6 +761,8 @@ func publicMember(member Member) PublicMember {
 		Role:        member.Role,
 		Enabled:     member.Enabled,
 		HasPassword: member.PasswordHash != "" && member.PasswordSalt != "",
+		HasAPIToken: member.APITokenHash != "",
+		APITokenAt:  member.APITokenAt,
 		CreatedAt:   member.CreatedAt,
 		UpdatedAt:   member.UpdatedAt,
 	}

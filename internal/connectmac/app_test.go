@@ -544,6 +544,20 @@ func TestAppWebAPITokenCanListManagedProfiles(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "token-usw2") {
 		t.Fatalf("token list body = %s status=%d", rec.Body.String(), rec.Code)
 	}
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/token", strings.NewReader(`{"action":"delete"}`))
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/managed-profiles?include_yaml=1", nil)
+	req.Header.Set("Authorization", "Bearer "+bodyResp.Data.Token)
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("deleted token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestAppWebMemberProfilesAPIReplacesMemberAccess(t *testing.T) {
