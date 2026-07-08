@@ -793,6 +793,18 @@ func TestAppWebMemberAPIs(t *testing.T) {
 		t.Fatalf("add status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
+	body = strings.NewReader(`{"email":"whh@example.com","password":"newpassword123"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/member/password", body)
+	addWebAuth(t, &app, req, "admin")
+	rec = httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set member password status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok, err := app.MemberStore.VerifyMemberPassword("whh@example.com", "newpassword123"); err != nil || !ok {
+		t.Fatalf("member password not updated ok=%t err=%v", ok, err)
+	}
+
 	body = strings.NewReader(`{"apple_email":"user@example.com","member_email":"whh@example.com","relation":"owner"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/member/assign", body)
 	addWebAuth(t, &app, req, "admin")
@@ -903,6 +915,19 @@ func TestAppWebAuthSetupLoginAndSettings(t *testing.T) {
 	_, ok, err := app.MemberStore.VerifyMemberPassword("new-admin@example.com", "password123")
 	if err != nil || !ok {
 		t.Fatalf("updated email login failed ok=%t err=%v", ok, err)
+	}
+
+	body = strings.NewReader(`{"current_password":"password123","new_password":"newpassword123","confirm_password":"newpassword123"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/change-password", body)
+	req.AddCookie(updatedCookies[0])
+	rec = httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("change password status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	_, ok, err = app.MemberStore.VerifyMemberPassword("new-admin@example.com", "newpassword123")
+	if err != nil || !ok {
+		t.Fatalf("changed password login failed ok=%t err=%v", ok, err)
 	}
 }
 

@@ -623,6 +623,15 @@
             <div class="metric"><span>角色</span><strong id="userRoleValue">-</strong></div>
             <div class="metric"><span>当前 Profile</span><strong id="userSelectedProfileValue">-</strong></div>
           </div>
+          <div class="section-head">
+            <h2>修改密码</h2>
+            <button id="changeOwnPasswordBtn" class="primary">保存新密码</button>
+          </div>
+          <div class="settings-form">
+            <input id="userCurrentPassword" type="password" placeholder="当前密码">
+            <input id="userNewPassword" type="password" placeholder="新密码，至少 8 位">
+            <input id="userConfirmPassword" type="password" placeholder="再次输入新密码">
+          </div>
         </section>
 
         <section id="userManagementView" class="view hidden">
@@ -715,7 +724,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -737,6 +746,9 @@
         button.disabled = busy;
       });
       document.querySelectorAll("[data-member-profiles]").forEach((button) => {
+        button.disabled = busy;
+      });
+      document.querySelectorAll("[data-member-password], [data-member-toggle]").forEach((button) => {
         button.disabled = busy;
       });
       $("loadingTitle").textContent = message;
@@ -1218,11 +1230,14 @@
           "<td><div class=\"name\">" + escapeHTML(member.name || "-") + "</div><div class=\"muted\">" + escapeHTML(member.email || "-") + "</div></td>" +
           "<td>" + escapeHTML(member.role || "-") + "</td>" +
           "<td><div class=\"profile-access\">" + profileSummary + (isAdmin() ? "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" : "") + "</div></td>" +
-          "<td>" + (isAdmin() ? "<button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button>" : escapeHTML(member.enabled ? "启用" : "停用")) + "</td>" +
+          "<td>" + (isAdmin() ? "<div class=\"row-actions\"><button data-member-password=\"" + escapeAttr(member.email || "") + "\">改密码</button><button data-member-toggle=\"" + escapeAttr(member.email || "") + "\" data-enabled=\"" + String(!!member.enabled) + "\">" + (member.enabled ? "停用" : "启用") + "</button></div>" : escapeHTML(member.enabled ? "启用" : "停用")) + "</td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
       document.querySelectorAll("[data-member-toggle]").forEach((button) => {
         button.addEventListener("click", () => toggleMember(button.getAttribute("data-member-toggle"), button.getAttribute("data-enabled") === "true"));
+      });
+      document.querySelectorAll("[data-member-password]").forEach((button) => {
+        button.addEventListener("click", () => resetMemberPassword(button.getAttribute("data-member-password")));
       });
       document.querySelectorAll("[data-member-profiles]").forEach((button) => {
         button.addEventListener("click", () => openMemberProfileEditor(button.getAttribute("data-member-profiles")));
@@ -1835,6 +1850,60 @@
       }
     }
 
+    async function resetMemberPassword(email) {
+      if (!email) return;
+      const password = window.prompt("请输入 " + email + " 的新密码（至少 8 位）：");
+      if (password === null) return;
+      if (!password) {
+        setStatus("新密码不能为空");
+        return;
+      }
+      setBusy(true, "正在修改成员密码...");
+      try {
+        await api("/api/member/password", {
+          method: "POST",
+          body: JSON.stringify({ email, password })
+        });
+        setStatus("成员密码已修改");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("成员密码修改失败");
+      } finally {
+        setBusy(false);
+        renderMembers();
+      }
+    }
+
+    async function changeOwnPassword() {
+      const current = $("userCurrentPassword").value;
+      const next = $("userNewPassword").value;
+      const confirm = $("userConfirmPassword").value;
+      if (!current || !next || !confirm) {
+        setStatus("当前密码和新密码都必填");
+        return;
+      }
+      if (next !== confirm) {
+        setStatus("两次输入的新密码不一致");
+        return;
+      }
+      setBusy(true, "正在修改密码...");
+      try {
+        await api("/api/auth/change-password", {
+          method: "POST",
+          body: JSON.stringify({ current_password: current, new_password: next, confirm_password: confirm })
+        });
+        $("userCurrentPassword").value = "";
+        $("userNewPassword").value = "";
+        $("userConfirmPassword").value = "";
+        setStatus("密码已修改");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("密码修改失败");
+      } finally {
+        setBusy(false);
+      }
+    }
+
     async function assignOwner() {
       const p = selectedProfile();
       const memberEmail = $("assignMemberSelect").value;
@@ -2326,6 +2395,7 @@
       }
     });
     $("currentUserBtn").addEventListener("click", () => showView("userView"));
+    $("changeOwnPasswordBtn").addEventListener("click", changeOwnPassword);
     $("refreshMembers").addEventListener("click", async () => {
       setBusy(true, "正在刷新成员...");
       try {

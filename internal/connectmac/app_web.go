@@ -183,6 +183,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler(configPath))
 	mux.HandleFunc("/api/auth/login", a.webAuthLoginHandler(configPath))
 	mux.HandleFunc("/api/auth/logout", a.webAuthLogoutHandler())
+	mux.HandleFunc("/api/auth/change-password", a.requireWebRole(a.webAuthChangePasswordHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/config", a.webConfigHandler(configPath))
 	mux.HandleFunc("/api/user-proxy/", a.webUserProxyHandler(configPath))
 	mux.HandleFunc("/api/auth/update-email", a.requireWebRole(a.webAuthUpdateEmailHandler(), "admin"))
@@ -190,6 +191,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/profiles", a.requireWebRole(a.webProfilesHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/members", a.requireWebRole(a.webMembersHandler(), "admin"))
 	mux.HandleFunc("/api/member/add", a.requireWebRole(a.webMemberAddHandler(), "admin"))
+	mux.HandleFunc("/api/member/password", a.requireWebRole(a.webMemberPasswordHandler(), "admin"))
 	mux.HandleFunc("/api/member/enable", a.requireWebRole(a.webMemberEnabledHandler(true), "admin"))
 	mux.HandleFunc("/api/member/disable", a.requireWebRole(a.webMemberEnabledHandler(false), "admin"))
 	mux.HandleFunc("/api/member/assign", a.requireWebRole(a.webMemberAssignHandler(false), "admin"))
@@ -549,6 +551,32 @@ func (a App) webMemberAddHandler() http.HandlerFunc {
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"member": member}})
+	}
+}
+
+func (a App) webMemberPasswordHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if strings.TrimSpace(req.Email) == "" {
+			writeWebError(w, http.StatusBadRequest, "member email is required")
+			return
+		}
+		if err := a.MemberStore.SetMemberPassword(req.Email, req.Password); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
 	}
 }
 

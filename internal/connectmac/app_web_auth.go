@@ -206,6 +206,47 @@ func (a App) webAuthUpdateEmailHandler() http.HandlerFunc {
 	}
 }
 
+func (a App) webAuthChangePasswordHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.requireWebRoleValue(r, "viewer", "operator", "admin")
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		var req struct {
+			CurrentPassword string `json:"current_password"`
+			NewPassword     string `json:"new_password"`
+			ConfirmPassword string `json:"confirm_password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if req.NewPassword != req.ConfirmPassword {
+			writeWebError(w, http.StatusBadRequest, "new passwords do not match")
+			return
+		}
+		_, verified, err := a.MemberStore.VerifyMemberPassword(member.Email, req.CurrentPassword)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !verified {
+			writeWebError(w, http.StatusUnauthorized, "current password is incorrect")
+			return
+		}
+		if err := a.MemberStore.SetMemberPassword(member.Email, req.NewPassword); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
+	}
+}
+
 func (a App) webSettingsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
