@@ -393,6 +393,23 @@
       </div>
     </div>
   </div>
+  <div id="memberPasswordLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="memberPasswordTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="memberPasswordTitle">修改成员密码</h2>
+        <button id="memberPasswordCloseBtn">关闭</button>
+      </div>
+      <div id="memberPasswordMember" class="picker-path"></div>
+      <div class="profile-form-grid">
+        <label class="wide">新密码<input id="memberNewPassword" type="password" placeholder="至少 8 位"></label>
+        <label class="wide">确认新密码<input id="memberConfirmPassword" type="password" placeholder="再次输入新密码"></label>
+      </div>
+      <div class="picker-actions">
+        <button id="cancelMemberPasswordBtn">取消</button>
+        <button id="saveMemberPasswordBtn" class="primary">保存密码</button>
+      </div>
+    </div>
+  </div>
   <div id="profileFormLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="profileFormTitle">
     <div class="picker-card">
       <div class="section-head">
@@ -715,7 +732,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -724,7 +741,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1852,10 +1869,33 @@
 
     async function resetMemberPassword(email) {
       if (!email) return;
-      const password = window.prompt("请输入 " + email + " 的新密码（至少 8 位）：");
-      if (password === null) return;
-      if (!password) {
+      state.selectedMemberPasswordEmail = email;
+      $("memberPasswordMember").textContent = email;
+      $("memberNewPassword").value = "";
+      $("memberConfirmPassword").value = "";
+      $("memberPasswordLayer").classList.remove("hidden");
+      setTimeout(() => $("memberNewPassword").focus(), 0);
+    }
+
+    function closeMemberPasswordEditor() {
+      state.selectedMemberPasswordEmail = "";
+      $("memberPasswordLayer").classList.add("hidden");
+      $("memberPasswordMember").textContent = "";
+      $("memberNewPassword").value = "";
+      $("memberConfirmPassword").value = "";
+    }
+
+    async function saveMemberPassword() {
+      const email = state.selectedMemberPasswordEmail;
+      const password = $("memberNewPassword").value;
+      const confirm = $("memberConfirmPassword").value;
+      if (!email) return;
+      if (!password || !confirm) {
         setStatus("新密码不能为空");
+        return;
+      }
+      if (password !== confirm) {
+        setStatus("两次输入的新密码不一致");
         return;
       }
       setBusy(true, "正在修改成员密码...");
@@ -1864,6 +1904,7 @@
           method: "POST",
           body: JSON.stringify({ email, password })
         });
+        closeMemberPasswordEditor();
         setStatus("成员密码已修改");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -2380,6 +2421,17 @@
     $("clearMemberProfilesBtn").addEventListener("click", () => setMemberProfileSelections(false));
     $("memberProfileLayer").addEventListener("click", (event) => {
       if (event.target === $("memberProfileLayer")) closeMemberProfileEditor();
+    });
+    $("saveMemberPasswordBtn").addEventListener("click", saveMemberPassword);
+    $("cancelMemberPasswordBtn").addEventListener("click", closeMemberPasswordEditor);
+    $("memberPasswordCloseBtn").addEventListener("click", closeMemberPasswordEditor);
+    $("memberPasswordLayer").addEventListener("click", (event) => {
+      if (event.target === $("memberPasswordLayer")) closeMemberPasswordEditor();
+    });
+    ["memberNewPassword", "memberConfirmPassword"].forEach((id) => {
+      $(id).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") saveMemberPassword();
+      });
     });
     $("refreshManagedProfilesBtn").addEventListener("click", async () => {
       setBusy(true, "正在刷新 Profile...");
