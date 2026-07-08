@@ -137,6 +137,8 @@
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.danger { background: var(--danger-quiet); border-color: #fecdca; color: var(--danger); }
     button:disabled { opacity: .55; cursor: default; }
+    body.local-agent-off .local-action { display: none !important; }
+    .local-agent-status { font-size: 12px; color: var(--muted); }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th, td {
       padding: 8px 9px;
@@ -393,7 +395,7 @@
     }
   </style>
 </head>
-<body>
+<body class="local-agent-off">
   <div id="loadingLayer" class="loading-layer hidden" aria-live="polite" aria-busy="true">
     <div class="loading-card">
       <span class="spinner"></span>
@@ -499,6 +501,7 @@
         <label>Apple 邮箱<input id="profileFormAppleEmail" placeholder="user@example.com"></label>
         <label class="wide">描述<input id="profileFormDescription" placeholder="苹果账号：user@example.com"></label>
         <label>SSH User<input id="profileFormUser" placeholder="ec2-user"></label>
+        <label>Identity File<input id="profileFormIdentityFile" placeholder="~/.ssh/maiqi-xcode.pem"></label>
         <label>Host<input id="profileFormHost" placeholder="ec2-1-2-3-4.us-west-2.compute.amazonaws.com"></label>
         <label>AWS Profile<input id="profileFormAWSProfile" placeholder="cm-user"></label>
         <label>Region<input id="profileFormRegion" placeholder="us-west-2"></label>
@@ -551,6 +554,7 @@
     <header>
       <h1>ConnectMac</h1>
       <div class="toolbar">
+        <span id="localAgentStatus" class="local-agent-status">本机代理未启动</span>
         <button id="currentUserBtn" class="user-button" title="用户页">
           <span id="currentUserAvatar" class="avatar">-</span>
           <span id="currentUser" class="user-label">未登录</span>
@@ -797,7 +801,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -881,6 +885,46 @@
         throw new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
       }
       return body;
+    }
+
+    async function localAgentAPI(path, options = {}) {
+      const res = await fetch(state.localAgent.url + path, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      const body = await res.json();
+      if (!body.ok) throw new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+      return body;
+    }
+
+    async function detectLocalAgent() {
+      try {
+        await localAgentAPI("/health");
+        state.localAgent.online = true;
+      } catch (err) {
+        state.localAgent.online = false;
+      }
+      renderLocalAgentStatus();
+      renderProfiles();
+      renderSelected();
+    }
+
+    function renderLocalAgentStatus() {
+      document.body.classList.toggle("local-agent-off", !state.localAgent.online);
+      $("localAgentStatus").textContent = state.localAgent.online ? "本机代理已连接" : "本机代理未启动";
+    }
+
+    function selectedProfileYAML(profileName) {
+      const profile = state.profiles.find((item) => item.name === profileName);
+      return profile?.profile_yaml || "";
+    }
+
+    function localAgentPayload(profileName, extra = {}) {
+      return {
+        profile: profileName,
+        profile_yaml: selectedProfileYAML(profileName),
+        ...extra
+      };
     }
 
     async function loadClientConfig() {
@@ -1242,7 +1286,7 @@
     }
 
     function profileVNCReady(name) {
-      return state.terminalConnectedProfiles.has(name);
+      return state.localAgent.online || state.terminalConnectedProfiles.has(name);
     }
 
     function renderProfiles() {
@@ -1449,7 +1493,7 @@
       const status = p ? state.statuses[p.name] : null;
       const statusKnown = !!status && status.decision !== "error" && !status.error;
       const isReady = statusKnown && status.ready === true;
-      const readyActionDisabled = disabled || state.busy || !isReady;
+      const readyActionDisabled = disabled || state.busy || !isReady || !state.localAgent.online;
       const openDisabled = disabled || state.busy || !statusKnown || isReady;
       const destroyDisabled = disabled || state.busy || !statusKnown || !isReady;
       for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
@@ -1467,7 +1511,7 @@
       $("terminalBtn").disabled = readyActionDisabled;
       $("syncRefreshHistoryBtn").disabled = disabled || state.busy;
       $("syncTitle").textContent = p ? ("传输 · " + p.name) : "传输";
-      $("syncReadyHint").textContent = p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : "";
+      $("syncReadyHint").textContent = !state.localAgent.online ? "本机代理未启动，不能传输。" : (p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : "");
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
@@ -1586,6 +1630,10 @@
 
     async function startTunnel(profile) {
       if (state.busy || !profile) return;
+      if (!state.localAgent.online) {
+        setStatus("本机代理未启动，请先运行 cm local-agent");
+        return;
+      }
       state.selected = profile;
       showView("operationsView");
       renderProfiles();
@@ -1593,12 +1641,17 @@
       setBusy(true, "正在打开 VNC...");
       setStatus("VNC 打开中...");
       try {
-        const body = await api("/api/tunnel/start", {
+        const start = await localAgentAPI("/start", {
           method: "POST",
-          body: JSON.stringify({ profile })
+          body: JSON.stringify(localAgentPayload(profile))
         });
-        setOutput((body.output || "") + (body.error || ""));
-        setStatus(body.ok ? "VNC 已打开" : "VNC 打开失败");
+        const opened = await localAgentAPI("/open-vnc", {
+          method: "POST",
+          body: JSON.stringify(localAgentPayload(profile))
+        });
+        setOutput((start.output || "") + (start.error || "") + "\n" + (opened.output || "") + (opened.error || ""));
+        state.terminalConnectedProfiles.add(profile);
+        setStatus("VNC 已打开");
         await loadEvents(false);
       } catch (err) {
         setOutput(String(err.message || err));
@@ -1621,6 +1674,19 @@
 
     async function openLocalPicker(target) {
       state.picker.target = target;
+      if (state.localAgent.online) {
+        try {
+          const body = await localAgentAPI("/local/pick", { method: "POST", body: "{}" });
+          const path = body.data?.path || "";
+          if (path) {
+            $(target).value = path;
+            setStatus("已选择本机目录");
+            return;
+          }
+        } catch (err) {
+          setStatus("系统选择器不可用，切换到目录列表");
+        }
+      }
       $("localPickerLayer").classList.remove("hidden");
       await loadLocalPicker("");
     }
@@ -1633,7 +1699,7 @@
     async function loadLocalPicker(path) {
       try {
         const query = path ? "?path=" + encodeURIComponent(path) : "";
-        const body = await api("/api/local/list" + query);
+        const body = state.localAgent.online ? await localAgentAPI("/local/list" + query) : await api("/api/local/list" + query);
         const data = body.data || {};
         state.picker.path = data.path || "";
         state.picker.parent = data.parent || "";
@@ -1747,9 +1813,12 @@
       setBusy(true, direction === "push" ? "正在上传..." : "正在下载...");
       setStatus(direction === "push" ? "上传中..." : "下载中...");
       try {
-        const body = await api("/api/sync/" + direction, {
+        if (!state.localAgent.online) {
+          throw new Error("本机代理未启动，请先运行 cm local-agent");
+        }
+        const body = await localAgentAPI("/sync/" + direction, {
           method: "POST",
-          body: JSON.stringify(payload)
+          body: JSON.stringify(localAgentPayload(p.name, payload))
         });
         setOutput((body.output || "") + (body.error || ""));
         setStatus(direction === "push" ? "上传完成" : "下载完成");
@@ -1786,11 +1855,41 @@
 
     async function openTerminal(profile) {
       if (!profile) return;
+      if (state.localAgent.online) {
+        await openLocalSSH(profile);
+        return;
+      }
       state.selected = profile;
       showView("terminalView");
       renderProfiles();
       renderSelected();
       await connectTerminal(profile);
+    }
+
+    async function openLocalSSH(profile) {
+      if (!profile) return;
+      state.selected = profile;
+      showView("operationsView");
+      renderProfiles();
+      renderSelected();
+      setBusy(true, "正在打开本机终端...");
+      setStatus("正在打开本机终端...");
+      try {
+        const body = await localAgentAPI("/ssh", {
+          method: "POST",
+          body: JSON.stringify(localAgentPayload(profile))
+        });
+        state.terminalConnectedProfiles.add(profile);
+        setOutput((body.output || "") + (body.error || ""));
+        setStatus("本机终端已打开");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("本机终端打开失败");
+      } finally {
+        setBusy(false);
+        renderProfiles();
+        renderSelected();
+      }
     }
 
     async function connectTerminal(profile) {
@@ -2120,7 +2219,7 @@
     }
 
     function profileFormFieldIDs() {
-      return ["profileFormName", "profileFormAppleEmail", "profileFormDescription", "profileFormUser", "profileFormHost", "profileFormAWSProfile", "profileFormRegion", "profileFormCreator", "profileFormResourceName", "profileFormKeyName", "profileFormSecurityGroup", "profileFormSubnet", "profileFormEIPAllocation", "profileFormEIPPublic", "profileFormAMIX86", "profileFormAMIARM", "profileFormAZs", "profileFormTypes", "profileFormSubnetsByAZ", "profileFormTunnelPort", "profileFormIntelFallback"];
+      return ["profileFormName", "profileFormAppleEmail", "profileFormDescription", "profileFormUser", "profileFormIdentityFile", "profileFormHost", "profileFormAWSProfile", "profileFormRegion", "profileFormCreator", "profileFormResourceName", "profileFormKeyName", "profileFormSecurityGroup", "profileFormSubnet", "profileFormEIPAllocation", "profileFormEIPPublic", "profileFormAMIX86", "profileFormAMIARM", "profileFormAZs", "profileFormTypes", "profileFormSubnetsByAZ", "profileFormTunnelPort", "profileFormIntelFallback"];
     }
 
     function fillProfileForm(profile) {
@@ -2129,6 +2228,7 @@
       $("profileFormAppleEmail").value = profile.apple_email || yamlField(yaml, "account_email") || yamlField(yaml, "value");
       $("profileFormDescription").value = profile.description || yamlField(yaml, "description");
       $("profileFormUser").value = yamlField(yaml, "user") || "ec2-user";
+      $("profileFormIdentityFile").value = yamlField(yaml, "identity_file");
       $("profileFormHost").value = profile.host || yamlField(yaml, "host");
       $("profileFormAWSProfile").value = profile.aws_profile || yamlField(yaml, "profile");
       $("profileFormRegion").value = profile.region || yamlField(yaml, "region");
@@ -2225,6 +2325,7 @@
       const add = (indent, key, value) => { if (String(value || "").trim()) lines.push(indent + key + ": " + yamlQuote(String(value).trim())); };
       add("    ", "description", description);
       add("    ", "user", user);
+      add("    ", "identity_file", $("profileFormIdentityFile").value);
       add("    ", "host", host);
       lines.push("    aws:");
       add("      ", "profile", awsProfile);
@@ -2519,6 +2620,7 @@
         }
         await loadProfiles();
         await loadJobs();
+        await detectLocalAgent();
         setStatus("刷新完成");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -2682,8 +2784,10 @@
     });
     window.addEventListener("popstate", restoreBrowserHistory);
 
+    renderLocalAgentStatus();
+    detectLocalAgent();
     loadClientConfig().then(() => loadAuth()).then((ok) => {
-      if (ok) return loadAppData();
+      if (ok) return loadAppData().then(() => detectLocalAgent());
       return null;
     }).catch((err) => {
       $("challengeQuestion").textContent = "校验题加载失败";

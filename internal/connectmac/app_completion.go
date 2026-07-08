@@ -88,6 +88,7 @@ func completionCommands() []string {
 		"dashboard",
 		"job",
 		"web",
+		"local-agent",
 		"mcp",
 		"aws",
 	}
@@ -272,6 +273,9 @@ _cm() {
     web)
       _values 'web option' --host --port --open --web-dir --config
       ;;
+    local-agent)
+      _values 'local-agent option' --host --port
+      ;;
     mcp)
       if (( CURRENT == 3 )); then
         compadd -- "${mcp_commands[@]}"
@@ -398,6 +402,9 @@ func bashCompletionScript() string {
     web)
       COMPREPLY=( $(compgen -W "--host --port --open --web-dir --config" -- "$cur") )
       ;;
+    local-agent)
+      COMPREPLY=( $(compgen -W "--host --port" -- "$cur") )
+      ;;
     mcp)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion mcp-commands 2>/dev/null)" -- "$cur") )
@@ -438,6 +445,7 @@ complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcomma
 complete -c cm -n "__fish_seen_subcommand_from logs; and not __fish_seen_subcommand_from (cm completion logs-commands)" -a "(cm completion logs-commands)"
 complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_from export" -a "--output"
 complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"
+complete -c cm -n "__fish_seen_subcommand_from local-agent" -a "--host --port"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and not __fish_seen_subcommand_from (cm completion mcp-commands)" -a "(cm completion mcp-commands)"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and __fish_seen_subcommand_from tools" -a "--json"
 complete -c cm -n "__fish_seen_subcommand_from completion" -a "zsh bash fish"

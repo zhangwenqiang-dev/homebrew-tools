@@ -202,6 +202,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return a.runJob(ctx, args[1:])
 	case "web":
 		return a.runWeb(ctx, configPath, args[1:])
+	case "local-agent":
+		return a.runLocalAgent(ctx, args[1:])
 	case "mcp":
 		return a.runMCP(ctx, configPath, args[1:])
 	case "aws":

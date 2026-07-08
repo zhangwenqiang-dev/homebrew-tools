@@ -43,6 +43,7 @@ type webProfile struct {
 	AWSProfile  string         `json:"aws_profile"`
 	Host        string         `json:"host"`
 	Owners      []PublicMember `json:"owners"`
+	ProfileYAML string         `json:"profile_yaml,omitempty"`
 }
 
 type webAWSStatus struct {
@@ -393,6 +394,7 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 				AWSProfile:  profile.AWS.Profile,
 				Host:        profile.Host,
 				Owners:      owners,
+				ProfileYAML: FormatProfileFile(profile),
 			})
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": profiles}})
