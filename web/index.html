@@ -2264,7 +2264,7 @@
           body: JSON.stringify({ profile })
         });
         if (state.selected === profile) state.selected = "";
-        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         setStatus("Profile 已删除");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -2305,7 +2305,7 @@
           method: "POST",
           body: JSON.stringify({ member_email: memberEmail, profiles })
         });
-        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         closeMemberProfileEditor();
         setStatus("成员 Profile 已保存");
       } catch (err) {
