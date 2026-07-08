@@ -2492,8 +2492,8 @@
           method: "POST",
           body: JSON.stringify({ member_email: memberEmail, profiles })
         });
-        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         closeMemberProfileEditor();
+        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         setStatus("成员 Profile 已保存");
       } catch (err) {
         setOutput(String(err.message || err));
