@@ -410,6 +410,28 @@
       </div>
     </div>
   </div>
+  <div id="memberFormLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="memberFormTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="memberFormTitle">添加成员</h2>
+        <button id="memberFormCloseBtn">关闭</button>
+      </div>
+      <div class="profile-form-grid">
+        <label>成员姓名<input id="memberName" placeholder="成员姓名"></label>
+        <label>成员邮箱<input id="memberEmail" placeholder="成员邮箱"></label>
+        <label>登录密码<input id="memberPassword" type="password" placeholder="可选，至少 8 位"></label>
+        <label>角色<select id="memberRole">
+          <option value="operator">operator</option>
+          <option value="admin">admin</option>
+          <option value="viewer">viewer</option>
+        </select></label>
+      </div>
+      <div class="picker-actions">
+        <button id="cancelMemberFormBtn">取消</button>
+        <button id="addMemberBtn" class="primary">添加成员</button>
+      </div>
+    </div>
+  </div>
   <div id="profileFormLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="profileFormTitle">
     <div class="picker-card">
       <div class="section-head">
@@ -654,18 +676,10 @@
         <section id="userManagementView" class="view hidden">
           <div class="section-head">
             <h2>Members</h2>
-            <button id="refreshMembers">刷新成员</button>
-          </div>
-          <div class="member-form admin-only">
-            <input id="memberName" placeholder="成员姓名">
-            <input id="memberEmail" placeholder="成员邮箱">
-            <input id="memberPassword" type="password" placeholder="登录密码（可选）">
-            <select id="memberRole">
-              <option value="operator">operator</option>
-              <option value="admin">admin</option>
-              <option value="viewer">viewer</option>
-            </select>
-            <button id="addMemberBtn" class="primary">添加成员</button>
+            <div class="row-actions">
+              <button id="openMemberFormBtn" class="primary admin-only">添加成员</button>
+              <button id="refreshMembers">刷新成员</button>
+            </div>
           </div>
           <table>
             <thead>
@@ -741,7 +755,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "previewOpenBtn", "confirmOpenBtn", "previewDestroyBtn", "confirmDestroyBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "assignOwnerBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1818,6 +1832,23 @@
       renderSelected();
     }
 
+    function openMemberForm() {
+      $("memberName").value = "";
+      $("memberEmail").value = "";
+      $("memberPassword").value = "";
+      $("memberRole").value = "operator";
+      $("memberFormLayer").classList.remove("hidden");
+      setTimeout(() => $("memberName").focus(), 0);
+    }
+
+    function closeMemberForm() {
+      $("memberFormLayer").classList.add("hidden");
+      $("memberName").value = "";
+      $("memberEmail").value = "";
+      $("memberPassword").value = "";
+      $("memberRole").value = "operator";
+    }
+
     async function addMember() {
       const name = $("memberName").value.trim();
       const email = $("memberEmail").value.trim();
@@ -1836,6 +1867,7 @@
         $("memberName").value = "";
         $("memberEmail").value = "";
         $("memberPassword").value = "";
+        closeMemberForm();
         await loadMembers();
         setStatus("成员已添加");
       } catch (err) {
@@ -2448,6 +2480,17 @@
     });
     $("currentUserBtn").addEventListener("click", () => showView("userView"));
     $("changeOwnPasswordBtn").addEventListener("click", changeOwnPassword);
+    $("openMemberFormBtn").addEventListener("click", openMemberForm);
+    $("cancelMemberFormBtn").addEventListener("click", closeMemberForm);
+    $("memberFormCloseBtn").addEventListener("click", closeMemberForm);
+    $("memberFormLayer").addEventListener("click", (event) => {
+      if (event.target === $("memberFormLayer")) closeMemberForm();
+    });
+    ["memberName", "memberEmail", "memberPassword"].forEach((id) => {
+      $(id).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") addMember();
+      });
+    });
     $("refreshMembers").addEventListener("click", async () => {
       setBusy(true, "正在刷新成员...");
       try {
