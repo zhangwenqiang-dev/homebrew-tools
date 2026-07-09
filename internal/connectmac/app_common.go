@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -43,10 +44,6 @@ func (a App) validateAndSummarize(profile Profile) bool {
 	return true
 }
 func (a App) promptMissingIdentityFile(profile Profile) Profile {
-	if profile.IdentityFile != "" {
-		return profile
-	}
-	profile.IdentityFile = DefaultIdentityFile
 	return profile
 }
 func (a App) promptMissingAWSCreator(profile Profile) (Profile, bool) {
@@ -105,6 +102,23 @@ func (a App) loadConfig(path string) (Config, int) {
 	}
 	return cfg, 0
 }
+
+func (a App) loadCommandConfig(ctx context.Context, configPath string) (Config, int) {
+	cfg, code := a.loadConfig(configPath)
+	if code != 0 {
+		return Config{}, code
+	}
+	if len(cfg.Profiles) > 0 || strings.TrimSpace(cfg.Server.UserAPI) == "" || !hasCLIRemoteAuth(configPath, cfg) {
+		return cfg, 0
+	}
+	remoteCfg, err := a.loadRemoteListConfig(ctx, configPath, cfg)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return Config{}, 1
+	}
+	return remoteCfg, 0
+}
+
 func parseConfigFlag(args []string, configPath *string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {

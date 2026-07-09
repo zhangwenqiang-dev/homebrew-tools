@@ -1581,7 +1581,7 @@
       $("openMacBtn").disabled = openDisabled;
       $("releaseMacBtn").disabled = destroyDisabled;
       $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released";
-      $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin();
+      $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
       $("syncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled;
       $("syncPullBtn").disabled = readyActionDisabled;
@@ -1824,6 +1824,11 @@
     async function cleanupLocalRecords() {
       const p = selectedProfile();
       if (!p || !isAdmin()) return;
+      const status = state.statuses[p.name];
+      if (status && status.ready === true) {
+        setStatus("Mac ready 时不能清理记录，请先释放后再清理。");
+        return;
+      }
       if (!window.confirm("仅清理负责人和释放提醒记录，不会操作 AWS、不会释放 EIP、不会终止 EC2。确认清理？")) {
         return;
       }

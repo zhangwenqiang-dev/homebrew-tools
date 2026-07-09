@@ -105,91 +105,91 @@ func (a App) Run(ctx context.Context, args []string) int {
 	case "doctor":
 		return a.runDoctor(configPath, args[1:])
 	case "dashboard":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runDashboard(ctx, cfg, args[1:])
 	case "next":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runNext(ctx, cfg, args[1:])
 	case "open":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runAWS(ctx, cfg, append([]string{"open"}, args[1:]...), configPath)
 	case "close":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runAWS(ctx, cfg, append([]string{"destroy"}, args[1:]...), configPath)
 	case "setup-vnc":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runSetupVNC(cfg, args[1:])
 	case "check":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runCheck(cfg, args[1:])
 	case "connect":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runConnect(ctx, cfg, args[1:])
 	case "ssh":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runSSH(ctx, cfg, args[1:])
 	case "exec":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runExec(ctx, cfg, args[1:])
 	case "start":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runStart(ctx, cfg, args[1:])
 	case "pull":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runPull(ctx, cfg, args[1:])
 	case "push":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runPush(ctx, cfg, args[1:])
 	case "forget-host":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runForgetHost(ctx, cfg, args[1:])
 	case "host-key":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		return a.runHostKey(ctx, cfg, args[1:])
 	case "open-vnc":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
@@ -207,7 +207,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	case "mcp":
 		return a.runMCP(ctx, configPath, args[1:])
 	case "aws":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCommandConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}

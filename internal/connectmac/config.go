@@ -13,7 +13,6 @@ import (
 
 const DefaultConfigPath = "~/.connectmac/config.yaml"
 const DefaultAWSUser = "ec2-user"
-const DefaultIdentityFile = "~/.ssh/maiqi-xcode.pem"
 
 type Config struct {
 	Defaults ProfileDefaults
@@ -842,9 +841,6 @@ func (p *Profile) ApplyDefaults(defaults ProfileDefaults) {
 	}
 	if p.IdentityFile == "" {
 		p.IdentityFile = defaults.IdentityFile
-	}
-	if p.IdentityFile == "" {
-		p.IdentityFile = DefaultIdentityFile
 	}
 	if p.AWS.AMI.MacX86 == "" {
 		p.AWS.AMI.MacX86 = defaultAMIForRegion(defaults.AWS, p.AWS.Region).MacX86

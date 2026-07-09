@@ -210,6 +210,53 @@ profiles:
 	}
 }
 
+func TestAppCheckUsesRemoteProfilesWhenLocalProfilesAreEmpty(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
+			t.Fatalf("unexpected request path = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") != "Bearer cm_api_remote" {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{{
+			Name: "remote-usw2",
+			ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      account_email: remote@example.com
+      region: us-west-2
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`,
+		}}}})
+	}))
+	defer remote.Close()
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `server:
+  user_api: `+remote.URL+`
+  token: cm_api_remote
+defaults:
+  identity_file: `+key+`
+profiles:
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"check", "remote-usw2", "--config", config}); code != 0 {
+		t.Fatalf("check code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Profile: remote-usw2") || !strings.Contains(out.String(), "check passed") {
+		t.Fatalf("check output = %q", out.String())
+	}
+}
+
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
@@ -2053,18 +2100,8 @@ func TestAppCheck(t *testing.T) {
 	}
 }
 
-func TestAppCheckUsesDefaultIdentityFileWhenMissing(t *testing.T) {
+func TestAppCheckFailsForMissingIdentityFile(t *testing.T) {
 	dir := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	sshDir := filepath.Join(home, ".ssh")
-	if err := os.MkdirAll(sshDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	key := filepath.Join(sshDir, "maiqi-xcode.pem")
-	if err := os.WriteFile(key, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	configData := strings.ReplaceAll(sampleConfig, "  identity_file: ~/.ssh/default.pem\n", "")
 	configData = strings.ReplaceAll(configData, "    identity_file: ~/.ssh/example.pem\n", "")
 	config := filepath.Join(dir, "config.yaml")
@@ -2073,14 +2110,14 @@ func TestAppCheckUsesDefaultIdentityFileWhenMissing(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
-	if code := app.Run(context.Background(), []string{"check", "xcode-vnc", "--config", config}); code != 0 {
-		t.Fatalf("check code = %d, err = %s", code, errOut.String())
+	if code := app.Run(context.Background(), []string{"check", "xcode-vnc", "--config", config}); code == 0 {
+		t.Fatalf("check code = 0, want failure, out = %s", out.String())
 	}
 	if strings.Contains(errOut.String(), "identity_file for xcode-vnc") {
 		t.Fatalf("did not expect identity_file prompt, got %q", errOut.String())
 	}
-	if !strings.Contains(out.String(), "Identity: ~/.ssh/maiqi-xcode.pem") {
-		t.Fatalf("out = %q", out.String())
+	if !strings.Contains(errOut.String(), "set profile.identity_file or defaults.identity_file") {
+		t.Fatalf("err = %q", errOut.String())
 	}
 }
 

@@ -66,7 +66,7 @@ func (v Validator) ValidateAccess(profile Profile) []error {
 	}
 	keyPath, err := ExpandPath(profile.IdentityFile)
 	if profile.IdentityFile == "" {
-		errs = append(errs, errors.New("identity_file is required"))
+		errs = append(errs, errors.New("identity_file is required; set profile.identity_file or defaults.identity_file"))
 	} else if err != nil {
 		errs = append(errs, err)
 	} else if pathErr := validateIdentityFileLocation(keyPath); pathErr != nil {
@@ -214,10 +214,6 @@ func validateIdentityFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			defaultPath, expandErr := ExpandPath(DefaultIdentityFile)
-			if expandErr == nil && path == defaultPath {
-				return fmt.Errorf("identity file does not exist: %s; confirm the PEM file is placed at %s", path, DefaultIdentityFile)
-			}
 			return fmt.Errorf("identity file does not exist: %s", path)
 		}
 		return fmt.Errorf("read identity file %s: %w", path, err)
