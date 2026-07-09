@@ -287,6 +287,7 @@ func writeLocalAgentProfileConfig(req localAgentRequest) (string, string, error)
 	if strings.TrimSpace(req.Profile) != "" && req.Profile != profile.Name {
 		return "", "", fmt.Errorf("profile mismatch: request=%s yaml=%s", req.Profile, profile.Name)
 	}
+	profile = applyLocalAgentPrivateProfileFields(profile)
 	dir, err := localAgentProfileDir()
 	if err != nil {
 		return "", "", err
@@ -296,6 +297,20 @@ func writeLocalAgentProfileConfig(req localAgentRequest) (string, string, error)
 		return "", "", err
 	}
 	return profile.Name, path, nil
+}
+
+func applyLocalAgentPrivateProfileFields(profile Profile) Profile {
+	cfg, err := LoadConfig(DefaultConfigPath)
+	if err != nil {
+		return profile
+	}
+	if local, ok := cfg.Profile(profile.Name); ok {
+		applyLocalPrivateProfileFields(&profile, local)
+	}
+	if profile.IdentityFile == "" {
+		profile.IdentityFile = cfg.Defaults.IdentityFile
+	}
+	return profile
 }
 
 func localAgentProfileDir() (string, error) {

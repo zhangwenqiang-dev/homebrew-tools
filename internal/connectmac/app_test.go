@@ -257,6 +257,88 @@ profiles:
 	}
 }
 
+func TestWriteLocalAgentProfileConfigUsesLocalDefaultIdentityFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".connectmac")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(configDir, "config.yaml"), `defaults:
+  identity_file: ~/.ssh/local-default.pem
+profiles:
+`)
+	profileName, configPath, err := writeLocalAgentProfileConfig(localAgentRequest{ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`})
+	if err != nil {
+		t.Fatalf("write local agent profile: %v", err)
+	}
+	if profileName != "remote-usw2" {
+		t.Fatalf("profile name = %q", profileName)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load generated config: %v", err)
+	}
+	profile, ok := cfg.Profile("remote-usw2")
+	if !ok {
+		t.Fatal("generated profile missing")
+	}
+	if profile.IdentityFile != "~/.ssh/local-default.pem" {
+		t.Fatalf("identity_file = %q", profile.IdentityFile)
+	}
+}
+
+func TestWriteLocalAgentProfileConfigUsesLocalProfileIdentityFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := filepath.Join(home, ".connectmac")
+	profilesDir := filepath.Join(configDir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(configDir, "config.yaml"), `defaults:
+  identity_file: ~/.ssh/local-default.pem
+profiles:
+`)
+	writeFile(t, filepath.Join(profilesDir, "remote-usw2.yaml"), `profiles:
+  remote-usw2:
+    identity_file: ~/.ssh/special-profile.pem
+`)
+	_, configPath, err := writeLocalAgentProfileConfig(localAgentRequest{ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`})
+	if err != nil {
+		t.Fatalf("write local agent profile: %v", err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load generated config: %v", err)
+	}
+	profile, ok := cfg.Profile("remote-usw2")
+	if !ok {
+		t.Fatal("generated profile missing")
+	}
+	if profile.IdentityFile != "~/.ssh/special-profile.pem" {
+		t.Fatalf("identity_file = %q", profile.IdentityFile)
+	}
+}
+
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
