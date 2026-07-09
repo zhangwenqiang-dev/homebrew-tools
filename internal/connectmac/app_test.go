@@ -257,6 +257,102 @@ profiles:
 	}
 }
 
+func TestAppCheckUsesRemoteProfilesWhenLocalPrivateProfilesExist(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
+			t.Fatalf("unexpected request path = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") != "Bearer cm_api_remote" {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{{
+			Name: "remote-usw2",
+			ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      account_email: remote@example.com
+      region: us-west-2
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`,
+		}}}})
+	}))
+	defer remote.Close()
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `server:
+  user_api: `+remote.URL+`
+  token: cm_api_remote
+defaults:
+  identity_file: `+key+`
+profiles:
+  local-private-only:
+    identity_file: ~/.ssh/local-private.pem
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"check", "remote-usw2", "--config", config}); code != 0 {
+		t.Fatalf("check code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Profile: remote-usw2") || !strings.Contains(out.String(), "check passed") {
+		t.Fatalf("check output = %q", out.String())
+	}
+}
+
+func TestAppCheckMergesLocalProfileIdentityFileIntoRemoteProfile(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
+			t.Fatalf("unexpected request path = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") != "Bearer cm_api_remote" {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{{
+			Name: "remote-usw2",
+			ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    host: ec2-1-2-3-4.us-west-2.compute.amazonaws.com
+    aws:
+      account_email: remote@example.com
+      region: us-west-2
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`,
+		}}}})
+	}))
+	defer remote.Close()
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `server:
+  user_api: `+remote.URL+`
+  token: cm_api_remote
+profiles:
+  remote-usw2:
+    identity_file: `+key+`
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"check", "remote-usw2", "--config", config}); code != 0 {
+		t.Fatalf("check code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Identity: "+key) {
+		t.Fatalf("check output = %q", out.String())
+	}
+}
+
 func TestWriteLocalAgentProfileConfigUsesLocalDefaultIdentityFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

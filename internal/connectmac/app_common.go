@@ -108,7 +108,7 @@ func (a App) loadCommandConfig(ctx context.Context, configPath string) (Config, 
 	if code != 0 {
 		return Config{}, code
 	}
-	if len(cfg.Profiles) > 0 || strings.TrimSpace(cfg.Server.UserAPI) == "" || !hasCLIRemoteAuth(configPath, cfg) {
+	if strings.TrimSpace(cfg.Server.UserAPI) == "" || !hasCLIRemoteAuth(configPath, cfg) {
 		return cfg, 0
 	}
 	remoteCfg, err := a.loadRemoteListConfig(ctx, configPath, cfg)
