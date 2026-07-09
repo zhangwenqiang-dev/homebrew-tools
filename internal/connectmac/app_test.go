@@ -1469,6 +1469,25 @@ func TestAppWebServesExternalIndex(t *testing.T) {
 	}
 }
 
+func TestAppWebServesVendorAssets(t *testing.T) {
+	dir := t.TempDir()
+	webDir := filepath.Join(dir, "web")
+	writeFile(t, filepath.Join(webDir, "index.html"), "<!doctype html><title>External ConnectMac</title>")
+	writeFile(t, filepath.Join(webDir, "vendor", "xterm", "xterm.js"), "window.Terminal = function() {};")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.WebDir = webDir
+	req := httptest.NewRequest(http.MethodGet, "/vendor/xterm/xterm.js", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "window.Terminal") {
+		t.Fatalf("asset body = %s", rec.Body.String())
+	}
+}
+
 func TestAppWebAWSStatusAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
