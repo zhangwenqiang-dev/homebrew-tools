@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type webOptions struct {
@@ -64,6 +65,7 @@ type webDedicatedHost struct {
 	State        string `json:"state"`
 	InstanceType string `json:"instance_type"`
 	ZoneID       string `json:"zone_id"`
+	CreatedAt    string `json:"created_at,omitempty"`
 }
 
 type webInstance struct {
@@ -112,6 +114,7 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
 	handler := a.newWebHandler(configPath)
 	server := &http.Server{Addr: addr, Handler: handler}
+	go a.runReleaseReminderWorker(ctx)
 	if opts.Open {
 		url := "http://" + addr
 		if err := a.Runner.OpenURL(ctx, url); err != nil {
@@ -125,6 +128,41 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func (a App) runReleaseReminderWorker(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	a.sendDueReleaseReminders(time.Now())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			a.sendDueReleaseReminders(now)
+		}
+	}
+}
+
+func (a App) sendDueReleaseReminders(now time.Time) {
+	reminders, err := a.MemberStore.ListReleaseReminders("")
+	if err != nil {
+		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.worker", Message: err.Error()})
+		return
+	}
+	for _, reminder := range reminders {
+		if reminder.Status != ReleaseReminderStatusActive || strings.TrimSpace(reminder.ReleaseDueAt) == "" {
+			continue
+		}
+		dueAt, err := time.Parse(time.RFC3339, reminder.ReleaseDueAt)
+		if err != nil || dueAt.After(now) {
+			continue
+		}
+		a.notifyReleaseReminder("due", reminder, "", "Mac 释放提醒已到期")
+		if _, err := a.MemberStore.MarkReleaseReminderDue(reminder.ProfileName, now.Format(time.RFC3339)); err != nil {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.worker", Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: err.Error()})
+		}
+	}
 }
 
 func parseWebArgs(args []string) (webOptions, error) {
@@ -203,6 +241,8 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/member/profiles", a.requireWebRole(a.webMemberProfilesHandler(), "admin"))
 	mux.HandleFunc("/api/profile-owners", a.requireWebRole(a.webProfileOwnersHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/release-reminders", a.requireWebRole(a.webReleaseRemindersHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/release-reminder/extend", a.requireWebRole(a.webReleaseReminderExtendHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/managed-profiles", a.requireWebRole(a.webManagedProfilesHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/managed-profile/save", a.requireWebRole(a.webManagedProfileSaveHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profile/status", a.requireWebRole(a.webManagedProfileStatusHandler(), "admin"))
@@ -761,6 +801,106 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 	}
 }
 
+func (a App) webReleaseRemindersHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		reminders, err := a.MemberStore.ListReleaseReminders(member.Email)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"reminders": reminders}})
+	}
+}
+
+func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		var req struct {
+			Profile      string `json:"profile"`
+			ReleaseDueAt string `json:"release_due_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		profileName := strings.TrimSpace(req.Profile)
+		if profileName == "" {
+			writeWebError(w, http.StatusBadRequest, "profile is required")
+			return
+		}
+		dueAt, err := time.Parse(time.RFC3339, strings.TrimSpace(req.ReleaseDueAt))
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, "release_due_at must be RFC3339")
+			return
+		}
+		if dueAt.Before(time.Now().Add(-1 * time.Minute)) {
+			writeWebError(w, http.StatusBadRequest, "release_due_at must be in the future")
+			return
+		}
+		if err := a.ensureWebMemberProfileAccess(member, profileName); err != nil {
+			writeWebError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		reminder, ok, err := a.MemberStore.ReleaseReminder(profileName)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			writeWebError(w, http.StatusNotFound, "release reminder not found")
+			return
+		}
+		oldDueAt := reminder.ReleaseDueAt
+		now := time.Now().Format(time.RFC3339)
+		reminder.ReleaseDueAt = dueAt.Format(time.RFC3339)
+		reminder.LastExtendedByEmail = member.Email
+		reminder.LastExtendedByName = member.Name
+		reminder.LastExtendedAt = now
+		reminder.Status = ReleaseReminderStatusActive
+		reminder.LastNotifiedAt = ""
+		reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		a.notifyReleaseReminder("extend", reminder, member.Name, "释放提醒已延长（原时间："+oldDueAt+"）")
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"reminder": reminder}})
+	}
+}
+
+func (a App) ensureWebMemberProfileAccess(member Member, profileName string) error {
+	if member.Role == "admin" {
+		return nil
+	}
+	profiles, err := a.MemberStore.ListManagedProfiles(member.Email)
+	if err != nil {
+		return err
+	}
+	for _, profile := range profiles {
+		if profile.Name == profileName {
+			return nil
+		}
+	}
+	return fmt.Errorf("profile %s is not assigned to %s", profileName, member.Email)
+}
+
 type webManagedProfile struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -1200,13 +1340,113 @@ func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, pr
 		if _, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
 			return err
 		}
-		_, err = a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
-		return err
+		owner, err := a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
+		if err != nil {
+			return err
+		}
+		return a.upsertReleaseReminderAfterOpen(r.Context(), profile, owner.Owner)
 	case "destroy":
-		return a.MemberStore.ClearProfileOwner(profile.Name)
+		if err := a.MemberStore.ClearProfileOwner(profile.Name); err != nil {
+			return err
+		}
+		return a.markReleaseReminderAfterDestroy(profile)
 	default:
 		return nil
 	}
+}
+
+func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile, owner PublicMember) error {
+	now := time.Now()
+	hostID := ""
+	hostCreatedAt := now.Format(time.RFC3339)
+	if _, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false}); err == nil {
+		for _, host := range status.Hosts {
+			if host.HostID == "" || strings.EqualFold(host.State, "released") {
+				continue
+			}
+			hostID = host.HostID
+			if strings.TrimSpace(host.CreatedAt) != "" {
+				hostCreatedAt = host.CreatedAt
+			}
+			break
+		}
+	}
+	existing, ok, err := a.MemberStore.ReleaseReminder(profile.Name)
+	if err != nil {
+		return err
+	}
+	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
+		a.notifyReleaseReminder("open", existing, owner.Name, "Mac 打开确认成功")
+		return nil
+	}
+	createdAt, err := time.Parse(time.RFC3339, hostCreatedAt)
+	if err != nil {
+		createdAt = now
+		hostCreatedAt = now.Format(time.RFC3339)
+	}
+	reminder := ReleaseReminder{
+		ProfileName:   profile.Name,
+		AppleEmail:    profile.AWS.AccountEmail,
+		HostID:        hostID,
+		HostCreatedAt: hostCreatedAt,
+		ReleaseDueAt:  createdAt.Add(24 * time.Hour).Format(time.RFC3339),
+		OwnerEmail:    owner.Email,
+		OwnerName:     owner.Name,
+		Status:        ReleaseReminderStatusActive,
+	}
+	reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
+	if err != nil {
+		return err
+	}
+	a.notifyReleaseReminder("open", reminder, owner.Name, "Mac 打开确认成功")
+	return nil
+}
+
+func (a App) markReleaseReminderAfterDestroy(profile Profile) error {
+	reminder, ok, err := a.MemberStore.ReleaseReminder(profile.Name)
+	if err != nil || !ok {
+		return err
+	}
+	reminder, err = a.MemberStore.MarkReleaseReminderReleased(profile.Name, time.Now().Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	a.notifyReleaseReminder("release", reminder, "", "Mac 释放成功")
+	return nil
+}
+
+func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) {
+	result, err := NewWechatNotifierFromEnv().Send(WechatNotification{
+		Event:         event,
+		Profile:       reminder.ProfileName,
+		AppleEmail:    reminder.AppleEmail,
+		Owner:         displayNameEmail(reminder.OwnerName, reminder.OwnerEmail),
+		Operator:      operator,
+		HostID:        reminder.HostID,
+		HostCreatedAt: reminder.HostCreatedAt,
+		DueAt:         reminder.ReleaseDueAt,
+		Management:    true,
+		Description:   description,
+	})
+	if err != nil {
+		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: redactWechatWebhookURL(err.Error())})
+		return
+	}
+	if result.Skipped {
+		_ = a.LogManager.Write(LogEntry{Level: "info", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: result.Message})
+	}
+}
+
+func displayNameEmail(name, email string) string {
+	name = strings.TrimSpace(name)
+	email = strings.TrimSpace(email)
+	if name == "" {
+		return email
+	}
+	if email == "" || strings.EqualFold(name, email) {
+		return name
+	}
+	return name + " <" + email + ">"
 }
 
 func (a App) webJobLogHandler() http.HandlerFunc {
@@ -1408,6 +1648,7 @@ func webAWSStatusData(profile Profile, plan MacPlan, status AWSStatus) webAWSSta
 			State:        host.State,
 			InstanceType: host.InstanceType,
 			ZoneID:       host.ZoneID,
+			CreatedAt:    host.CreatedAt,
 		})
 	}
 	for _, instance := range status.Instances {

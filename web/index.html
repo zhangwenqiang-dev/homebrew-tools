@@ -482,7 +482,7 @@
       <div class="picker-actions">
         <button id="copyAPITokenBtn">复制</button>
         <button id="regenerateAPITokenBtn">重新生成</button>
-        <button id="deleteAPITokenBtn" class="danger">删除 token</button>
+        <button id="deleteAPITokenBtn" class="danger">删除令牌</button>
         <button id="closeAPITokenBtn" class="primary">完成</button>
       </div>
     </div>
@@ -500,6 +500,23 @@
       <div class="picker-actions">
         <button id="cancelAWSConfirmBtn">取消</button>
         <button id="runAWSConfirmBtn" class="primary">确认执行</button>
+      </div>
+    </div>
+  </div>
+  <div id="releaseReminderLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="releaseReminderTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="releaseReminderTitle">延长释放提醒</h2>
+        <button id="releaseReminderCloseBtn">关闭</button>
+      </div>
+      <div class="profile-form-grid">
+        <label class="wide">Profile<input id="releaseReminderProfile" disabled></label>
+        <label class="wide">新的提醒时间<input id="releaseReminderDueAt" type="datetime-local"></label>
+        <div class="wide muted">这里只会调整企业微信提醒时间，不会自动释放 Mac。</div>
+      </div>
+      <div class="picker-actions">
+        <button id="cancelReleaseReminderBtn">取消</button>
+        <button id="saveReleaseReminderBtn" class="primary">保存</button>
       </div>
     </div>
   </div>
@@ -646,6 +663,7 @@
               <button id="statusBtn">状态</button>
               <button id="openMacBtn" class="primary">打开</button>
               <button id="releaseMacBtn" class="danger">释放</button>
+              <button id="extendReminderBtn">延长提醒</button>
               <button id="syncBtn" class="local-action">传输</button>
               <button id="terminalBtn" class="local-action">连接</button>
               <button id="eventsBtn">事件</button>
@@ -657,6 +675,9 @@
             <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
             <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
             <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
+            <div class="metric"><span>Host 创建</span><strong id="hostCreatedValue">-</strong></div>
+            <div class="metric"><span>提醒时间</span><strong id="reminderDueValue">-</strong></div>
+            <div class="metric"><span>提醒状态</span><strong id="reminderStatusValue">-</strong></div>
             <div class="metric admin-only">
               <span>确认打开负责人</span>
               <select id="assignMemberSelect" class="inline-select"></select>
@@ -836,7 +857,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -845,7 +866,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1239,6 +1260,7 @@
       const body = await api("/api/profiles");
       state.profiles = body.data.profiles || [];
       await loadProfileOwners();
+      await loadReleaseReminders();
       applyProfileOwners();
       $("profileCount").textContent = String(state.profiles.length);
       if (!state.selected && state.profiles.length) {
@@ -1247,6 +1269,21 @@
       renderProfiles();
       renderSelected();
       refreshVisibleStatuses();
+    }
+
+    async function loadReleaseReminders() {
+      try {
+        const body = await api("/api/release-reminders");
+        const reminders = body.data?.reminders || [];
+        state.reminders = {};
+        for (const reminder of reminders) {
+          if (reminder.profile_name) {
+            state.reminders[reminder.profile_name] = reminder;
+          }
+        }
+      } catch (err) {
+        state.reminders = {};
+      }
     }
 
     async function loadProfileOwners() {
@@ -1536,11 +1573,13 @@
       const readyActionDisabled = disabled || state.busy || !isReady || !state.localAgent.online;
       const openDisabled = disabled || state.busy || !statusKnown || isReady;
       const destroyDisabled = disabled || state.busy || !statusKnown || !isReady;
+      const reminder = p ? state.reminders[p.name] : null;
       for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
       $("openMacBtn").disabled = openDisabled;
       $("releaseMacBtn").disabled = destroyDisabled;
+      $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released";
       $("syncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled;
       $("syncPullBtn").disabled = readyActionDisabled;
@@ -1558,9 +1597,20 @@
       $("ipValue").textContent = status?.elastic_ip?.public_ip || firstInstanceIP(status) || "-";
       $("nextValue").textContent = status?.next || "-";
       $("ownerValue").textContent = p ? (ownerNames(p).join(", ") || "-") : "-";
+      $("hostCreatedValue").textContent = reminder?.host_created_at ? formatTime(reminder.host_created_at) : "-";
+      $("reminderDueValue").textContent = reminder?.release_due_at ? formatTime(reminder.release_due_at) : "-";
+      $("reminderStatusValue").textContent = reminder ? reminderStatusText(reminder) : "-";
       renderAssignMemberOptions();
       applyRoleVisibility();
       renderUserPage();
+    }
+
+    function reminderStatusText(reminder) {
+      if (!reminder) return "-";
+      if (reminder.status === "released") return "已释放";
+      if (reminder.status === "due_notified") return "已到期并通知";
+      if (reminder.release_due_at && new Date(reminder.release_due_at).getTime() <= Date.now()) return "已到期";
+      return "提醒中";
     }
 
     function renderUserPage() {
@@ -1711,6 +1761,62 @@
 
     function closeAWSConfirm() {
       $("awsConfirmLayer").classList.add("hidden");
+    }
+
+    function openReleaseReminderEditor() {
+      const p = selectedProfile();
+      if (!p) return;
+      const reminder = state.reminders[p.name];
+      if (!reminder) {
+        setStatus("当前 profile 还没有释放提醒记录。");
+        return;
+      }
+      $("releaseReminderProfile").value = p.name;
+      const source = reminder.release_due_at || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      $("releaseReminderDueAt").value = toDateTimeLocal(source);
+      $("releaseReminderLayer").classList.remove("hidden");
+    }
+
+    function closeReleaseReminderEditor() {
+      $("releaseReminderLayer").classList.add("hidden");
+    }
+
+    async function saveReleaseReminder() {
+      const p = selectedProfile();
+      if (!p) return;
+      const value = $("releaseReminderDueAt").value;
+      if (!value) {
+        setStatus("请选择新的提醒时间。");
+        return;
+      }
+      const dueAt = new Date(value);
+      if (Number.isNaN(dueAt.getTime())) {
+        setStatus("提醒时间格式不正确。");
+        return;
+      }
+      setBusy(true, "正在保存提醒时间...");
+      try {
+        await api("/api/release-reminder/extend", {
+          method: "POST",
+          body: JSON.stringify({ profile: p.name, release_due_at: dueAt.toISOString() })
+        });
+        await loadReleaseReminders();
+        closeReleaseReminderEditor();
+        setStatus("释放提醒时间已更新。");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("保存提醒时间失败");
+      } finally {
+        setBusy(false);
+        renderSelected();
+      }
+    }
+
+    function toDateTimeLocal(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      return offsetDate.toISOString().slice(0, 16);
     }
 
     async function confirmPendingAWS() {
@@ -2887,6 +2993,15 @@
     $("statusBtn").addEventListener("click", loadStatus);
     $("openMacBtn").addEventListener("click", () => previewAWS("open"));
     $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
+    $("extendReminderBtn").addEventListener("click", openReleaseReminderEditor);
+    $("saveReleaseReminderBtn").addEventListener("click", saveReleaseReminder);
+    $("cancelReleaseReminderBtn").addEventListener("click", closeReleaseReminderEditor);
+    $("releaseReminderCloseBtn").addEventListener("click", closeReleaseReminderEditor);
+    $("releaseReminderLayer").addEventListener("click", (event) => {
+      if (event.target === $("releaseReminderLayer")) {
+        closeReleaseReminderEditor();
+      }
+    });
     $("runAWSConfirmBtn").addEventListener("click", confirmPendingAWS);
     $("cancelAWSConfirmBtn").addEventListener("click", () => { state.pendingAWS = null; closeAWSConfirm(); });
     $("awsConfirmCloseBtn").addEventListener("click", () => { state.pendingAWS = null; closeAWSConfirm(); });

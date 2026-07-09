@@ -129,6 +129,25 @@ func (s MySQLMemberStore) EnsureSchema() error {
 			PRIMARY KEY (profile_name, member_id),
 			INDEX idx_cm_profile_members_member_id (member_id)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS cm_release_reminders (
+			profile_name VARCHAR(255) PRIMARY KEY,
+			apple_email VARCHAR(255) NULL,
+			host_id VARCHAR(255) NULL,
+			host_created_at VARCHAR(64) NULL,
+			release_due_at VARCHAR(64) NULL,
+			owner_email VARCHAR(255) NULL,
+			owner_name VARCHAR(255) NULL,
+			last_extended_by_email VARCHAR(255) NULL,
+			last_extended_by_name VARCHAR(255) NULL,
+			last_extended_at VARCHAR(64) NULL,
+			last_notified_at VARCHAR(64) NULL,
+			released_at VARCHAR(64) NULL,
+			status VARCHAR(64) NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
+			updated_at VARCHAR(64) NOT NULL,
+			INDEX idx_cm_release_reminders_due (status, release_due_at),
+			INDEX idx_cm_release_reminders_apple_email (apple_email)
+		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS cm_settings (
 			setting_key VARCHAR(128) PRIMARY KEY,
 			setting_value TEXT NULL
@@ -172,7 +191,7 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 		return MemberData{}, err
 	}
 	defer db.Close()
-	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
+	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
 	rows, err := db.Query(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), COALESCE(api_token_hash, ''), COALESCE(api_token_at, ''), created_at, updated_at FROM cm_members ORDER BY email`)
 	if err != nil {
 		return MemberData{}, err
@@ -248,6 +267,21 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 	if err := rows.Close(); err != nil {
 		return MemberData{}, err
 	}
+	rows, err = db.Query(`SELECT profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, created_at, updated_at FROM cm_release_reminders ORDER BY profile_name`)
+	if err != nil {
+		return MemberData{}, err
+	}
+	for rows.Next() {
+		var reminder ReleaseReminder
+		if err := rows.Scan(&reminder.ProfileName, &reminder.AppleEmail, &reminder.HostID, &reminder.HostCreatedAt, &reminder.ReleaseDueAt, &reminder.OwnerEmail, &reminder.OwnerName, &reminder.LastExtendedByEmail, &reminder.LastExtendedByName, &reminder.LastExtendedAt, &reminder.LastNotifiedAt, &reminder.ReleasedAt, &reminder.Status, &reminder.CreatedAt, &reminder.UpdatedAt); err != nil {
+			rows.Close()
+			return MemberData{}, err
+		}
+		out.Reminders = append(out.Reminders, reminder)
+	}
+	if err := rows.Close(); err != nil {
+		return MemberData{}, err
+	}
 	rows, err = db.Query(`SELECT setting_key, COALESCE(setting_value, '') FROM cm_settings`)
 	if err != nil {
 		return MemberData{}, err
@@ -308,7 +342,7 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"cm_events", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+	for _, table := range []string{"cm_events", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
 			return err
 		}
@@ -340,6 +374,12 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 	for _, access := range data.ProfileAccess {
 		if _, err := tx.Exec(`INSERT INTO cm_profile_members (profile_name, member_id, created_at) VALUES (?, ?, ?)`,
 			access.ProfileName, access.MemberID, access.CreatedAt); err != nil {
+			return err
+		}
+	}
+	for _, reminder := range data.Reminders {
+		if _, err := tx.Exec(`INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.CreatedAt, reminder.UpdatedAt); err != nil {
 			return err
 		}
 	}
@@ -500,6 +540,26 @@ func (s MySQLMemberStore) SetMemberProfileAccess(memberEmail string, profileName
 
 func (s MySQLMemberStore) MembersForProfile(profileName string) ([]PublicMember, error) {
 	return membersForProfileInStore(s, profileName)
+}
+
+func (s MySQLMemberStore) ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error) {
+	return listReleaseRemindersInStore(s, memberEmail)
+}
+
+func (s MySQLMemberStore) ReleaseReminder(profileName string) (ReleaseReminder, bool, error) {
+	return releaseReminderInStore(s, profileName)
+}
+
+func (s MySQLMemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {
+	return upsertReleaseReminderInStore(s, reminder)
+}
+
+func (s MySQLMemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {
+	return markReleaseReminderDueInStore(s, profileName, notifiedAt)
+}
+
+func (s MySQLMemberStore) MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error) {
+	return markReleaseReminderReleasedInStore(s, profileName, releasedAt)
 }
 
 func (s MySQLMemberStore) WebSettings() (WebSettings, error) {

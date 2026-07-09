@@ -50,6 +50,11 @@ type MemberRepository interface {
 	UnassignProfileAccess(profileName, memberEmail string) error
 	SetMemberProfileAccess(memberEmail string, profileNames []string) ([]ProfileAccess, error)
 	MembersForProfile(profileName string) ([]PublicMember, error)
+	ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error)
+	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
+	UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error)
+	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
+	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
 	WebSettings() (WebSettings, error)
 	UpdateWebSettings(update WebSettings) (WebSettings, error)
 	EnsureAuthSecret() (string, error)
@@ -63,6 +68,7 @@ type MemberData struct {
 	ProfileOwners []ProfileOwner       `json:"profile_owners"`
 	Profiles      []ManagedProfile     `json:"profiles"`
 	ProfileAccess []ProfileAccess      `json:"profile_access"`
+	Reminders     []ReleaseReminder    `json:"release_reminders"`
 	Events        []OperationEvent     `json:"events"`
 	Settings      WebSettings          `json:"settings"`
 }
@@ -114,6 +120,30 @@ type ProfileAccess struct {
 	ProfileName string `json:"profile_name"`
 	MemberID    string `json:"member_id"`
 	CreatedAt   string `json:"created_at"`
+}
+
+const (
+	ReleaseReminderStatusActive      = "active"
+	ReleaseReminderStatusDueNotified = "due_notified"
+	ReleaseReminderStatusReleased    = "released"
+)
+
+type ReleaseReminder struct {
+	ProfileName         string `json:"profile_name"`
+	AppleEmail          string `json:"apple_email,omitempty"`
+	HostID              string `json:"host_id,omitempty"`
+	HostCreatedAt       string `json:"host_created_at,omitempty"`
+	ReleaseDueAt        string `json:"release_due_at,omitempty"`
+	OwnerEmail          string `json:"owner_email,omitempty"`
+	OwnerName           string `json:"owner_name,omitempty"`
+	LastExtendedByEmail string `json:"last_extended_by_email,omitempty"`
+	LastExtendedByName  string `json:"last_extended_by_name,omitempty"`
+	LastExtendedAt      string `json:"last_extended_at,omitempty"`
+	LastNotifiedAt      string `json:"last_notified_at,omitempty"`
+	ReleasedAt          string `json:"released_at,omitempty"`
+	Status              string `json:"status"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 type OperationEvent struct {
@@ -179,7 +209,7 @@ func (s MemberStore) Load() (MemberData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
+			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
 		}
 		return MemberData{}, err
 	}
@@ -575,6 +605,26 @@ func (s MemberStore) MembersForProfile(profileName string) ([]PublicMember, erro
 	return membersForProfileInStore(s, profileName)
 }
 
+func (s MemberStore) ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error) {
+	return listReleaseRemindersInStore(s, memberEmail)
+}
+
+func (s MemberStore) ReleaseReminder(profileName string) (ReleaseReminder, bool, error) {
+	return releaseReminderInStore(s, profileName)
+}
+
+func (s MemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {
+	return upsertReleaseReminderInStore(s, reminder)
+}
+
+func (s MemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {
+	return markReleaseReminderDueInStore(s, profileName, notifiedAt)
+}
+
+func (s MemberStore) MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error) {
+	return markReleaseReminderReleasedInStore(s, profileName, releasedAt)
+}
+
 func (s MemberStore) WebSettings() (WebSettings, error) {
 	db, err := s.Load()
 	if err != nil {
@@ -670,6 +720,9 @@ func normalizeMemberData(db *MemberData) {
 	}
 	if db.ProfileAccess == nil {
 		db.ProfileAccess = []ProfileAccess{}
+	}
+	if db.Reminders == nil {
+		db.Reminders = []ReleaseReminder{}
 	}
 	if db.Events == nil {
 		db.Events = []OperationEvent{}
@@ -1481,6 +1534,131 @@ func membersForProfileInStore(s memberDataStore, profileName string) ([]PublicMe
 		return strings.ToLower(members[i].Email) < strings.ToLower(members[j].Email)
 	})
 	return members, nil
+}
+
+func listReleaseRemindersInStore(s memberDataStore, memberEmail string) ([]ReleaseReminder, error) {
+	memberEmail = normalizeEmail(memberEmail)
+	db, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	var member Member
+	isAdmin := false
+	if memberEmail != "" {
+		if found, ok := findMemberByEmailOrUsername(db, memberEmail); ok {
+			member = found
+			isAdmin = found.Role == "admin"
+		}
+	}
+	out := make([]ReleaseReminder, 0, len(db.Reminders))
+	for _, reminder := range db.Reminders {
+		if isAdmin || memberEmail == "" || memberHasProfileAccess(db, member, reminder.ProfileName) {
+			out = append(out, reminder)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].ProfileName) < strings.ToLower(out[j].ProfileName)
+	})
+	return out, nil
+}
+
+func releaseReminderInStore(s memberDataStore, profileName string) (ReleaseReminder, bool, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, false, nil
+	}
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	for _, reminder := range db.Reminders {
+		if reminder.ProfileName == profileName {
+			return reminder, true, nil
+		}
+	}
+	return ReleaseReminder{}, false, nil
+}
+
+func upsertReleaseReminderInStore(s memberDataStore, reminder ReleaseReminder) (ReleaseReminder, error) {
+	reminder.ProfileName = strings.TrimSpace(reminder.ProfileName)
+	reminder.AppleEmail = normalizeEmail(reminder.AppleEmail)
+	reminder.OwnerEmail = normalizeEmail(reminder.OwnerEmail)
+	reminder.LastExtendedByEmail = normalizeEmail(reminder.LastExtendedByEmail)
+	if reminder.ProfileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	if reminder.Status == "" {
+		reminder.Status = ReleaseReminderStatusActive
+	}
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	if reminder.CreatedAt == "" {
+		reminder.CreatedAt = now
+	}
+	reminder.UpdatedAt = now
+	for i := range db.Reminders {
+		if db.Reminders[i].ProfileName == reminder.ProfileName {
+			if reminder.CreatedAt == now && db.Reminders[i].CreatedAt != "" {
+				reminder.CreatedAt = db.Reminders[i].CreatedAt
+			}
+			db.Reminders[i] = reminder
+			return reminder, s.Save(db)
+		}
+	}
+	db.Reminders = append(db.Reminders, reminder)
+	return reminder, s.Save(db)
+}
+
+func markReleaseReminderDueInStore(s memberDataStore, profileName, notifiedAt string) (ReleaseReminder, error) {
+	return updateReleaseReminderStatusInStore(s, profileName, ReleaseReminderStatusDueNotified, notifiedAt)
+}
+
+func markReleaseReminderReleasedInStore(s memberDataStore, profileName, releasedAt string) (ReleaseReminder, error) {
+	return updateReleaseReminderStatusInStore(s, profileName, ReleaseReminderStatusReleased, releasedAt)
+}
+
+func updateReleaseReminderStatusInStore(s memberDataStore, profileName, status, at string) (ReleaseReminder, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	if at == "" {
+		at = s.currentTime().Format(time.RFC3339)
+	}
+	for i := range db.Reminders {
+		if db.Reminders[i].ProfileName != profileName {
+			continue
+		}
+		db.Reminders[i].Status = status
+		db.Reminders[i].UpdatedAt = s.currentTime().Format(time.RFC3339)
+		switch status {
+		case ReleaseReminderStatusDueNotified:
+			db.Reminders[i].LastNotifiedAt = at
+		case ReleaseReminderStatusReleased:
+			db.Reminders[i].ReleasedAt = at
+		}
+		return db.Reminders[i], s.Save(db)
+	}
+	return ReleaseReminder{}, fmt.Errorf("release reminder for profile %s not found", profileName)
+}
+
+func memberHasProfileAccess(db MemberData, member Member, profileName string) bool {
+	if member.ID == "" {
+		return false
+	}
+	for _, access := range db.ProfileAccess {
+		if access.ProfileName == profileName && access.MemberID == member.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func webSettingsInStore(s memberDataStore) (WebSettings, error) {

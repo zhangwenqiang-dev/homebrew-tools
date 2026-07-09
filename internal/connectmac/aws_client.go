@@ -3,6 +3,7 @@ package connectmac
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -49,6 +50,7 @@ type DedicatedHostStatus struct {
 	State        string
 	InstanceType string
 	ZoneID       string
+	CreatedAt    string
 	InstanceIDs  []string
 	Tags         []AWSTagConfig
 }
@@ -451,11 +453,16 @@ func dedicatedHostStatusFromEC2(host ec2types.Host) DedicatedHostStatus {
 			instanceIDs = append(instanceIDs, id)
 		}
 	}
+	createdAt := ""
+	if host.AllocationTime != nil {
+		createdAt = host.AllocationTime.Format(time.RFC3339)
+	}
 	return DedicatedHostStatus{
 		HostID:       aws.ToString(host.HostId),
 		State:        string(host.State),
 		InstanceType: aws.ToString(host.HostProperties.InstanceType),
 		ZoneID:       aws.ToString(host.AvailabilityZoneId),
+		CreatedAt:    createdAt,
 		InstanceIDs:  instanceIDs,
 		Tags:         fromEC2Tags(host.Tags),
 	}

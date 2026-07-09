@@ -157,9 +157,13 @@ CONNECTMAC_DB_PORT=3306
 CONNECTMAC_DB_DATABASE=connectmac
 CONNECTMAC_DB_USERNAME=connectmac
 CONNECTMAC_DB_PASSWORD=...
+CONNECTMAC_WECHAT_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
+CONNECTMAC_WEB_BASE_URL=https://cm.hsgitlab.xyz
 ```
 
 Without those variables, `cm web` keeps using the local JSON member store at `~/.connectmac/members.json`.
+
+`CONNECTMAC_WECHAT_WEBHOOK_URL` enables Enterprise WeChat notifications for Mac open confirmation, release-reminder extension, due reminders, and confirmed release. Release reminders notify only; they never release AWS resources automatically.
 
 ## Commands
 

@@ -152,3 +152,81 @@ func TestMemberStoreManagedProfilesAccess(t *testing.T) {
 		t.Fatalf("admin profiles = %+v", adminProfiles)
 	}
 }
+
+func TestMemberStoreReleaseReminders(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	store.Now = func() time.Time {
+		return time.Date(2026, 7, 1, 8, 0, 0, 0, time.UTC)
+	}
+	if _, err := store.AddMember("Admin", "admin@example.com", "admin"); err != nil {
+		t.Fatalf("add admin: %v", err)
+	}
+	if _, err := store.AddMember("User", "user@example.com", "operator"); err != nil {
+		t.Fatalf("add user: %v", err)
+	}
+	profile := Profile{Name: "apple-usw2", Description: "Apple account: apple@example.com"}
+	profile.AWS.AccountEmail = "apple@example.com"
+	profile.AWS.Profile = "cm-xcode"
+	profile.AWS.Region = "us-west-2"
+	if _, err := store.UpsertManagedProfile(profile); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+	if _, err := store.AssignProfileAccess("apple-usw2", "user@example.com"); err != nil {
+		t.Fatalf("grant profile: %v", err)
+	}
+	reminder := ReleaseReminder{
+		ProfileName:         "apple-usw2",
+		AppleEmail:          "apple@example.com",
+		HostID:              "h-123",
+		HostCreatedAt:       "2026-07-01T08:00:00Z",
+		ReleaseDueAt:        "2026-07-02T08:00:00Z",
+		OwnerEmail:          "user@example.com",
+		OwnerName:           "User",
+		LastExtendedByEmail: "admin@example.com",
+		LastExtendedByName:  "Admin",
+		LastExtendedAt:      "2026-07-01T09:00:00Z",
+		Status:              ReleaseReminderStatusActive,
+	}
+	saved, err := store.UpsertReleaseReminder(reminder)
+	if err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	if saved.ProfileName != "apple-usw2" || saved.Status != ReleaseReminderStatusActive {
+		t.Fatalf("saved reminder = %+v", saved)
+	}
+	memberReminders, err := store.ListReleaseReminders("user@example.com")
+	if err != nil {
+		t.Fatalf("list member reminders: %v", err)
+	}
+	if len(memberReminders) != 1 || memberReminders[0].ProfileName != "apple-usw2" {
+		t.Fatalf("member reminders = %+v", memberReminders)
+	}
+	adminReminders, err := store.ListReleaseReminders("admin@example.com")
+	if err != nil {
+		t.Fatalf("list admin reminders: %v", err)
+	}
+	if len(adminReminders) != 1 {
+		t.Fatalf("admin reminders = %+v", adminReminders)
+	}
+	found, ok, err := store.ReleaseReminder("apple-usw2")
+	if err != nil {
+		t.Fatalf("lookup reminder: %v", err)
+	}
+	if !ok || found.HostID != "h-123" {
+		t.Fatalf("lookup reminder = %+v ok=%t", found, ok)
+	}
+	due, err := store.MarkReleaseReminderDue("apple-usw2", "2026-07-02T08:01:00Z")
+	if err != nil {
+		t.Fatalf("mark due: %v", err)
+	}
+	if due.Status != ReleaseReminderStatusDueNotified || due.LastNotifiedAt != "2026-07-02T08:01:00Z" {
+		t.Fatalf("due reminder = %+v", due)
+	}
+	released, err := store.MarkReleaseReminderReleased("apple-usw2", "2026-07-02T09:00:00Z")
+	if err != nil {
+		t.Fatalf("mark released: %v", err)
+	}
+	if released.Status != ReleaseReminderStatusReleased || released.ReleasedAt != "2026-07-02T09:00:00Z" {
+		t.Fatalf("released reminder = %+v", released)
+	}
+}

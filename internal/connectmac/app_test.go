@@ -1316,6 +1316,80 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 	}
 }
 
+func TestAppWebReleaseReminderExtendAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:   "xcode-vnc",
+		AppleEmail:    "user@example.com",
+		HostID:        "h-1",
+		HostCreatedAt: "2026-07-01T08:00:00Z",
+		ReleaseDueAt:  time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		OwnerEmail:    "admin@example.com",
+		OwnerName:     "Test Admin",
+		Status:        ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	nextDue := time.Now().Add(4 * time.Hour).UTC().Format(time.RFC3339)
+	body := strings.NewReader(`{"profile":"xcode-vnc","release_due_at":"` + nextDue + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/extend", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("extend status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("lookup reminder ok=%t err=%v", ok, err)
+	}
+	if reminder.ReleaseDueAt != nextDue || reminder.LastExtendedByEmail != "admin@example.com" || reminder.Status != ReleaseReminderStatusActive {
+		t.Fatalf("reminder after extend = %+v", reminder)
+	}
+}
+
+func TestAppReleaseReminderWorkerSendsDueNotificationOnce(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+	t.Setenv(envWechatWebhookURL, server.URL)
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:   "xcode-vnc",
+		AppleEmail:    "user@example.com",
+		HostID:        "h-1",
+		HostCreatedAt: "2026-07-01T08:00:00Z",
+		ReleaseDueAt:  "2026-07-01T09:00:00Z",
+		OwnerEmail:    "admin@example.com",
+		OwnerName:     "Test Admin",
+		Status:        ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	now := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	app.sendDueReleaseReminders(now)
+	app.sendDueReleaseReminders(now.Add(time.Minute))
+	if calls != 1 {
+		t.Fatalf("webhook calls = %d, want 1", calls)
+	}
+	reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("lookup reminder ok=%t err=%v", ok, err)
+	}
+	if reminder.Status != ReleaseReminderStatusDueNotified || reminder.LastNotifiedAt != now.Format(time.RFC3339) {
+		t.Fatalf("reminder after worker = %+v", reminder)
+	}
+}
+
 func TestAppWebTerminalCheckRequiresReadyAWSMac(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
