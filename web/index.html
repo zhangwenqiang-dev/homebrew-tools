@@ -1361,7 +1361,7 @@
     }
 
     function profileVNCReady(name) {
-      return state.localAgent.online || state.terminalConnectedProfiles.has(name);
+      return state.terminalConnectedProfiles.has(name);
     }
 
     function renderProfiles() {
@@ -2092,56 +2092,35 @@
 
     async function openTerminal(profile) {
       if (!profile) return;
-      if (state.localAgent.online) {
-        await openLocalSSH(profile);
+      if (!state.localAgent.online) {
+        setStatus("本机代理未启动，请先运行 cm local-agent");
         return;
       }
       state.selected = profile;
       showView("terminalView");
       renderProfiles();
       renderSelected();
-      await connectTerminal(profile);
+      await connectLocalTerminal(profile);
     }
 
-    async function openLocalSSH(profile) {
-      if (!profile) return;
-      state.selected = profile;
-      showView("operationsView");
-      renderProfiles();
-      renderSelected();
-      setBusy(true, "正在打开本机终端...");
-      setStatus("正在打开本机终端...");
-      try {
-        const body = await localAgentAPI("/ssh", {
-          method: "POST",
-          body: JSON.stringify(localAgentPayload(profile))
-        });
-        state.terminalConnectedProfiles.add(profile);
-        setOutput((body.output || "") + (body.error || ""));
-        setStatus("本机终端已打开");
-      } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("本机终端打开失败");
-      } finally {
-        setBusy(false);
-        renderProfiles();
-        renderSelected();
-      }
-    }
-
-    async function connectTerminal(profile) {
+    async function connectLocalTerminal(profile) {
       if (!profile) return;
       closeTerminal(false);
       state.terminal.profile = profile;
       state.terminal.manualClose = false;
       terminalClear();
-      terminalSetStatus("终端预检中...");
+      terminalSetStatus("正在处理本机 SSH 指纹...");
       try {
-        const check = await api("/api/terminal/check?profile=" + encodeURIComponent(profile));
+        const check = await localAgentAPI("/terminal/check", {
+          method: "POST",
+          body: JSON.stringify(localAgentPayload(profile))
+        });
         const data = check.data || {};
+        terminalAppend("Host key: " + (data.host_key_message || data.host_key_status || "ok") + "\r\n");
         terminalAppend("Connecting " + (data.target || profile) + "...\r\n");
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const socket = new WebSocket(protocol + "//" + window.location.host + "/api/terminal/ws?profile=" + encodeURIComponent(profile));
+        terminalSetStatus("正在连接本机网页终端...");
+        const wsURL = state.localAgent.url.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/terminal/ws?profile=" + encodeURIComponent(profile);
+        const socket = new WebSocket(wsURL);
         state.terminal.socket = socket;
         socket.binaryType = "arraybuffer";
         socket.onopen = () => {
@@ -3075,7 +3054,7 @@
     $("terminalBackBtn").addEventListener("click", () => showView("operationsView"));
     $("terminalReconnectBtn").addEventListener("click", () => {
       const p = selectedProfile();
-      if (p) connectTerminal(p.name);
+      if (p) connectLocalTerminal(p.name);
     });
     $("terminalDisconnectBtn").addEventListener("click", () => {
       closeTerminal(true);

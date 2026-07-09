@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/gorilla/websocket"
 )
 
 type localAgentOptions struct {
@@ -83,6 +86,8 @@ func (a App) newLocalAgentHandler() http.Handler {
 	mux.HandleFunc("/start", localAgentCORS(a.localAgentCommandHandler("start")))
 	mux.HandleFunc("/open-vnc", localAgentCORS(a.localAgentCommandHandler("open-vnc")))
 	mux.HandleFunc("/ssh", localAgentCORS(a.localAgentSSHHandler()))
+	mux.HandleFunc("/terminal/check", localAgentCORS(a.localAgentTerminalCheckHandler()))
+	mux.HandleFunc("/terminal/ws", a.localAgentTerminalWSHandler())
 	mux.HandleFunc("/sync/push", localAgentCORS(a.localAgentCommandHandler("push")))
 	mux.HandleFunc("/sync/pull", localAgentCORS(a.localAgentCommandHandler("pull")))
 	mux.HandleFunc("/local/pick", localAgentCORS(a.localAgentPickHandler()))
@@ -223,6 +228,108 @@ end tell`, command)
 	}
 }
 
+func (a App) localAgentTerminalCheckHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		profile, _, err := a.prepareLocalAgentTerminal(r)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		check, err := a.fixHostKey(r.Context(), profile)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		if check.Status == HostKeyScanFailed {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("ssh host key scan failed for %s: %s", profile.Host, check.Message)})
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
+			"profile":          profile.Name,
+			"target":           fmt.Sprintf("%s@%s", profile.User, profile.Host),
+			"host_key_status":  string(check.Status),
+			"host_key_message": check.Message,
+		}})
+	}
+}
+
+func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if !localAgentAllowedOrigin(origin) {
+			writeWebError(w, http.StatusForbidden, "origin is not allowed")
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		profileName := strings.TrimSpace(r.URL.Query().Get("profile"))
+		if profileName == "" {
+			writeWebError(w, http.StatusBadRequest, "profile is required")
+			return
+		}
+		configPath, err := localAgentProfileConfigPath(profileName)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		cfg, err := LoadConfig(configPath)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		profile, err := resolveProfileRef(cfg, profileName)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errs := a.Validator.ValidateAccess(profile); len(errs) > 0 {
+			writeWebError(w, http.StatusBadRequest, strings.Join(validationMessages(errs), "\n"))
+			return
+		}
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(req *http.Request) bool {
+				return localAgentAllowedOrigin(req.Header.Get("Origin"))
+			},
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if err := a.proxyWebTerminal(r.Context(), conn, profile); err != nil && !errors.Is(err, context.Canceled) {
+			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "local-agent.terminal", Profile: profile.Name, Message: err.Error()})
+		}
+	}
+}
+
+func (a App) prepareLocalAgentTerminal(r *http.Request) (Profile, string, error) {
+	var req localAgentRequest
+	if err := decodeWebJSON(r, &req); err != nil {
+		return Profile{}, "", err
+	}
+	profileName, configPath, err := writeLocalAgentProfileConfig(req)
+	if err != nil {
+		return Profile{}, "", err
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return Profile{}, "", err
+	}
+	profile, err := resolveProfileRef(cfg, profileName)
+	if err != nil {
+		return Profile{}, "", err
+	}
+	if errs := a.Validator.ValidateAccess(profile); len(errs) > 0 {
+		return Profile{}, "", fmt.Errorf("profile %s config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
+	}
+	return profile, configPath, nil
+}
+
 func (a App) localAgentPickHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -323,6 +430,14 @@ func localAgentProfileDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+func localAgentProfileConfigPath(name string) (string, error) {
+	dir, err := localAgentProfileDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, safeLocalAgentFileName(name)+".yaml"), nil
 }
 
 func safeLocalAgentFileName(name string) string {

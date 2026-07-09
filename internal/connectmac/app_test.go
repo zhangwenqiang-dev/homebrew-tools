@@ -435,6 +435,60 @@ profiles:
 	}
 }
 
+func TestLocalAgentTerminalCheckMergesIdentityAndFixesHostKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := filepath.Join(home, ".ssh", "key.pem")
+	writeFile(t, key, "secret")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(home, ".connectmac")
+	writeFile(t, filepath.Join(configDir, "config.yaml"), `defaults:
+  identity_file: `+key+`
+profiles:
+`)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	body := strings.NewReader(`{"profile":"remote-usw2","profile_yaml":"profiles:\n  remote-usw2:\n    description: Apple account: remote@example.com\n    user: ec2-user\n    host: mac-host.example.com\n    tunnels:\n      - local_port: 5900\n        remote_host: localhost\n        remote_port: 5900\n"}`)
+	req := httptest.NewRequest(http.MethodPost, "/terminal/check", body)
+	rec := httptest.NewRecorder()
+	app.newLocalAgentHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp webAPIResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response error = %s", resp.Error)
+	}
+	data, ok := resp.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("response data = %#v", resp.Data)
+	}
+	if data["target"] != "ec2-user@mac-host.example.com" {
+		t.Fatalf("target = %#v", data["target"])
+	}
+	if data["host_key_status"] != string(HostKeyMissing) {
+		t.Fatalf("host_key_status = %#v", data["host_key_status"])
+	}
+	generated, err := LoadConfig(filepath.Join(home, ".connectmac", "local-agent", "profiles", "remote-usw2.yaml"))
+	if err != nil {
+		t.Fatalf("load generated profile: %v", err)
+	}
+	profile, ok := generated.Profile("remote-usw2")
+	if !ok {
+		t.Fatal("generated profile missing")
+	}
+	if profile.IdentityFile != key {
+		t.Fatalf("identity_file = %q", profile.IdentityFile)
+	}
+}
+
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
