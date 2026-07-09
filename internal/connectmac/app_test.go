@@ -169,6 +169,47 @@ defaults:
 	}
 }
 
+func TestAppCompletionProfilesFetchesRemoteProfiles(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
+			t.Fatalf("unexpected request path = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") != "Bearer cm_api_remote" {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{{
+			Name: "remote-usw2",
+			ProfileYAML: `profiles:
+  remote-usw2:
+    description: Apple account: remote@example.com
+    user: ec2-user
+    aws:
+      account_email: remote@example.com
+      region: us-west-2
+`,
+		}}}})
+	}))
+	defer remote.Close()
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.yaml")
+	writeFile(t, config, `server:
+  user_api: `+remote.URL+`
+  token: cm_api_remote
+defaults:
+  identity_file: ~/.ssh/local.pem
+profiles:
+`)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"completion", "profiles", "--config", config}); code != 0 {
+		t.Fatalf("completion profiles code = %d, err = %s", code, errOut.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "remote-usw2" {
+		t.Fatalf("completion profiles = %q", got)
+	}
+}
+
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
@@ -2012,7 +2053,7 @@ func TestAppCheck(t *testing.T) {
 	}
 }
 
-func TestAppCheckPromptsForMissingIdentityFile(t *testing.T) {
+func TestAppCheckUsesDefaultIdentityFileWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2020,7 +2061,7 @@ func TestAppCheckPromptsForMissingIdentityFile(t *testing.T) {
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	key := filepath.Join(sshDir, "prompt-key.pem")
+	key := filepath.Join(sshDir, "maiqi-xcode.pem")
 	if err := os.WriteFile(key, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2032,14 +2073,13 @@ func TestAppCheckPromptsForMissingIdentityFile(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
-	app.In = strings.NewReader("prompt-key\n")
 	if code := app.Run(context.Background(), []string{"check", "xcode-vnc", "--config", config}); code != 0 {
 		t.Fatalf("check code = %d, err = %s", code, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "identity_file for xcode-vnc") {
-		t.Fatalf("expected prompt, got %q", errOut.String())
+	if strings.Contains(errOut.String(), "identity_file for xcode-vnc") {
+		t.Fatalf("did not expect identity_file prompt, got %q", errOut.String())
 	}
-	if !strings.Contains(out.String(), "Identity: ~/.ssh/prompt-key.pem") {
+	if !strings.Contains(out.String(), "Identity: ~/.ssh/maiqi-xcode.pem") {
 		t.Fatalf("out = %q", out.String())
 	}
 }

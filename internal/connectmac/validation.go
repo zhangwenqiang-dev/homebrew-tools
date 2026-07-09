@@ -214,6 +214,10 @@ func validateIdentityFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			defaultPath, expandErr := ExpandPath(DefaultIdentityFile)
+			if expandErr == nil && path == defaultPath {
+				return fmt.Errorf("identity file does not exist: %s; confirm the PEM file is placed at %s", path, DefaultIdentityFile)
+			}
 			return fmt.Errorf("identity file does not exist: %s", path)
 		}
 		return fmt.Errorf("read identity file %s: %w", path, err)

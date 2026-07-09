@@ -85,7 +85,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 		a.printVersion()
 		return 0
 	case "completion":
-		return a.runCompletion(configPath, args[1:])
+		return a.runCompletion(ctx, configPath, args[1:])
 	case "list":
 		cfg, code := a.loadConfig(configPath)
 		if code != 0 {

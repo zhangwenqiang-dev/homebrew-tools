@@ -382,8 +382,8 @@ profiles:
 	if profile.User != "ec2-user" {
 		t.Fatalf("user = %q, want ec2-user", profile.User)
 	}
-	if profile.IdentityFile != "" {
-		t.Fatalf("identity_file = %q, want empty", profile.IdentityFile)
+	if profile.IdentityFile != DefaultIdentityFile {
+		t.Fatalf("identity_file = %q, want %s", profile.IdentityFile, DefaultIdentityFile)
 	}
 }
 

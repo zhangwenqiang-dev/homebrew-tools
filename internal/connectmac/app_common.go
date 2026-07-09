@@ -46,11 +46,7 @@ func (a App) promptMissingIdentityFile(profile Profile) Profile {
 	if profile.IdentityFile != "" {
 		return profile
 	}
-	value := a.promptLine(fmt.Sprintf("identity_file for %s (PEM name or path): ", profile.Name))
-	if value == "" {
-		return profile
-	}
-	profile.IdentityFile = NormalizeIdentityFileInput(value)
+	profile.IdentityFile = DefaultIdentityFile
 	return profile
 }
 func (a App) promptMissingAWSCreator(profile Profile) (Profile, bool) {

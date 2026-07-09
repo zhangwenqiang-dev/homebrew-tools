@@ -45,17 +45,17 @@ func TestMCPGuideDoesNotRequireConfig(t *testing.T) {
 	}
 }
 
-func TestMCPCheckAsksForMissingIdentityFile(t *testing.T) {
+func TestMCPCheckUsesDefaultIdentityFileWhenMissing(t *testing.T) {
 	app, config, _ := mcpTestAppWithConfig(t, strings.ReplaceAll(strings.ReplaceAll(sampleConfig,
 		"  identity_file: ~/.ssh/default.pem\n", ""),
 		"    identity_file: ~/.ssh/example.pem\n", ""))
 	out, data := runMCPCallResult(t, app, config, "cm_check_profile", map[string]interface{}{
 		"profile": "xcode-vnc",
 	})
-	if !strings.Contains(out, "missing required input: identity_file") {
+	if !strings.Contains(out, "check passed") || !strings.Contains(out, "Identity: ~/.ssh/maiqi-xcode.pem") {
 		t.Fatalf("output = %q", out)
 	}
-	if data["ok"] != false || data["profile"] != "xcode-vnc" {
+	if data["ok"] != true || data["profile"] != "xcode-vnc" {
 		t.Fatalf("structuredContent = %#v", data)
 	}
 }

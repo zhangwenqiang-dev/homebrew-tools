@@ -1,8 +1,12 @@
 package connectmac
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
-func (a App) runCompletion(configPath string, args []string) int {
+func (a App) runCompletion(ctx context.Context, configPath string, args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands|member-commands|logs-commands|host-key-commands>")
 		return 2
@@ -39,14 +43,14 @@ func (a App) runCompletion(configPath string, args []string) int {
 		printLines(a.Out, completionHostKeyCommands())
 		return 0
 	case "profiles":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCompletionConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
 		printLines(a.Out, sortedProfileNames(cfg))
 		return 0
 	case "apple-emails":
-		cfg, code := a.loadConfig(configPath)
+		cfg, code := a.loadCompletionConfig(ctx, configPath)
 		if code != 0 {
 			return code
 		}
@@ -57,6 +61,23 @@ func (a App) runCompletion(configPath string, args []string) int {
 		return 2
 	}
 }
+
+func (a App) loadCompletionConfig(ctx context.Context, configPath string) (Config, int) {
+	cfg, code := a.loadConfig(configPath)
+	if code != 0 {
+		return Config{}, code
+	}
+	if strings.TrimSpace(cfg.Server.UserAPI) == "" || !hasCLIRemoteAuth(configPath, cfg) {
+		return cfg, 0
+	}
+	remoteCfg, err := a.loadRemoteListConfig(ctx, configPath, cfg)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return Config{}, 1
+	}
+	return remoteCfg, 0
+}
+
 func completionCommands() []string {
 	return []string{
 		"init",

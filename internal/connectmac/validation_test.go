@@ -26,6 +26,16 @@ func TestValidateProfileMissingKey(t *testing.T) {
 	}
 }
 
+func TestValidateProfileMissingDefaultIdentityFileMessage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	profile := validProfile(DefaultIdentityFile)
+	errs := NewValidatorForTest(nil).ValidateProfile(profile)
+	if !containsError(errs, "confirm the PEM file is placed at ~/.ssh/maiqi-xcode.pem") {
+		t.Fatalf("expected default identity file guidance, got %v", errs)
+	}
+}
+
 func TestValidateProfileRequiresIdentityFile(t *testing.T) {
 	profile := validProfile("")
 	errs := NewValidatorForTest(nil).ValidateProfile(profile)
