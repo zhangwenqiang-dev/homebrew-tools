@@ -489,6 +489,38 @@ profiles:
 	}
 }
 
+func TestLocalAgentTerminalWSFixesHostKeyBeforeUpgrade(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := filepath.Join(home, ".ssh", "key.pem")
+	writeFile(t, key, "secret")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profileDir := filepath.Join(home, ".connectmac", "local-agent", "profiles")
+	writeFile(t, filepath.Join(profileDir, "remote-usw2.yaml"), `profiles:
+  remote-usw2:
+    user: ec2-user
+    identity_file: `+key+`
+    host: mac-host.example.com
+`)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws?profile=remote-usw2", nil)
+	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
+	rec := httptest.NewRecorder()
+	app.newLocalAgentHandler().ServeHTTP(rec, req)
+	knownHosts, err := os.ReadFile(filepath.Join(home, ".ssh", "known_hosts"))
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	if !strings.Contains(string(knownHosts), "mac-host.example.com ssh-ed25519 AAAACURRENT") {
+		t.Fatalf("known_hosts = %q", string(knownHosts))
+	}
+}
+
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
@@ -2417,6 +2449,30 @@ func TestAppStartSavesStateAfterHealthyTunnel(t *testing.T) {
 	state, ok, err := app.StateManager.Load("xcode-vnc")
 	if err != nil || !ok || state.PID != 55 {
 		t.Fatalf("state = %+v ok=%t err=%v", state, ok, err)
+	}
+}
+
+func TestAppStartReusesExistingRunningTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	if err := app.StateManager.Save(State{Profile: "xcode-vnc", PID: 77, Target: "user@mac-host.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, err = %s", code, errOut.String())
+	}
+	if len(runner.background) != 0 {
+		t.Fatalf("did not expect background runner, got %#v", runner.background)
+	}
+	if !strings.Contains(out.String(), "already started xcode-vnc with pid 77") {
+		t.Fatalf("out = %q", out.String())
 	}
 }
 

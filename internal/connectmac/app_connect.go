@@ -35,6 +35,13 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 	if !a.validateAndSummarize(profile) {
 		return 1
 	}
+	if state, ok, err := a.StateManager.Load(profile.Name); err != nil {
+		fmt.Fprintf(a.Err, "load state: %v\n", err)
+		return 1
+	} else if ok {
+		fmt.Fprintf(a.Out, "already started %s with pid %d\n", profile.Name, state.PID)
+		return 0
+	}
 	check, err := a.fixHostKey(ctx, profile)
 	if err != nil {
 		fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)

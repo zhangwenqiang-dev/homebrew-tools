@@ -292,6 +292,15 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, strings.Join(validationMessages(errs), "\n"))
 			return
 		}
+		check, err := a.fixHostKey(r.Context(), profile)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if check.Status == HostKeyScanFailed {
+			writeWebError(w, http.StatusBadRequest, fmt.Sprintf("ssh host key scan failed for %s: %s", profile.Host, check.Message))
+			return
+		}
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(req *http.Request) bool {
 				return localAgentAllowedOrigin(req.Header.Get("Origin"))

@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ConnectMac</title>
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css">
+  <script src="/vendor/xterm/xterm.js"></script>
   <style>
     :root {
       color-scheme: light;
@@ -306,10 +308,10 @@
       color: #f9fafb;
       padding: 12px;
       outline: none;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
       font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+    .terminal-surface .xterm { height: 100%; }
+    .terminal-surface .xterm-viewport { border-radius: 8px; }
     .terminal-surface:focus { border-color: #7da2ff; box-shadow: 0 0 0 2px rgba(36, 107, 254, .18); }
     .sync-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
     .sync-panel { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 8px; }
@@ -858,7 +860,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "" } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -2075,10 +2077,48 @@
       setStatus(text || "终端就绪");
     }
 
+    function ensureTerminalSurface() {
+      const surface = $("terminalSurface");
+      if (state.terminal.xterm) return;
+      if (!window.Terminal) {
+        if (!state.terminal.xtermMissingWarned) {
+          state.terminal.xtermMissingWarned = true;
+          terminalSetStatus("终端组件未加载，请强制刷新页面或检查 /vendor/xterm/xterm.js");
+        }
+        return;
+      }
+      surface.textContent = "";
+      surface.style.padding = "0";
+      const term = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        fontSize: 12,
+        lineHeight: 1.35,
+        rows: 28,
+        cols: 120,
+        theme: {
+          background: "#101828",
+          foreground: "#f9fafb",
+          cursor: "#f9fafb",
+          selectionBackground: "#344054"
+        }
+      });
+      term.open(surface);
+      term.onData((data) => sendTerminalInput(data));
+      state.terminal.xterm = term;
+      state.terminal.xtermReady = true;
+    }
+
     function terminalAppend(text) {
       state.terminal.buffer += text || "";
       if (state.terminal.buffer.length > 120000) {
         state.terminal.buffer = state.terminal.buffer.slice(-100000);
+      }
+      ensureTerminalSurface();
+      if (state.terminal.xterm) {
+        state.terminal.xterm.write(text || "");
+        return;
       }
       const surface = $("terminalSurface");
       surface.textContent = state.terminal.buffer;
@@ -2087,7 +2127,14 @@
 
     function terminalClear() {
       state.terminal.buffer = "";
-      $("terminalSurface").textContent = "";
+      ensureTerminalSurface();
+      if (state.terminal.xterm) {
+        state.terminal.xterm.clear();
+        return;
+      }
+      const surface = $("terminalSurface");
+      surface.textContent = "";
+      surface.style.padding = "12px";
     }
 
     async function openTerminal(profile) {
@@ -2098,6 +2145,7 @@
       }
       state.selected = profile;
       showView("terminalView");
+      ensureTerminalSurface();
       renderProfiles();
       renderSelected();
       await connectLocalTerminal(profile);
@@ -2126,7 +2174,11 @@
         socket.onopen = () => {
           state.terminalConnectedProfiles.add(profile);
           terminalSetStatus("终端已连接，点击黑色区域后输入命令。");
-          $("terminalSurface").focus();
+          if (state.terminal.xterm) {
+            state.terminal.xterm.focus();
+          } else {
+            $("terminalSurface").focus();
+          }
           renderProfiles();
           renderSelected();
         };
@@ -2169,33 +2221,6 @@
         return;
       }
       socket.send(data);
-    }
-
-    function terminalKeyData(event) {
-      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
-        const code = event.key.toUpperCase().charCodeAt(0);
-        if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
-      }
-      const map = {
-        Enter: "\r",
-        Backspace: "\x7f",
-        Tab: "\t",
-        Escape: "\x1b",
-        ArrowUp: "\x1b[A",
-        ArrowDown: "\x1b[B",
-        ArrowRight: "\x1b[C",
-        ArrowLeft: "\x1b[D",
-        Delete: "\x1b[3~",
-        Home: "\x1b[H",
-        End: "\x1b[F",
-        PageUp: "\x1b[5~",
-        PageDown: "\x1b[6~"
-      };
-      if (map[event.key]) return map[event.key];
-      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) {
-        return event.key;
-      }
-      return "";
     }
 
     async function loadStatus() {
@@ -3060,21 +3085,13 @@
       closeTerminal(true);
       terminalSetStatus("终端已断开");
     });
-    $("terminalSurface").addEventListener("keydown", (event) => {
-      const data = terminalKeyData(event);
-      if (!data) return;
-      event.preventDefault();
-      sendTerminalInput(data);
-    });
-    $("terminalSurface").addEventListener("paste", (event) => {
-      const text = event.clipboardData?.getData("text") || "";
-      if (!text) return;
-      event.preventDefault();
-      sendTerminalInput(text);
-    });
     document.querySelectorAll("[data-terminal-command]").forEach((button) => {
       button.addEventListener("click", () => {
-        $("terminalSurface").focus();
+        if (state.terminal.xterm) {
+          state.terminal.xterm.focus();
+        } else {
+          $("terminalSurface").focus();
+        }
         sendTerminalInput(button.getAttribute("data-terminal-command") + "\r");
       });
     });
