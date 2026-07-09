@@ -1153,6 +1153,100 @@ func TestAppWebAWSStatusAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebAWSStatusAutoCleansReleasedRecords(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("Owner", "admin@example.com", "admin"); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "admin@example.com"); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:   "xcode-vnc",
+		AppleEmail:    "user@example.com",
+		HostID:        "h-1",
+		HostCreatedAt: "2026-07-01T08:00:00Z",
+		ReleaseDueAt:  "2026-07-02T08:00:00Z",
+		OwnerEmail:    "admin@example.com",
+		OwnerName:     "Owner",
+		Status:        ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{}}, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/aws/status?profile=xcode-vnc", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if ok {
+		t.Fatalf("profile owner should be auto-cleared")
+	}
+	reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("release reminder ok=%t err=%v", ok, err)
+	}
+	if reminder.Status != ReleaseReminderStatusReleased {
+		t.Fatalf("reminder should be released: %+v", reminder)
+	}
+}
+
+func TestAppWebCleanupRecordsAPI(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("Owner", "admin@example.com", "admin"); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "admin@example.com"); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:   "xcode-vnc",
+		AppleEmail:    "user@example.com",
+		HostID:        "h-1",
+		HostCreatedAt: "2026-07-01T08:00:00Z",
+		ReleaseDueAt:  "2026-07-02T08:00:00Z",
+		OwnerEmail:    "admin@example.com",
+		OwnerName:     "Owner",
+		Status:        ReleaseReminderStatusDueNotified,
+	}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	body := strings.NewReader(`{"profile":"xcode-vnc"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/cleanup", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cleanup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if ok {
+		t.Fatalf("profile owner should be cleared")
+	}
+	reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("release reminder ok=%t err=%v", ok, err)
+	}
+	if reminder.Status != ReleaseReminderStatusReleased {
+		t.Fatalf("reminder should be released: %+v", reminder)
+	}
+}
+
 func TestAppWebAWSStatusWritesErrorLog(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

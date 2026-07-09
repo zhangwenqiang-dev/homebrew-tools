@@ -664,6 +664,7 @@
               <button id="openMacBtn" class="primary">打开</button>
               <button id="releaseMacBtn" class="danger">释放</button>
               <button id="extendReminderBtn">延长提醒</button>
+              <button id="cleanupRecordsBtn" class="admin-only">清理记录</button>
               <button id="syncBtn" class="local-action">传输</button>
               <button id="terminalBtn" class="local-action">连接</button>
               <button id="eventsBtn">事件</button>
@@ -866,7 +867,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1580,6 +1581,7 @@
       $("openMacBtn").disabled = openDisabled;
       $("releaseMacBtn").disabled = destroyDisabled;
       $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released";
+      $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin();
       $("syncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled;
       $("syncPullBtn").disabled = readyActionDisabled;
@@ -1817,6 +1819,32 @@
       if (Number.isNaN(date.getTime())) return "";
       const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
       return offsetDate.toISOString().slice(0, 16);
+    }
+
+    async function cleanupLocalRecords() {
+      const p = selectedProfile();
+      if (!p || !isAdmin()) return;
+      if (!window.confirm("仅清理负责人和释放提醒记录，不会操作 AWS、不会释放 EIP、不会终止 EC2。确认清理？")) {
+        return;
+      }
+      setBusy(true, "正在清理记录...");
+      try {
+        const body = await api("/api/release-reminder/cleanup", {
+          method: "POST",
+          body: JSON.stringify({ profile: p.name })
+        });
+        await Promise.all([loadProfileOwners(), loadReleaseReminders(), loadEvents(false)]);
+        applyProfileOwners();
+        setOutput(JSON.stringify(body.data || {}, null, 2));
+        setStatus("记录已清理");
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus("清理记录失败");
+      } finally {
+        setBusy(false);
+        renderProfiles();
+        renderSelected();
+      }
     }
 
     async function confirmPendingAWS() {
@@ -2994,6 +3022,7 @@
     $("openMacBtn").addEventListener("click", () => previewAWS("open"));
     $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
     $("extendReminderBtn").addEventListener("click", openReleaseReminderEditor);
+    $("cleanupRecordsBtn").addEventListener("click", cleanupLocalRecords);
     $("saveReleaseReminderBtn").addEventListener("click", saveReleaseReminder);
     $("cancelReleaseReminderBtn").addEventListener("click", closeReleaseReminderEditor);
     $("releaseReminderCloseBtn").addEventListener("click", closeReleaseReminderEditor);

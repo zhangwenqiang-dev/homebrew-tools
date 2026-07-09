@@ -243,6 +243,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/release-reminders", a.requireWebRole(a.webReleaseRemindersHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/extend", a.requireWebRole(a.webReleaseReminderExtendHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/release-reminder/cleanup", a.requireWebRole(a.webReleaseReminderCleanupHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profiles", a.requireWebRole(a.webManagedProfilesHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/managed-profile/save", a.requireWebRole(a.webManagedProfileSaveHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profile/status", a.requireWebRole(a.webManagedProfileStatusHandler(), "admin"))
@@ -885,6 +886,33 @@ func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 	}
 }
 
+func (a App) webReleaseReminderCleanupHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile string `json:"profile"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		profileName := strings.TrimSpace(req.Profile)
+		if profileName == "" {
+			writeWebError(w, http.StatusBadRequest, "profile is required")
+			return
+		}
+		reminder, err := a.cleanupProfileLocalRecords(profileName, "manual")
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"reminder": reminder}})
+	}
+}
+
 func (a App) ensureWebMemberProfileAccess(member Member, profileName string) error {
 	if member.Role == "admin" {
 		return nil
@@ -1201,6 +1229,11 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("aws status failed: %v", err)})
 			return
 		}
+		if shouldAutoCleanupProfileRecords(status) {
+			if _, err := a.cleanupProfileLocalRecords(profile.Name, "auto-status"); err != nil {
+				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.cleanup.auto", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail, Message: err.Error()})
+			}
+		}
 		writeWebJSON(w, webAPIResponse{
 			OK:     true,
 			Code:   0,
@@ -1413,6 +1446,49 @@ func (a App) markReleaseReminderAfterDestroy(profile Profile) error {
 	}
 	a.notifyReleaseReminder("release", reminder, "", "Mac 释放成功")
 	return nil
+}
+
+func shouldAutoCleanupProfileRecords(status AWSStatus) bool {
+	return len(status.Hosts) == 0 && len(status.Instances) == 0 && strings.TrimSpace(status.ElasticIP.InstanceID) == ""
+}
+
+func (a App) cleanupProfileLocalRecords(profileName, reason string) (ReleaseReminder, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	if err := a.MemberStore.ClearProfileOwner(profileName); err != nil {
+		return ReleaseReminder{}, err
+	}
+	reminder, ok, err := a.MemberStore.ReleaseReminder(profileName)
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	if !ok {
+		_ = a.MemberStore.RecordEvent(OperationEvent{
+			Action:    "cleanup-records",
+			Profile:   profileName,
+			Confirmed: true,
+			Status:    "success",
+			Message:   "cleared profile owner; no release reminder found (" + reason + ")",
+		})
+		return ReleaseReminder{ProfileName: profileName, Status: ReleaseReminderStatusReleased}, nil
+	}
+	if reminder.Status != ReleaseReminderStatusReleased {
+		reminder, err = a.MemberStore.MarkReleaseReminderReleased(profileName, time.Now().Format(time.RFC3339))
+		if err != nil {
+			return ReleaseReminder{}, err
+		}
+	}
+	_ = a.MemberStore.RecordEvent(OperationEvent{
+		Action:     "cleanup-records",
+		Profile:    profileName,
+		AppleEmail: reminder.AppleEmail,
+		Confirmed:  true,
+		Status:     "success",
+		Message:    "cleared profile owner and marked release reminder released (" + reason + ")",
+	})
+	return reminder, nil
 }
 
 func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) {
