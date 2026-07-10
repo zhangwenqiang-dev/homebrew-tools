@@ -1281,7 +1281,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			return
 		}
 		if req.Confirm {
-			if err := a.validateWebAWSOwner(r, command, req.OwnerEmail); err != nil {
+			if err := a.validateWebAWSOwner(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
 				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.open", Profile: req.Profile, Message: err.Error()})
 				writeWebError(w, http.StatusBadRequest, err.Error())
 				return
@@ -1350,7 +1350,7 @@ func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {
 	}
 }
 
-func (a App) validateWebAWSOwner(r *http.Request, command, ownerEmail string) error {
+func (a App) validateWebAWSOwner(r *http.Request, configPath, command, profileRef, ownerEmail string) error {
 	member, ok := a.currentWebMember(r)
 	if !ok {
 		return errors.New("login required")
@@ -1358,10 +1358,30 @@ func (a App) validateWebAWSOwner(r *http.Request, command, ownerEmail string) er
 	if command == "open" && member.Role == "admin" {
 		ownerEmail = normalizeEmail(ownerEmail)
 		if ownerEmail == "" {
+			ready, err := a.webAWSProfileReady(r.Context(), r, configPath, profileRef)
+			if err == nil && ready {
+				return nil
+			}
 			return errors.New("owner_email is required when admin confirms open")
 		}
 	}
 	return nil
+}
+
+func (a App) webAWSProfileReady(ctx context.Context, r *http.Request, configPath, profileRef string) (bool, error) {
+	cfg, err := a.loadWebConfig(r, configPath)
+	if err != nil {
+		return false, err
+	}
+	profile, err := resolveProfileRef(cfg, profileRef)
+	if err != nil {
+		return false, err
+	}
+	_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+	if err != nil {
+		return false, err
+	}
+	return AWSStatusReady(status), nil
 }
 
 func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, profileRef, ownerEmail string) error {
@@ -1383,6 +1403,9 @@ func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, pr
 			ownerEmail = member.Email
 		}
 		ownerEmail = normalizeEmail(ownerEmail)
+		if ownerEmail == "" {
+			return nil
+		}
 		if _, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
 			return err
 		}

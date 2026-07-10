@@ -67,6 +67,12 @@ func (a App) printUsage() {
   cm job wait <job-id>
   cm web [--host 127.0.0.1] [--port 8765] [--open] [--web-dir <path>] [--config <path>]
   cm local-agent [--host 127.0.0.1] [--port 18765]
+  cm local-agent install [--host 127.0.0.1] [--port 18765]
+  cm local-agent start
+  cm local-agent stop
+  cm local-agent restart
+  cm local-agent status [--host 127.0.0.1] [--port 18765]
+  cm local-agent uninstall
   cm mcp [--config <path>]
   cm mcp tools [--json]
   cm doctor [--fix] [--config <path>]

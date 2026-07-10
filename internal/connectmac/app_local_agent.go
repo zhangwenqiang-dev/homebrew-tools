@@ -3,8 +3,10 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +18,9 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+const localAgentLaunchLabel = "com.connectmac.local-agent"
+const localAgentPlistPath = "~/Library/LaunchAgents/com.connectmac.local-agent.plist"
 
 type localAgentOptions struct {
 	Host string
@@ -30,6 +35,9 @@ type localAgentRequest struct {
 }
 
 func (a App) runLocalAgent(ctx context.Context, args []string) int {
+	if len(args) > 0 && isLocalAgentServiceCommand(args[0]) {
+		return a.runLocalAgentService(ctx, args)
+	}
 	opts, err := parseLocalAgentArgs(args)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -49,6 +57,15 @@ func (a App) runLocalAgent(ctx context.Context, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func isLocalAgentServiceCommand(command string) bool {
+	switch command {
+	case "install", "start", "stop", "restart", "status", "uninstall":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseLocalAgentArgs(args []string) (localAgentOptions, error) {
@@ -72,12 +89,209 @@ func parseLocalAgentArgs(args []string) (localAgentOptions, error) {
 			}
 			opts.Port = port
 		case "--help", "-h":
-			return opts, fmt.Errorf("usage: cm local-agent [--host 127.0.0.1] [--port 18765]")
+			return opts, fmt.Errorf("usage: cm local-agent [--host 127.0.0.1] [--port 18765]\n       cm local-agent <install|start|stop|restart|status|uninstall> [--host 127.0.0.1] [--port 18765]")
 		default:
 			return opts, fmt.Errorf("unknown local-agent option %q", args[i])
 		}
 	}
 	return opts, nil
+}
+
+func (a App) runLocalAgentService(ctx context.Context, args []string) int {
+	if runtime.GOOS != "darwin" {
+		fmt.Fprintln(a.Err, "local-agent service management is only supported on macOS")
+		return 1
+	}
+	command := args[0]
+	opts, err := parseLocalAgentArgs(args[1:])
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 2
+	}
+	switch command {
+	case "install":
+		return a.installLocalAgentLaunchAgent(opts)
+	case "start":
+		return a.startLocalAgentLaunchAgent(ctx)
+	case "stop":
+		return a.stopLocalAgentLaunchAgent(ctx, false)
+	case "restart":
+		_ = a.stopLocalAgentLaunchAgent(ctx, true)
+		return a.startLocalAgentLaunchAgent(ctx)
+	case "status":
+		return a.statusLocalAgent(ctx, opts)
+	case "uninstall":
+		if code := a.stopLocalAgentLaunchAgent(ctx, true); code != 0 {
+			return code
+		}
+		path, err := ExpandPath(localAgentPlistPath)
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(a.Err, "remove %s: %v\n", path, err)
+			return 1
+		}
+		fmt.Fprintf(a.Out, "uninstalled %s\n", path)
+		return 0
+	default:
+		fmt.Fprintf(a.Err, "unknown local-agent command %q\n", command)
+		return 2
+	}
+}
+
+func (a App) installLocalAgentLaunchAgent(opts localAgentOptions) int {
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve cm executable: %v\n", err)
+		return 1
+	}
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
+		return 1
+	}
+	logDir := filepath.Join(home, ".connectmac", "logs")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		fmt.Fprintf(a.Err, "create log dir: %v\n", err)
+		return 1
+	}
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		fmt.Fprintf(a.Err, "create launch agents dir: %v\n", err)
+		return 1
+	}
+	plist := localAgentLaunchAgentPlist(localAgentLaunchLabel, executable, opts, filepath.Join(logDir, "local-agent.out.log"), filepath.Join(logDir, "local-agent.err.log"))
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		fmt.Fprintf(a.Err, "write %s: %v\n", path, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "installed %s\n", path)
+	fmt.Fprintln(a.Out, "start with: cm local-agent start")
+	return 0
+}
+
+func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(a.Err, "launch agent is not installed: %s\nrun: cm local-agent install\n", path)
+			return 1
+		}
+		fmt.Fprintf(a.Err, "stat %s: %v\n", path, err)
+		return 1
+	}
+	domain := localAgentLaunchDomain()
+	if err := exec.CommandContext(ctx, "launchctl", "bootstrap", domain, path).Run(); err != nil {
+		fmt.Fprintf(a.Out, "launch agent may already be loaded: %v\n", err)
+	}
+	if err := exec.CommandContext(ctx, "launchctl", "kickstart", "-k", domain+"/"+localAgentLaunchLabel).Run(); err != nil {
+		fmt.Fprintf(a.Err, "start launch agent: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "started %s\n", localAgentLaunchLabel)
+	return 0
+}
+
+func (a App) stopLocalAgentLaunchAgent(ctx context.Context, ignoreMissing bool) int {
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	err = exec.CommandContext(ctx, "launchctl", "bootout", localAgentLaunchDomain(), path).Run()
+	if err != nil {
+		if ignoreMissing {
+			return 0
+		}
+		fmt.Fprintf(a.Err, "stop launch agent: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "stopped %s\n", localAgentLaunchLabel)
+	return 0
+}
+
+func (a App) statusLocalAgent(ctx context.Context, opts localAgentOptions) int {
+	url := fmt.Sprintf("http://%s/health", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(a.Out, "local-agent is not responding at %s\n", url)
+		return 1
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(a.Out, "local-agent status %s: %s\n", resp.Status, strings.TrimSpace(string(body)))
+		return 1
+	}
+	fmt.Fprintf(a.Out, "local-agent is running at %s\n%s\n", url, strings.TrimSpace(string(body)))
+	return 0
+}
+
+func localAgentLaunchDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func localAgentLaunchAgentPlist(label, executable string, opts localAgentOptions, stdoutPath, stderrPath string) string {
+	args := []string{executable, "local-agent", "--host", opts.Host, "--port", strconv.Itoa(opts.Port)}
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
+	b.WriteString(`<plist version="1.0">` + "\n")
+	b.WriteString("<dict>\n")
+	writePlistKeyString(&b, "Label", label)
+	b.WriteString("  <key>ProgramArguments</key>\n")
+	b.WriteString("  <array>\n")
+	for _, arg := range args {
+		b.WriteString("    <string>")
+		_ = xml.EscapeText(&b, []byte(arg))
+		b.WriteString("</string>\n")
+	}
+	b.WriteString("  </array>\n")
+	writePlistKeyBool(&b, "RunAtLoad", true)
+	writePlistKeyBool(&b, "KeepAlive", true)
+	writePlistKeyString(&b, "StandardOutPath", stdoutPath)
+	writePlistKeyString(&b, "StandardErrorPath", stderrPath)
+	b.WriteString("</dict>\n")
+	b.WriteString("</plist>\n")
+	return b.String()
+}
+
+func writePlistKeyString(b *strings.Builder, key, value string) {
+	b.WriteString("  <key>")
+	_ = xml.EscapeText(b, []byte(key))
+	b.WriteString("</key>\n")
+	b.WriteString("  <string>")
+	_ = xml.EscapeText(b, []byte(value))
+	b.WriteString("</string>\n")
+}
+
+func writePlistKeyBool(b *strings.Builder, key string, value bool) {
+	b.WriteString("  <key>")
+	_ = xml.EscapeText(b, []byte(key))
+	b.WriteString("</key>\n")
+	if value {
+		b.WriteString("  <true/>\n")
+		return
+	}
+	b.WriteString("  <false/>\n")
 }
 
 func (a App) newLocalAgentHandler() http.Handler {

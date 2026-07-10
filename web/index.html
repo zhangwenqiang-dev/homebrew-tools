@@ -1563,11 +1563,13 @@
 
     function renderAssignMemberOptions() {
       const select = $("assignMemberSelect");
+      const current = select.value || "";
       const enabledMembers = state.members.filter((member) => member.enabled);
-      select.innerHTML = enabledMembers.length ? enabledMembers.map((member) =>
+      select.innerHTML = "<option value=\"\">不选择负责人</option>" + enabledMembers.map((member) =>
         "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
-      ).join("") : "<option value=\"\">没有可用成员</option>";
-      select.disabled = state.busy || !enabledMembers.length || !selectedProfile();
+      ).join("");
+      select.value = enabledMembers.some((member) => member.email === current) ? current : "";
+      select.disabled = state.busy || !selectedProfile();
     }
 
     function renderSelected() {
@@ -1692,7 +1694,7 @@
       const p = selectedProfile();
       if (!p) return false;
       const ownerEmail = $("assignMemberSelect").value;
-      if (confirm && command === "open" && isAdmin() && !ownerEmail) {
+      if (confirm && command === "open" && isAdmin() && !ownerEmail && !profileReady(p.name)) {
         setStatus("管理员确认打开前必须选择负责人");
         return false;
       }

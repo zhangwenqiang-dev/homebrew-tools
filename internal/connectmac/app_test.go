@@ -521,6 +521,34 @@ func TestLocalAgentTerminalWSFixesHostKeyBeforeUpgrade(t *testing.T) {
 	}
 }
 
+func TestLocalAgentLaunchAgentPlist(t *testing.T) {
+	plist := localAgentLaunchAgentPlist(
+		localAgentLaunchLabel,
+		"/usr/local/bin/cm",
+		localAgentOptions{Host: "127.0.0.1", Port: 18765},
+		"/tmp/connectmac.out.log",
+		"/tmp/connectmac.err.log",
+	)
+	for _, want := range []string{
+		"<string>com.connectmac.local-agent</string>",
+		"<string>/usr/local/bin/cm</string>",
+		"<string>local-agent</string>",
+		"<string>--host</string>",
+		"<string>127.0.0.1</string>",
+		"<string>--port</string>",
+		"<string>18765</string>",
+		"<key>RunAtLoad</key>",
+		"<true/>",
+		"<key>KeepAlive</key>",
+		"<key>StandardOutPath</key>",
+		"<string>/tmp/connectmac.out.log</string>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Fatalf("plist missing %q:\n%s", want, plist)
+		}
+	}
+}
+
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.yaml")
@@ -1778,6 +1806,43 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 		t.Fatalf("profile owner: %v", err)
 	} else if !ok || owner.Owner.Email != "operator@example.com" {
 		t.Fatalf("profile owner after operator open = %+v ok=%v", owner, ok)
+	}
+}
+
+func TestAppWebOpenReadyAllowsAdminWithoutOwner(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-ready",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+				Tags:                managedTestTags(),
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-ready", PublicIP: "54.1.2.3", AllocationID: "eipalloc-1"},
+		}}, nil
+	}
+	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/aws/open", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "owner_email is required") {
+		t.Fatalf("ready open should not require owner: %s", rec.Body.String())
+	}
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if ok {
+		t.Fatalf("ready open without owner should not set profile owner")
 	}
 }
 
