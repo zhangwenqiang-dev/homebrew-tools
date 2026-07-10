@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -155,10 +156,30 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 		job.Percent = 100
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		job.Status = LocalTransferInterrupted
-		job.Error = err.Error()
+		job.Error = localTransferFailureError(job.Output, err)
 	default:
 		job.Status = LocalTransferFailed
-		job.Error = err.Error()
+		job.Error = localTransferFailureError(job.Output, err)
+	}
+}
+
+func localTransferFailureError(output string, err error) string {
+	detail := strings.TrimSpace(output)
+	cause := ""
+	if err != nil {
+		cause = strings.TrimSpace(err.Error())
+	}
+	switch {
+	case detail == "":
+		return cause
+	case cause == "":
+		return detail
+	case detail == cause, strings.Contains(detail, cause):
+		return detail
+	case strings.Contains(cause, detail):
+		return cause
+	default:
+		return detail + "\n" + cause
 	}
 }
 

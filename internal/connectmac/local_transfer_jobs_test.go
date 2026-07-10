@@ -20,6 +20,9 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 		if finished.Status != LocalTransferSucceeded || finished.Percent != 100 {
 			t.Fatalf("job = %#v", finished)
 		}
+		if finished.Error != "" {
+			t.Fatalf("success error = %q", finished.Error)
+		}
 		if finished.StartedAt == nil || finished.FinishedAt == nil || !strings.Contains(finished.Output, "73%") {
 			t.Fatalf("job timestamps/output = %#v", finished)
 		}
@@ -28,7 +31,7 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 	t.Run("failure keeps real progress", func(t *testing.T) {
 		manager := NewLocalTransferJobManager()
 		job := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
-			onOutput("  1,024  41%  1.00MB/s  0:00:01\n")
+			onOutput("  1,024  41%  1.00MB/s  0:00:01\nrsync: connection unexpectedly closed (code 12) at io.c\nssh: connect to host mac.example.com port 22: Connection refused\n")
 			return errors.New("rsync exit status 23")
 		})
 
@@ -36,7 +39,9 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 		if finished.Status != LocalTransferFailed || finished.Percent != 41 {
 			t.Fatalf("job = %#v", finished)
 		}
-		if !strings.Contains(finished.Error, "exit status 23") {
+		if !strings.Contains(finished.Error, "connection unexpectedly closed") ||
+			!strings.Contains(finished.Error, "Connection refused") ||
+			!strings.Contains(finished.Error, "exit status 23") {
 			t.Fatalf("error = %q", finished.Error)
 		}
 	})
@@ -44,11 +49,27 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 	t.Run("context cancellation is interrupted", func(t *testing.T) {
 		manager := NewLocalTransferJobManager()
 		job := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
+			onOutput("rsync: received SIGINT\n")
 			return context.Canceled
 		})
 		finished := waitForLocalTransferJob(t, manager, job.ID)
 		if finished.Status != LocalTransferInterrupted {
 			t.Fatalf("status = %q", finished.Status)
+		}
+		if !strings.Contains(finished.Error, "received SIGINT") || !strings.Contains(finished.Error, context.Canceled.Error()) {
+			t.Fatalf("error = %q", finished.Error)
+		}
+	})
+
+	t.Run("does not duplicate exit error already in output", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job := manager.Start("mac-one", "push", func(onOutput func(string)) error {
+			onOutput("rsync: write failed\nexit status 23\n")
+			return errors.New("exit status 23")
+		})
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if strings.Count(finished.Error, "exit status 23") != 1 {
+			t.Fatalf("error = %q", finished.Error)
 		}
 	})
 }

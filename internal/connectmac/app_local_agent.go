@@ -233,18 +233,33 @@ func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptio
 func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions) bool {
 	checkCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	url := fmt.Sprintf("http://%s/activity", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
-	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, url, nil)
+	endpoint := fmt.Sprintf("http://%s/activity", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return true
+		fmt.Fprintf(a.Err, "unable to verify local-agent activity: create request: %v\n", err)
+		return false
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
 	if err != nil {
-		return true
+		if localAgentConnectionUnavailable(err) {
+			return true
+		}
+		fmt.Fprintf(a.Err, "unable to verify local-agent activity: request failed: %v\n", err)
+		return false
 	}
 	defer resp.Body.Close()
-	active, recognized := decodeLocalAgentActivityResponse(resp)
-	if !recognized || len(active) == 0 {
+	if resp.StatusCode == http.StatusNotFound {
+		return true
+	}
+	active, err := decodeLocalAgentActivityResponse(resp)
+	if err != nil {
+		fmt.Fprintf(a.Err, "unable to verify local-agent activity: %v\n", err)
+		return false
+	}
+	if len(active) == 0 {
 		return true
 	}
 	for _, job := range active {
@@ -253,20 +268,43 @@ func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions
 	return false
 }
 
-func decodeLocalAgentActivityResponse(resp *http.Response) ([]LocalTransferJob, bool) {
-	if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false
+func localAgentConnectionUnavailable(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return !opErr.Timeout()
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && !dnsErr.Timeout()
+}
+
+func decodeLocalAgentActivityResponse(resp *http.Response) ([]LocalTransferJob, error) {
+	if resp == nil {
+		return nil, fmt.Errorf("empty response")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP status %s", resp.Status)
 	}
 	var envelope struct {
-		OK   bool `json:"ok"`
-		Data struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Data  struct {
 			Active []LocalTransferJob `json:"active"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil || !envelope.OK {
-		return nil, false
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	return envelope.Data.Active, true
+	if !envelope.OK {
+		reason := strings.TrimSpace(envelope.Error)
+		if reason == "" {
+			reason = "no error detail"
+		}
+		return nil, fmt.Errorf("response ok=false: %s", reason)
+	}
+	return envelope.Data.Active, nil
 }
 
 func (a App) statusLocalAgent(ctx context.Context, opts localAgentOptions) int {

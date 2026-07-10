@@ -629,9 +629,9 @@ profiles:
 
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/activity", nil))
-	activity, recognized := decodeLocalAgentActivityResponse(rec.Result())
-	if !recognized || len(activity) != 1 || activity[0].ID != job.ID {
-		t.Fatalf("activity = %#v, recognized = %v, body = %s", activity, recognized, rec.Body.String())
+	activity, activityErr := decodeLocalAgentActivityResponse(rec.Result())
+	if activityErr != nil || len(activity) != 1 || activity[0].ID != job.ID {
+		t.Fatalf("activity = %#v, error = %v, body = %s", activity, activityErr, rec.Body.String())
 	}
 
 	close(release)
@@ -719,6 +719,59 @@ func TestLocalAgentActivityDecodeAndGuard(t *testing.T) {
 	oldServer.Close()
 	if !app.guardLocalAgentActivity(context.Background(), oldOptions) {
 		t.Fatal("guard blocked when the agent was unreachable")
+	}
+
+	tests := []struct {
+		name       string
+		handler    http.Handler
+		wantReason string
+	}{
+		{
+			name: "http 500",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "internal failure", http.StatusInternalServerError)
+			}),
+			wantReason: "500",
+		},
+		{
+			name: "malformed json",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"ok":`))
+			}),
+			wantReason: "decode",
+		},
+		{
+			name: "ok false",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeWebJSON(w, webAPIResponse{OK: false, Error: "activity unavailable"})
+			}),
+			wantReason: "ok=false",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failureServer := httptest.NewServer(tt.handler)
+			defer failureServer.Close()
+			failureURL, err := url.Parse(failureServer.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failureHost, failurePortText, err := net.SplitHostPort(failureURL.Host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failurePort, err := strconv.Atoi(failurePortText)
+			if err != nil {
+				t.Fatal(err)
+			}
+			errOut.Reset()
+			if app.guardLocalAgentActivity(context.Background(), localAgentOptions{Host: failureHost, Port: failurePort}) {
+				t.Fatal("guard allowed unverifiable activity")
+			}
+			if !strings.Contains(errOut.String(), "unable to verify local-agent activity") || !strings.Contains(errOut.String(), tt.wantReason) {
+				t.Fatalf("guard error = %q", errOut.String())
+			}
+		})
 	}
 }
 
