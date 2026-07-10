@@ -2182,20 +2182,33 @@
     function parseSyncJobID(id) {
       const match = /^transfer-(\d+)-(\d+)$/.exec(String(id || ""));
       if (!match) return null;
-      try {
-        return { unixNano: BigInt(match[1]), sequence: BigInt(match[2]) };
-      } catch (err) {
-        return null;
-      }
+      return { unixNano: match[1], sequence: match[2] };
     }
 
-    function compareSyncJobOrder(left, right) {
+    function compareSyncInteger(left, right, bigIntParser) {
+      if (typeof bigIntParser === "function") {
+        try {
+          const leftBigInt = bigIntParser(left);
+          const rightBigInt = bigIntParser(right);
+          if (leftBigInt !== rightBigInt) return leftBigInt > rightBigInt ? 1 : -1;
+          return 0;
+        } catch (err) {
+          // Fall through to exact decimal-string comparison.
+        }
+      }
+      const leftNormalized = String(left || "0").replace(/^0+/, "") || "0";
+      const rightNormalized = String(right || "0").replace(/^0+/, "") || "0";
+      if (leftNormalized.length !== rightNormalized.length) return leftNormalized.length > rightNormalized.length ? 1 : -1;
+      return leftNormalized === rightNormalized ? 0 : (leftNormalized > rightNormalized ? 1 : -1);
+    }
+
+    function compareSyncJobOrder(left, right, bigIntParser = typeof BigInt === "function" ? BigInt : null) {
       const leftID = parseSyncJobID(left?.id);
       const rightID = parseSyncJobID(right?.id);
       if (leftID && rightID) {
-        if (leftID.unixNano !== rightID.unixNano) return leftID.unixNano > rightID.unixNano ? 1 : -1;
-        if (leftID.sequence !== rightID.sequence) return leftID.sequence > rightID.sequence ? 1 : -1;
-        if (left?.id === right?.id) return 0;
+        const unixNanoOrder = compareSyncInteger(leftID.unixNano, rightID.unixNano, bigIntParser);
+        if (unixNanoOrder !== 0) return unixNanoOrder;
+        return compareSyncInteger(leftID.sequence, rightID.sequence, bigIntParser);
       }
       const leftCreated = Date.parse(left?.created_at || "") || 0;
       const rightCreated = Date.parse(right?.created_at || "") || 0;
@@ -2210,7 +2223,13 @@
       const older = { id: "transfer-1000000000000000001-9", created_at: createdAt };
       const newerNano = { id: "transfer-1000000000000000002-1", created_at: createdAt };
       const newerSequence = { id: "transfer-1000000000000000002-2", created_at: createdAt };
-      if (compareSyncJobOrder(newerNano, older) <= 0 || compareSyncJobOrder(newerSequence, newerNano) <= 0) {
+      const sequenceNine = { id: "transfer-1000000000000000002-9", created_at: createdAt };
+      const sequenceTen = { id: "transfer-1000000000000000002-10", created_at: createdAt };
+      const unixNanoNine = { id: "transfer-9-1", created_at: createdAt };
+      const unixNanoTen = { id: "transfer-10-1", created_at: createdAt };
+      const bigIntOrderOK = compareSyncJobOrder(newerNano, older) > 0 && compareSyncJobOrder(newerSequence, newerNano) > 0;
+      const fallbackOrderOK = compareSyncJobOrder(sequenceTen, sequenceNine, null) > 0 && compareSyncJobOrder(unixNanoTen, unixNanoNine, null) > 0;
+      if (!bigIntOrderOK || !fallbackOrderOK) {
         throw new Error("传输任务排序自检失败");
       }
     }
