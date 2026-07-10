@@ -3696,6 +3696,44 @@ func TestJobManagerSaveIsAtomicAndReturnsErrors(t *testing.T) {
 	}
 }
 
+func TestJobManagerSaveRenameFailurePreservesOldJobAndCleansTempFile(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	original := Job{ID: "atomic-failure", Type: "original", Status: JobStatusRunning}
+	if err := manager.Save(original); err != nil {
+		t.Fatalf("save original: %v", err)
+	}
+	path := mustJobPath(t, manager, original.ID)
+	oldData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+	manager.Rename = func(oldPath, newPath string) error {
+		if filepath.Dir(oldPath) != filepath.Dir(newPath) {
+			t.Errorf("rename crossed directories: %s -> %s", oldPath, newPath)
+		}
+		return errors.New("injected rename failure")
+	}
+	updated := original
+	updated.Type = "updated"
+	if err := manager.Save(updated); err == nil || !strings.Contains(err.Error(), "injected rename failure") {
+		t.Fatalf("save error = %v", err)
+	}
+	gotData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved job: %v", err)
+	}
+	if !bytes.Equal(gotData, oldData) {
+		t.Fatalf("job changed after rename failure:\nold=%s\nnew=%s", oldData, gotData)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("read job dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "job.json" {
+		t.Fatalf("temporary file was not cleaned up: %#v", entries)
+	}
+}
+
 func TestJobManagerActiveReconcilesAndSorts(t *testing.T) {
 	dir := t.TempDir()
 	manager := NewJobManager(filepath.Join(dir, "jobs"))
@@ -3949,6 +3987,31 @@ func TestAppJobActiveTextAndJSON(t *testing.T) {
 }
 
 func TestAppJobWaitAllImmediateProgressAndTimeout(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+		app.JobManager.Now = func() time.Time { return now }
+		var sleepDurations []time.Duration
+		app.JobManager.Sleep = func(_ context.Context, duration time.Duration) error {
+			sleepDurations = append(sleepDurations, duration)
+			now = now.Add(defaultJobWaitAllTimeout)
+			return nil
+		}
+		if _, err := app.JobManager.Create(Job{ID: "job-defaults", Status: JobStatusRunning, PID: 42}); err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if code := app.Run(context.Background(), []string{"job", "wait-all"}); code != 1 {
+			t.Fatalf("wait-all defaults code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+		}
+		if !reflect.DeepEqual(sleepDurations, []time.Duration{10 * time.Second}) {
+			t.Fatalf("sleep durations = %#v, want [10s]", sleepDurations)
+		}
+		if !strings.Contains(errOut.String(), "timed out after 2h0m0s") {
+			t.Fatalf("default timeout error = %q", errOut.String())
+		}
+	})
+
 	t.Run("immediate", func(t *testing.T) {
 		var out, errOut bytes.Buffer
 		app := testApp(&out, &errOut, t.TempDir())
@@ -4010,6 +4073,23 @@ func TestAppJobWaitAllImmediateProgressAndTimeout(t *testing.T) {
 			t.Fatalf("wait-all timeout error = %q", text)
 		}
 	})
+}
+
+func TestAppUsageIncludesJobActiveAndWaitAll(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), nil); code != 0 {
+		t.Fatalf("help code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{
+		"cm job active\n",
+		"cm job active --json\n",
+		"cm job wait-all [--timeout 2h] [--interval 10s]\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("usage missing %q:\n%s", want, out.String())
+		}
+	}
 }
 
 func TestAppJobWaitAllStrictArgumentsAndCancellation(t *testing.T) {

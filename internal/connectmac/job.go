@@ -53,6 +53,7 @@ type JobManager struct {
 	Now        func() time.Time
 	IsRunning  func(pid int) bool
 	Sleep      func(ctx context.Context, duration time.Duration) error
+	Rename     func(oldPath, newPath string) error
 	Notify     func(title, message string) error
 }
 
@@ -71,6 +72,7 @@ func NewJobManager(dir string) JobManager {
 		Now:       time.Now,
 		IsRunning: ProcessRunning,
 		Sleep:     sleepContext,
+		Rename:    os.Rename,
 		Notify:    SendMacNotification,
 	}
 }
@@ -87,6 +89,9 @@ func (m JobManager) normalize() JobManager {
 	}
 	if m.Sleep == nil {
 		m.Sleep = sleepContext
+	}
+	if m.Rename == nil {
+		m.Rename = os.Rename
 	}
 	if m.Notify == nil {
 		m.Notify = SendMacNotification
@@ -123,6 +128,7 @@ func (m JobManager) Create(job Job) (Job, error) {
 }
 
 func (m JobManager) Save(job Job) error {
+	m = m.normalize()
 	path, err := m.JobPath(job.ID)
 	if err != nil {
 		return err
@@ -151,7 +157,7 @@ func (m JobManager) Save(job Job) error {
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close temporary job file: %w", err)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := m.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("replace job file: %w", err)
 	}
 	return nil
