@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,16 +21,19 @@ import (
 )
 
 type fakeRunner struct {
-	foreground []string
-	background []string
-	startErr   error
-	rsync      []string
-	forgotHost string
-	knownHost  string
-	scannedKey string
-	scanErr    error
-	openedURL  string
-	stopPID    int
+	foreground  []string
+	background  []string
+	startErr    error
+	rsync       []string
+	rsyncOutput []string
+	rsyncErr    error
+	rsyncWait   <-chan struct{}
+	forgotHost  string
+	knownHost   string
+	scannedKey  string
+	scanErr     error
+	openedURL   string
+	stopPID     int
 }
 
 func (r *fakeRunner) RunForeground(ctx context.Context, args []string) error {
@@ -53,6 +57,21 @@ func (r *fakeRunner) Stop(pid int) error {
 func (r *fakeRunner) RunRsync(ctx context.Context, args []string) error {
 	r.rsync = args
 	return nil
+}
+
+func (r *fakeRunner) RunRsyncProgress(ctx context.Context, args []string, onOutput func(string)) error {
+	r.rsync = args
+	for _, output := range r.rsyncOutput {
+		onOutput(output)
+	}
+	if r.rsyncWait != nil {
+		select {
+		case <-r.rsyncWait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.rsyncErr
 }
 
 func (r *fakeRunner) KnownHostKey(ctx context.Context, host string) (string, error) {
@@ -547,6 +566,180 @@ func TestLocalAgentLaunchAgentPlist(t *testing.T) {
 			t.Fatalf("plist missing %q:\n%s", want, plist)
 		}
 	}
+}
+
+func TestLocalAgentTransferJobAPI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := filepath.Join(home, ".ssh", "private.pem")
+	writeFile(t, key, "private key")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, ".connectmac", "config.yaml"), `defaults:
+  identity_file: `+key+`
+profiles:
+`)
+	localPath := filepath.Join(home, "payload.txt")
+	writeFile(t, localPath, "payload")
+
+	release := make(chan struct{})
+	runner := &fakeRunner{
+		rsyncOutput: []string{"  1,024  63%  1.00MB/s  0:00:01 (xfr#1, to-chk=1/3)\n"},
+		rsyncWait:   release,
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	handler := app.newLocalAgentHandler()
+	body := fmt.Sprintf(`{"profile":"remote-usw2","local_path":%q,"profile_yaml":"profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n"}`, localPath)
+
+	job := postLocalTransferForTest(t, handler, "/sync/push", body)
+	duplicate := postLocalTransferForTest(t, handler, "/sync/push", body)
+	if duplicate.ID != job.ID {
+		t.Fatalf("duplicate job id = %q, want %q", duplicate.ID, job.ID)
+	}
+	if job.Profile != "remote-usw2" || job.Direction != "push" || !job.Active() {
+		t.Fatalf("job = %#v", job)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sync/job?id="+url.QueryEscape(job.ID), nil))
+	var jobResp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Job LocalTransferJob `json:"job"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &jobResp); err != nil || !jobResp.OK || jobResp.Data.Job.ID != job.ID {
+		t.Fatalf("job response = %s, decode error = %v", rec.Body.String(), err)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sync/jobs?profile=remote-usw2", nil))
+	var jobsResp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Jobs []LocalTransferJob `json:"jobs"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &jobsResp); err != nil || !jobsResp.OK || len(jobsResp.Data.Jobs) != 1 {
+		t.Fatalf("jobs response = %s, decode error = %v", rec.Body.String(), err)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/activity", nil))
+	activity, recognized := decodeLocalAgentActivityResponse(rec.Result())
+	if !recognized || len(activity) != 1 || activity[0].ID != job.ID {
+		t.Fatalf("activity = %#v, recognized = %v, body = %s", activity, recognized, rec.Body.String())
+	}
+
+	close(release)
+	finished := waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
+	if finished.Status != LocalTransferSucceeded || finished.Percent != 100 {
+		t.Fatalf("finished job = %#v", finished)
+	}
+	joinedArgs := strings.Join(runner.rsync, " ")
+	if !strings.Contains(joinedArgs, key) || !strings.Contains(joinedArgs, "ec2-user@mac-host.example.com:~/Downloads/") {
+		t.Fatalf("rsync args = %#v", runner.rsync)
+	}
+
+	runner.rsyncOutput = []string{"  2,048  41%  1.00MB/s  0:00:01\n"}
+	runner.rsyncWait = nil
+	runner.rsyncErr = errors.New("exit status 23")
+	pullBody := `{"profile":"remote-usw2","profile_yaml":"profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n"}`
+	pull := postLocalTransferForTest(t, handler, "/sync/pull", pullBody)
+	failed := waitForLocalTransferJob(t, app.LocalTransfers, pull.ID)
+	if failed.Status != LocalTransferFailed || failed.Percent != 41 || !strings.Contains(failed.Error, "exit status 23") {
+		t.Fatalf("failed pull = %#v", failed)
+	}
+	if got := runner.rsync[len(runner.rsync)-1]; got != "." {
+		t.Fatalf("pull local path = %q, want .; args = %#v", got, runner.rsync)
+	}
+	if !strings.Contains(runner.rsync[len(runner.rsync)-2], "ec2-user@mac-host.example.com:~/Downloads/") {
+		t.Fatalf("pull remote path args = %#v", runner.rsync)
+	}
+}
+
+func TestLocalAgentActivityDecodeAndGuard(t *testing.T) {
+	activeJob := LocalTransferJob{
+		ID:        "transfer-1",
+		Profile:   "remote-usw2",
+		Direction: "pull",
+		Status:    LocalTransferRunning,
+		CreatedAt: time.Now(),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/activity" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"active": []LocalTransferJob{activeJob}}})
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(serverURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if app.guardLocalAgentActivity(context.Background(), localAgentOptions{Host: host, Port: port}) {
+		t.Fatal("guard allowed an active transfer")
+	}
+	if !strings.Contains(errOut.String(), "profile=remote-usw2") || !strings.Contains(errOut.String(), "direction=pull") {
+		t.Fatalf("guard error = %q", errOut.String())
+	}
+
+	server.Close()
+	oldServer := httptest.NewServer(http.NotFoundHandler())
+	oldURL, err := url.Parse(oldServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHost, oldPortText, err := net.SplitHostPort(oldURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPort, err := strconv.Atoi(oldPortText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOptions := localAgentOptions{Host: oldHost, Port: oldPort}
+	if !app.guardLocalAgentActivity(context.Background(), oldOptions) {
+		t.Fatal("guard blocked an old agent returning 404")
+	}
+	oldServer.Close()
+	if !app.guardLocalAgentActivity(context.Background(), oldOptions) {
+		t.Fatal("guard blocked when the agent was unreachable")
+	}
+}
+
+func postLocalTransferForTest(t *testing.T, handler http.Handler, path, body string) LocalTransferJob {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Data  struct {
+			Job LocalTransferJob `json:"job"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v, body = %s", err, rec.Body.String())
+	}
+	if rec.Code != http.StatusOK || !resp.OK {
+		t.Fatalf("status = %d, error = %q, body = %s", rec.Code, resp.Error, rec.Body.String())
+	}
+	return resp.Data.Job
 }
 
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
@@ -3309,8 +3502,9 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 				return time.Date(2026, 7, 1, 12, 30, 45, 0, time.UTC)
 			},
 		},
-		SyncHistory: NewSyncHistoryStore(filepath.Join(stateDir, "sync-history.json")),
-		KnownHosts:  filepath.Join(stateDir, ".ssh", "known_hosts"),
+		SyncHistory:    NewSyncHistoryStore(filepath.Join(stateDir, "sync-history.json")),
+		LocalTransfers: NewLocalTransferJobManager(),
+		KnownHosts:     filepath.Join(stateDir, ".ssh", "known_hosts"),
 	}
 }
 

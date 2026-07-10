@@ -3,6 +3,7 @@ package connectmac
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"time"
@@ -52,6 +53,25 @@ func (ExecRunner) RunRsync(ctx context.Context, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func (ExecRunner) RunRsyncProgress(ctx context.Context, args []string, onOutput func(string)) error {
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = io.MultiWriter(os.Stdout, outputCallbackWriter{onOutput: onOutput})
+	cmd.Stderr = io.MultiWriter(os.Stderr, outputCallbackWriter{onOutput: onOutput})
+	return cmd.Run()
+}
+
+type outputCallbackWriter struct {
+	onOutput func(string)
+}
+
+func (w outputCallbackWriter) Write(data []byte) (int, error) {
+	if w.onOutput != nil && len(data) > 0 {
+		w.onOutput(string(data))
+	}
+	return len(data), nil
 }
 func (ExecRunner) KnownHostKey(ctx context.Context, host string) (string, error) {
 	cmd := exec.CommandContext(ctx, "ssh-keygen", "-F", host)

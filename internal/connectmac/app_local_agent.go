@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -114,14 +116,16 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 	case "start":
 		return a.startLocalAgentLaunchAgent(ctx)
 	case "stop":
-		return a.stopLocalAgentLaunchAgent(ctx, false)
+		return a.stopLocalAgentLaunchAgent(ctx, opts, false)
 	case "restart":
-		_ = a.stopLocalAgentLaunchAgent(ctx, true)
+		if code := a.stopLocalAgentLaunchAgent(ctx, opts, true); code != 0 {
+			return code
+		}
 		return a.startLocalAgentLaunchAgent(ctx)
 	case "status":
 		return a.statusLocalAgent(ctx, opts)
 	case "uninstall":
-		if code := a.stopLocalAgentLaunchAgent(ctx, true); code != 0 {
+		if code := a.stopLocalAgentLaunchAgent(ctx, opts, true); code != 0 {
 			return code
 		}
 		path, err := ExpandPath(localAgentPlistPath)
@@ -205,7 +209,10 @@ func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
 	return 0
 }
 
-func (a App) stopLocalAgentLaunchAgent(ctx context.Context, ignoreMissing bool) int {
+func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptions, ignoreMissing bool) int {
+	if !a.guardLocalAgentActivity(ctx, opts) {
+		return 1
+	}
 	path, err := ExpandPath(localAgentPlistPath)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -221,6 +228,45 @@ func (a App) stopLocalAgentLaunchAgent(ctx context.Context, ignoreMissing bool) 
 	}
 	fmt.Fprintf(a.Out, "stopped %s\n", localAgentLaunchLabel)
 	return 0
+}
+
+func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions) bool {
+	checkCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	url := fmt.Sprintf("http://%s/activity", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return true
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return true
+	}
+	defer resp.Body.Close()
+	active, recognized := decodeLocalAgentActivityResponse(resp)
+	if !recognized || len(active) == 0 {
+		return true
+	}
+	for _, job := range active {
+		fmt.Fprintf(a.Err, "local-agent has an active transfer: profile=%s direction=%s\n", job.Profile, job.Direction)
+	}
+	return false
+}
+
+func decodeLocalAgentActivityResponse(resp *http.Response) ([]LocalTransferJob, bool) {
+	if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false
+	}
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Active []LocalTransferJob `json:"active"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil || !envelope.OK {
+		return nil, false
+	}
+	return envelope.Data.Active, true
 }
 
 func (a App) statusLocalAgent(ctx context.Context, opts localAgentOptions) int {
@@ -302,11 +348,145 @@ func (a App) newLocalAgentHandler() http.Handler {
 	mux.HandleFunc("/ssh", localAgentCORS(a.localAgentSSHHandler()))
 	mux.HandleFunc("/terminal/check", localAgentCORS(a.localAgentTerminalCheckHandler()))
 	mux.HandleFunc("/terminal/ws", a.localAgentTerminalWSHandler())
-	mux.HandleFunc("/sync/push", localAgentCORS(a.localAgentCommandHandler("push")))
-	mux.HandleFunc("/sync/pull", localAgentCORS(a.localAgentCommandHandler("pull")))
+	mux.HandleFunc("/sync/push", localAgentCORS(a.localAgentTransferHandler("push")))
+	mux.HandleFunc("/sync/pull", localAgentCORS(a.localAgentTransferHandler("pull")))
+	mux.HandleFunc("/sync/job", localAgentCORS(a.localAgentTransferJobHandler()))
+	mux.HandleFunc("/sync/jobs", localAgentCORS(a.localAgentTransferJobsHandler()))
+	mux.HandleFunc("/activity", localAgentCORS(a.localAgentActivityHandler()))
 	mux.HandleFunc("/local/pick", localAgentCORS(a.localAgentPickHandler()))
 	mux.HandleFunc("/local/list", localAgentCORS(a.webLocalListHandler()))
 	return mux
+}
+
+func (a App) localAgentTransferHandler(direction string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req localAgentRequest
+		if err := decodeWebJSON(r, &req); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		job, err := a.startLocalAgentTransfer(req, direction)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"job": job}})
+	}
+}
+
+func (a App) startLocalAgentTransfer(req localAgentRequest, direction string) (LocalTransferJob, error) {
+	if a.LocalTransfers == nil {
+		return LocalTransferJob{}, fmt.Errorf("local transfer manager is not configured")
+	}
+	profileName, configPath, err := writeLocalAgentProfileConfig(req)
+	if err != nil {
+		return LocalTransferJob{}, err
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return LocalTransferJob{}, err
+	}
+	profile, ok := cfg.Profile(profileName)
+	if !ok {
+		return LocalTransferJob{}, fmt.Errorf("profile %q not found", profileName)
+	}
+	if errs := a.Validator.ValidateAccess(profile); len(errs) > 0 {
+		return LocalTransferJob{}, fmt.Errorf("%s", strings.Join(validationMessages(errs), "\n"))
+	}
+	if a.Validator.CheckRsync != nil {
+		if err := a.Validator.CheckRsync(); err != nil {
+			return LocalTransferJob{}, err
+		}
+	}
+
+	var rsyncArgs []string
+	switch direction {
+	case "push":
+		localPath := strings.TrimSpace(req.LocalPath)
+		if localPath == "" {
+			return LocalTransferJob{}, fmt.Errorf("local_path is required")
+		}
+		if _, err := os.Stat(localPath); err != nil {
+			return LocalTransferJob{}, fmt.Errorf("read local path %s: %w", localPath, err)
+		}
+		remotePath := strings.TrimSpace(req.RemotePath)
+		if remotePath == "" {
+			remotePath = "~/Downloads/"
+		}
+		rsyncArgs, err = RsyncPushArgs(profile, localPath, remotePath, mergeSyncFilters(profile.Sync.Push, SyncFilters{}))
+	case "pull":
+		remotePath := strings.TrimSpace(req.RemotePath)
+		if remotePath == "" {
+			remotePath = "~/Downloads/"
+		}
+		localPath := strings.TrimSpace(req.LocalPath)
+		if localPath == "" {
+			localPath = "."
+		} else {
+			localPath, err = ExpandPath(localPath)
+			if err == nil {
+				err = os.MkdirAll(localPath, 0o755)
+			}
+		}
+		if err == nil {
+			rsyncArgs, err = RsyncPullArgs(profile, remotePath, localPath, mergeSyncFilters(profile.Sync.Pull, SyncFilters{}))
+		}
+	default:
+		return LocalTransferJob{}, fmt.Errorf("unsupported transfer direction %q", direction)
+	}
+	if err != nil {
+		return LocalTransferJob{}, err
+	}
+
+	job := a.LocalTransfers.Start(profileName, direction, func(onOutput func(string)) error {
+		return a.Runner.RunRsyncProgress(context.Background(), rsyncArgs, onOutput)
+	})
+	return job, nil
+}
+
+func (a App) localAgentTransferJobHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			writeWebError(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		job, ok := a.LocalTransfers.Get(id)
+		if !ok {
+			writeWebError(w, http.StatusNotFound, "transfer job not found")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"job": job}})
+	}
+}
+
+func (a App) localAgentTransferJobsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		jobs := a.LocalTransfers.List(strings.TrimSpace(r.URL.Query().Get("profile")))
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"jobs": jobs}})
+	}
+}
+
+func (a App) localAgentActivityHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"active": a.LocalTransfers.Active()}})
+	}
 }
 
 func localAgentCORS(next http.HandlerFunc) http.HandlerFunc {

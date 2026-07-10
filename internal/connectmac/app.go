@@ -12,6 +12,7 @@ type Runner interface {
 	StartBackground(ctx context.Context, args []string) (int, error)
 	Stop(pid int) error
 	RunRsync(ctx context.Context, args []string) error
+	RunRsyncProgress(ctx context.Context, args []string, onOutput func(string)) error
 	KnownHostKey(ctx context.Context, host string) (string, error)
 	ScanHostKey(ctx context.Context, host string) (string, error)
 	ForgetHost(ctx context.Context, host string) error
@@ -34,6 +35,7 @@ type App struct {
 	MemberStore        MemberRepository
 	LogManager         LogManager
 	SyncHistory        SyncHistoryStore
+	LocalTransfers     *LocalTransferJobManager
 	KnownHosts         string
 	RemoteUserAPI      bool
 	LoginConfigCleanup bool
@@ -53,6 +55,7 @@ func NewApp(out, err io.Writer) App {
 		MemberStore:        NewMemberStore(DefaultMemberDataPath),
 		LogManager:         NewLogManager(DefaultLogDir),
 		SyncHistory:        NewSyncHistoryStore(DefaultSyncHistoryPath),
+		LocalTransfers:     NewLocalTransferJobManager(),
 		KnownHosts:         "~/.ssh/known_hosts",
 		LoginConfigCleanup: true,
 	}
