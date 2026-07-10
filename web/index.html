@@ -860,7 +860,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -1364,6 +1364,10 @@
 
     function profileVNCReady(name) {
       return state.terminalConnectedProfiles.has(name);
+    }
+
+    function isLocalPortInUseError(err) {
+      return /local port \d+ is already in use/i.test(String(err?.message || err || ""));
     }
 
     function renderProfiles() {
@@ -1880,10 +1884,18 @@
       setBusy(true, "正在打开 VNC...");
       setStatus("VNC 打开中...");
       try {
-        const start = await localAgentAPI("/start", {
-          method: "POST",
-          body: JSON.stringify(localAgentPayload(profile))
-        });
+        let start = null;
+        try {
+          start = await localAgentAPI("/start", {
+            method: "POST",
+            body: JSON.stringify(localAgentPayload(profile))
+          });
+        } catch (err) {
+          if (!isLocalPortInUseError(err) || !profileVNCReady(profile)) {
+            throw err;
+          }
+          start = { output: "检测到本地 VNC 端口已被占用，按已有连接继续打开 VNC。\n" };
+        }
         const opened = await localAgentAPI("/open-vnc", {
           method: "POST",
           body: JSON.stringify(localAgentPayload(profile))
@@ -2156,6 +2168,7 @@
       closeTerminal(false);
       state.terminal.profile = profile;
       state.terminal.manualClose = false;
+      state.terminal.returnOnClose = false;
       terminalClear();
       terminalSetStatus("正在处理本机 SSH 指纹...");
       try {
@@ -2194,8 +2207,13 @@
         };
         socket.onclose = () => {
           const wasManual = state.terminal.manualClose;
+          const shouldReturn = state.terminal.returnOnClose;
           state.terminal.socket = null;
+          state.terminal.returnOnClose = false;
           terminalSetStatus(wasManual ? "终端已断开" : "终端连接已关闭");
+          if (shouldReturn && state.view === "terminalView") {
+            showView("operationsView");
+          }
           renderSelected();
         };
       } catch (err) {
@@ -2205,10 +2223,16 @@
       }
     }
 
-    function closeTerminal(manual = true) {
+    function closeTerminal(manual = true, returnOnClose = false) {
       const socket = state.terminal.socket;
-      if (!socket) return;
+      if (!socket) {
+        if (returnOnClose && state.view === "terminalView") {
+          showView("operationsView");
+        }
+        return;
+      }
       state.terminal.manualClose = manual;
+      state.terminal.returnOnClose = returnOnClose;
       state.terminal.socket = null;
       socket.close();
       renderSelected();
@@ -3082,7 +3106,7 @@
       if (p) connectLocalTerminal(p.name);
     });
     $("terminalDisconnectBtn").addEventListener("click", () => {
-      closeTerminal(true);
+      closeTerminal(true, true);
       terminalSetStatus("终端已断开");
     });
     document.querySelectorAll("[data-terminal-command]").forEach((button) => {
@@ -3092,7 +3116,11 @@
         } else {
           $("terminalSurface").focus();
         }
-        sendTerminalInput(button.getAttribute("data-terminal-command") + "\r");
+        const command = button.getAttribute("data-terminal-command") || "";
+        if (command.trim() === "exit") {
+          state.terminal.returnOnClose = true;
+        }
+        sendTerminalInput(command + "\r");
       });
     });
     document.querySelectorAll("[data-view]").forEach((button) => {

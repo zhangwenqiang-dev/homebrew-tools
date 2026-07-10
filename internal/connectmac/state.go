@@ -136,5 +136,9 @@ func ProcessRunning(pid int) bool {
 		return false
 	}
 	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	return processSignalMeansRunning(err)
+}
+
+func processSignalMeansRunning(err error) bool {
+	return err == nil || errors.Is(err, syscall.EPERM)
 }

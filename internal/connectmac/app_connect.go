@@ -27,20 +27,28 @@ func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {
 	return 0
 }
 func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
+	profileRef := ""
+	if len(args) == 1 {
+		profileRef = args[0]
+	}
 	profile, ok := requireProfileArg(a.Err, cfg, args)
 	if !ok {
 		return 2
 	}
 	profile = a.promptMissingIdentityFile(profile)
-	if !a.validateAndSummarize(profile) {
-		return 1
+	stateKey := profile.Name
+	if stateKey == "" {
+		stateKey = profileRef
 	}
-	if state, ok, err := a.StateManager.Load(profile.Name); err != nil {
+	if state, ok, err := a.StateManager.Load(stateKey); err != nil {
 		fmt.Fprintf(a.Err, "load state: %v\n", err)
 		return 1
 	} else if ok {
-		fmt.Fprintf(a.Out, "already started %s with pid %d\n", profile.Name, state.PID)
+		fmt.Fprintf(a.Out, "already started %s with pid %d\n", stateKey, state.PID)
 		return 0
+	}
+	if !a.validateAndSummarize(profile) {
+		return 1
 	}
 	check, err := a.fixHostKey(ctx, profile)
 	if err != nil {

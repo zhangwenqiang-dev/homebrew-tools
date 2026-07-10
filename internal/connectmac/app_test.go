@@ -2480,6 +2480,9 @@ func TestAppStartReusesExistingRunningTunnel(t *testing.T) {
 	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
+	app.Validator.CheckPort = func(port int) error {
+		return fmt.Errorf("local port %d is already in use", port)
+	}
 	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
 	if err := app.StateManager.Save(State{Profile: "xcode-vnc", PID: 77, Target: "user@mac-host.example.com"}); err != nil {
 		t.Fatal(err)

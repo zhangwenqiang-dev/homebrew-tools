@@ -175,6 +175,9 @@ func mergeConfigs(dst *Config, src Config, source string) error {
 		if _, exists := dst.Profiles[name]; exists {
 			return fmt.Errorf("duplicate profile %q in %s", name, source)
 		}
+		if profile.Name == "" {
+			profile.Name = name
+		}
 		dst.Profiles[name] = profile
 	}
 	return nil
@@ -748,6 +751,9 @@ func NormalizeIdentityFileInput(value string) string {
 func (c Config) Profile(name string) (Profile, bool) {
 	p, ok := c.Profiles[name]
 	if ok {
+		if p.Name == "" {
+			p.Name = name
+		}
 		p.ApplyDefaults(c.Defaults)
 	}
 	return p, ok

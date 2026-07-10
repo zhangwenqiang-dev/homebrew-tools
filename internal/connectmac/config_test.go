@@ -143,6 +143,19 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+func TestConfigProfileFillsMissingNameFromMapKey(t *testing.T) {
+	cfg := Config{Profiles: map[string]Profile{
+		"iossupport-usw2": {Host: "mac-host.example.com"},
+	}}
+	profile, ok := cfg.Profile("iossupport-usw2")
+	if !ok {
+		t.Fatal("expected profile")
+	}
+	if profile.Name != "iossupport-usw2" {
+		t.Fatalf("profile name = %q", profile.Name)
+	}
+}
+
 func TestProfileByAppleEmail(t *testing.T) {
 	cfg, err := ParseConfig(sampleConfig)
 	if err != nil {

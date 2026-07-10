@@ -1,7 +1,9 @@
 package connectmac
 
 import (
+	"errors"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -64,5 +66,14 @@ func TestStateList(t *testing.T) {
 	}
 	if len(states) != 1 {
 		t.Fatalf("state count = %d, want 1", len(states))
+	}
+}
+
+func TestProcessSignalMeansRunningTreatsPermissionDeniedAsRunning(t *testing.T) {
+	if !processSignalMeansRunning(syscall.EPERM) {
+		t.Fatalf("EPERM should be treated as running")
+	}
+	if processSignalMeansRunning(errors.New("missing")) {
+		t.Fatalf("generic errors should not be treated as running")
 	}
 }
