@@ -872,7 +872,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncJobs: {}, syncPollTimers: {}, syncPollTimeouts: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollTimeouts: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -1118,6 +1118,9 @@
       showView(payload.view || "profilesView", { history: false });
       renderProfiles();
       renderSelected();
+      if (payload.view === "syncView" && payload.selected) {
+        restoreSyncProfile(payload.selected).catch(() => {});
+      }
     }
 
     async function loadChallenge() {
@@ -1607,6 +1610,7 @@
       const openDisabled = disabled || state.busy || !statusKnown || isReady;
       const destroyDisabled = disabled || state.busy || !statusKnown || !isReady;
       const reminder = p ? state.reminders[p.name] : null;
+      const syncJobsLoading = !!(p && state.syncJobsLoading[p.name]);
       for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
@@ -1615,14 +1619,14 @@
       $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released";
       $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
       $("syncBtn").disabled = readyActionDisabled;
-      $("syncPushBtn").disabled = readyActionDisabled || syncJobActive(syncJob(p?.name, "push"));
-      $("syncPullBtn").disabled = readyActionDisabled || syncJobActive(syncJob(p?.name, "pull"));
+      $("syncPushBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobActive(syncJob(p?.name, "push"));
+      $("syncPullBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobActive(syncJob(p?.name, "pull"));
       $("syncPushBrowseBtn").disabled = readyActionDisabled;
       $("syncPullBrowseBtn").disabled = readyActionDisabled;
       $("terminalBtn").disabled = readyActionDisabled;
       $("syncRefreshHistoryBtn").disabled = disabled || state.busy;
       $("syncTitle").textContent = p ? ("传输 · " + p.name) : "传输";
-      $("syncReadyHint").textContent = !state.localAgent.online ? "本机代理未启动，不能传输。" : (p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : "");
+      $("syncReadyHint").textContent = !state.localAgent.online ? "本机代理未启动，不能传输。" : (p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : (syncJobsLoading ? "正在加载传输任务..." : ""));
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
@@ -1951,8 +1955,22 @@
       showView("syncView");
       renderProfiles();
       renderSelected();
-      await Promise.all([loadSyncHistory(profile), loadSyncJobs(profile)]);
-      presentLatestSyncJob(profile);
+      await restoreSyncProfile(profile);
+    }
+
+    async function restoreSyncProfile(profile) {
+      if (!profile || state.view !== "syncView" || state.selected !== profile) return;
+      const generation = ++state.syncViewGeneration;
+      state.syncHistory = [];
+      renderSyncHistory();
+      setOutput("");
+      setStatus("正在加载传输任务...");
+      const jobsPromise = loadSyncJobs(profile);
+      presentLatestSyncJob(profile, "正在加载传输任务...");
+      const [jobsLoaded] = await Promise.all([jobsPromise, loadSyncHistory(profile, { quiet: true })]);
+      if (generation !== state.syncViewGeneration || state.view !== "syncView" || state.selected !== profile) return;
+      presentLatestSyncJob(profile, jobsLoaded ? "还没有传输任务。" : "状态暂时不可用");
+      if (!jobsLoaded) setStatus("状态暂时不可用");
     }
 
     async function openLocalPicker(target) {
@@ -2016,13 +2034,15 @@
     async function loadSyncHistory(profileName = "", options = {}) {
       const p = profileName ? state.profiles.find((item) => item.name === profileName) : selectedProfile();
       if (!p) return;
+      const generation = (state.syncHistoryGenerations[p.name] || 0) + 1;
+      state.syncHistoryGenerations[p.name] = generation;
       try {
         const body = await api("/api/sync/history?profile=" + encodeURIComponent(p.name));
-        if (state.selected !== p.name) return;
+        if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name) return;
         state.syncHistory = body.data.items || [];
         renderSyncHistory();
       } catch (err) {
-        if (state.selected !== p.name || options.quiet) return;
+        if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name || options.quiet) return;
         setOutput(String(err.message || err));
         setStatus("同步历史读取失败");
       }
@@ -2115,11 +2135,50 @@
       setStatus(syncJobStatusLabel(job));
     }
 
-    function presentLatestSyncJob(profile) {
+    function presentLatestSyncJob(profile, emptyStatus = "还没有传输任务。") {
       if (state.view !== "syncView" || state.selected !== profile) return;
       const jobs = [syncJob(profile, "push"), syncJob(profile, "pull")].filter(Boolean);
       jobs.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-      if (jobs[0]) presentSyncJob(jobs[0]);
+      if (jobs[0]) {
+        presentSyncJob(jobs[0]);
+        return;
+      }
+      renderSyncProgress("push", null);
+      renderSyncProgress("pull", null);
+      setOutput("");
+      setStatus(emptyStatus);
+    }
+
+    function syncJobStatusRank(status) {
+      if (status === "queued") return 1;
+      if (status === "running") return 2;
+      if (status === "succeeded" || status === "failed" || status === "interrupted") return 3;
+      return 0;
+    }
+
+    function newerSyncJob(current, incoming) {
+      if (!current) return incoming;
+      if (!incoming) return current;
+      const currentCreated = new Date(current.created_at || 0).getTime() || 0;
+      const incomingCreated = new Date(incoming.created_at || 0).getTime() || 0;
+      if (currentCreated > incomingCreated) return current;
+      if (incomingCreated > currentCreated) return incoming;
+      if (current.id !== incoming.id) return syncJobActive(current) ? current : incoming;
+      const currentRank = syncJobStatusRank(current.status);
+      const incomingRank = syncJobStatusRank(incoming.status);
+      if (currentRank > incomingRank) return current;
+      if (currentRank === incomingRank && Number(current.percent || 0) > Number(incoming.percent || 0)) return current;
+      if (currentRank === incomingRank && String(current.output || "").length > String(incoming.output || "").length) return current;
+      return incoming;
+    }
+
+    function latestSyncJob(jobs, direction) {
+      return jobs.filter((job) => job.direction === direction).reduce((latest, job) => {
+        if (!latest) return job;
+        const latestCreated = new Date(latest.created_at || 0).getTime() || 0;
+        const jobCreated = new Date(job.created_at || 0).getTime() || 0;
+        return jobCreated > latestCreated ? job : latest;
+      }, null);
     }
 
     function scheduleSyncPoll(job, delay = 1000) {
@@ -2144,12 +2203,13 @@
         const job = body.data?.job;
         if (!job || job.id !== jobID) throw new Error("传输任务响应无效");
         if (state.syncJobs[key]?.id !== jobID) return;
-        state.syncJobs[key] = job;
+        state.syncJobs[key] = newerSyncJob(state.syncJobs[key], job);
+        const savedJob = state.syncJobs[key];
         delete state.syncPollUnavailable[key];
-        presentSyncJob(job);
+        presentSyncJob(savedJob);
         renderSelected();
-        if (syncJobActive(job)) {
-          scheduleSyncPoll(job);
+        if (syncJobActive(savedJob)) {
+          scheduleSyncPoll(savedJob);
         } else if (state.view === "syncView" && state.selected === profile) {
           Promise.all([loadSyncHistory(profile, { quiet: true }), loadEvents(false)]).catch(() => {});
         }
@@ -2181,22 +2241,31 @@
     }
 
     async function loadSyncJobs(profile) {
-      if (!profile) return;
+      if (!profile) return false;
+      const generation = (state.syncJobsGenerations[profile] || 0) + 1;
+      state.syncJobsGenerations[profile] = generation;
+      state.syncJobsLoading[profile] = true;
+      if (state.selected === profile) renderSelected();
       try {
         const body = await localAgentAPI("/sync/jobs?profile=" + encodeURIComponent(profile));
+        if (state.syncJobsGenerations[profile] !== generation) return false;
         const jobs = body.data?.jobs || [];
         for (const direction of ["push", "pull"]) {
-          const latest = jobs.find((job) => job.direction === direction);
+          const latest = latestSyncJob(jobs, direction);
           if (!latest) continue;
           const key = syncJobKey(profile, direction);
-          state.syncJobs[key] = latest;
+          state.syncJobs[key] = newerSyncJob(state.syncJobs[key], latest);
           delete state.syncPollUnavailable[key];
-          if (syncJobActive(latest)) scheduleSyncPoll(latest);
+          if (syncJobActive(state.syncJobs[key])) scheduleSyncPoll(state.syncJobs[key]);
         }
-        if (state.selected === profile) renderSelected();
+        return true;
       } catch (err) {
-        if (state.selected !== profile) return;
-        setStatus("状态暂时不可用");
+        return false;
+      } finally {
+        if (state.syncJobsGenerations[profile] === generation) {
+          delete state.syncJobsLoading[profile];
+          if (state.selected === profile) renderSelected();
+        }
       }
     }
 
@@ -2226,6 +2295,7 @@
         setStatus("Mac 未 ready，不能传输。");
         return;
       }
+      if (state.syncJobsLoading[p.name]) return;
       if (syncJobActive(syncJob(p.name, direction))) return;
       const payload = { profile: p.name };
       if (direction === "push") {
@@ -2249,13 +2319,13 @@
         const job = body.data?.job;
         if (!job?.id) throw new Error("传输任务启动响应无效");
         const key = syncJobKey(job.profile || p.name, job.direction || direction);
-        state.syncJobs[key] = job;
+        state.syncJobs[key] = newerSyncJob(state.syncJobs[key], job);
         delete state.syncPollUnavailable[key];
         setBusy(false);
         renderProfiles();
         renderSelected();
-        presentSyncJob(job);
-        scheduleSyncPoll(job);
+        presentSyncJob(state.syncJobs[key]);
+        scheduleSyncPoll(state.syncJobs[key]);
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus(label + "启动失败");
