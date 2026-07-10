@@ -744,6 +744,10 @@
                 <button id="syncPullBrowseBtn">选择</button>
               </div>
               <button id="syncPullBtn" class="primary">开始下载</button>
+              <div id="syncPullProgress" class="sync-progress hidden">
+                <div class="sync-progress-row"><span id="syncPullProgressLabel">下载准备中</span><strong id="syncPullProgressPercent">0%</strong></div>
+                <div class="sync-progress-track"><div id="syncPullProgressBar" class="sync-progress-bar"></div></div>
+              </div>
             </div>
           </div>
           <div class="sync-history">
@@ -868,7 +872,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncProgressTimer: null, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncJobs: {}, syncPollTimers: {}, syncPollTimeouts: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -960,7 +964,11 @@
         ...options
       });
       const body = await res.json();
-      if (!body.ok) throw new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+      if (!body.ok) {
+        const err = new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+        err.status = res.status;
+        throw err;
+      }
       return body;
     }
 
@@ -1607,8 +1615,8 @@
       $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released";
       $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
       $("syncBtn").disabled = readyActionDisabled;
-      $("syncPushBtn").disabled = readyActionDisabled;
-      $("syncPullBtn").disabled = readyActionDisabled;
+      $("syncPushBtn").disabled = readyActionDisabled || syncJobActive(syncJob(p?.name, "push"));
+      $("syncPullBtn").disabled = readyActionDisabled || syncJobActive(syncJob(p?.name, "pull"));
       $("syncPushBrowseBtn").disabled = readyActionDisabled;
       $("syncPullBrowseBtn").disabled = readyActionDisabled;
       $("terminalBtn").disabled = readyActionDisabled;
@@ -1618,6 +1626,8 @@
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
+      renderSyncProgress("push", syncJob(p?.name, "push"));
+      renderSyncProgress("pull", syncJob(p?.name, "pull"));
       $("decisionValue").textContent = status ? statusLabel(status) + (status.detail ? " · " + status.detail : "") : "-";
       $("readyValue").textContent = status ? String(!!status.ready) : "-";
       $("ipValue").textContent = status?.elastic_ip?.public_ip || firstInstanceIP(status) || "-";
@@ -1941,7 +1951,8 @@
       showView("syncView");
       renderProfiles();
       renderSelected();
-      await loadSyncHistory();
+      await Promise.all([loadSyncHistory(profile), loadSyncJobs(profile)]);
+      presentLatestSyncJob(profile);
     }
 
     async function openLocalPicker(target) {
@@ -2002,14 +2013,16 @@
       setStatus("已选择本机目录");
     }
 
-    async function loadSyncHistory() {
-      const p = selectedProfile();
+    async function loadSyncHistory(profileName = "", options = {}) {
+      const p = profileName ? state.profiles.find((item) => item.name === profileName) : selectedProfile();
       if (!p) return;
       try {
         const body = await api("/api/sync/history?profile=" + encodeURIComponent(p.name));
+        if (state.selected !== p.name) return;
         state.syncHistory = body.data.items || [];
         renderSyncHistory();
       } catch (err) {
+        if (state.selected !== p.name || options.quiet) return;
         setOutput(String(err.message || err));
         setStatus("同步历史读取失败");
       }
@@ -2048,39 +2061,143 @@
       setStatus("已填充同步记录");
     }
 
-    function setSyncPushProgress(percent, label) {
-      const value = Math.max(0, Math.min(100, Math.round(percent || 0)));
-      $("syncPushProgress").classList.remove("hidden");
-      $("syncPushProgressBar").style.width = value + "%";
-      $("syncPushProgressPercent").textContent = value + "%";
-      $("syncPushProgressLabel").textContent = label || "上传中";
+    function syncJobKey(profile, direction) {
+      return profile && direction ? profile + "\n" + direction : "";
     }
 
-    function stopSyncPushProgressTimer() {
-      if (state.syncProgressTimer) {
-        window.clearInterval(state.syncProgressTimer);
-        state.syncProgressTimer = null;
+    function syncJob(profile, direction) {
+      return state.syncJobs[syncJobKey(profile, direction)] || null;
+    }
+
+    function syncJobActive(job) {
+      return job?.status === "queued" || job?.status === "running";
+    }
+
+    function syncDirectionLabel(direction) {
+      return direction === "push" ? "上传" : "下载";
+    }
+
+    function syncJobStatusLabel(job) {
+      const label = syncDirectionLabel(job?.direction);
+      if (!job) return label + "准备中";
+      if (state.syncPollUnavailable[syncJobKey(job.profile, job.direction)]) return "状态暂时不可用";
+      if (job.status === "queued") return label + "排队中";
+      if (job.status === "running") return label + "中";
+      if (job.status === "succeeded") return label + "完成";
+      if (job.status === "failed") return label + "失败";
+      if (job.status === "interrupted") return label + "已中断";
+      return label + "状态未知";
+    }
+
+    function syncJobOutput(job) {
+      if (!job) return "";
+      return [job.output || "", job.error || ""].filter(Boolean).join("\n");
+    }
+
+    function renderSyncProgress(direction, job) {
+      const prefix = direction === "push" ? "syncPush" : "syncPull";
+      if (!job) {
+        $(prefix + "Progress").classList.add("hidden");
+        return;
+      }
+      const percent = Number.isFinite(Number(job.percent)) ? Number(job.percent) : 0;
+      const value = Math.max(0, Math.min(100, Math.round(percent)));
+      $(prefix + "Progress").classList.remove("hidden");
+      $(prefix + "ProgressBar").style.width = value + "%";
+      $(prefix + "ProgressPercent").textContent = value + "%";
+      $(prefix + "ProgressLabel").textContent = syncJobStatusLabel(job);
+    }
+
+    function presentSyncJob(job) {
+      if (!job || state.view !== "syncView" || state.selected !== job.profile) return;
+      renderSyncProgress(job.direction, job);
+      setOutput(syncJobOutput(job));
+      setStatus(syncJobStatusLabel(job));
+    }
+
+    function presentLatestSyncJob(profile) {
+      if (state.view !== "syncView" || state.selected !== profile) return;
+      const jobs = [syncJob(profile, "push"), syncJob(profile, "pull")].filter(Boolean);
+      jobs.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      if (jobs[0]) presentSyncJob(jobs[0]);
+    }
+
+    function scheduleSyncPoll(job, delay = 1000) {
+      if (!syncJobActive(job)) return;
+      const key = syncJobKey(job.profile, job.direction);
+      if (state.syncPollTimers[key]) window.clearTimeout(state.syncPollTimers[key]);
+      state.syncPollTimers[key] = window.setTimeout(() => {
+        delete state.syncPollTimers[key];
+        pollSyncJob(job.profile, job.direction, job.id);
+      }, delay);
+    }
+
+    async function pollSyncJob(profile, direction, jobID) {
+      const key = syncJobKey(profile, direction);
+      const current = state.syncJobs[key];
+      if (!current || current.id !== jobID || !syncJobActive(current)) return;
+      if (state.syncPollTimeouts[key]) return;
+      const controller = new AbortController();
+      state.syncPollTimeouts[key] = window.setTimeout(() => controller.abort(), 8000);
+      try {
+        const body = await localAgentAPI("/sync/job?id=" + encodeURIComponent(jobID), { signal: controller.signal });
+        const job = body.data?.job;
+        if (!job || job.id !== jobID) throw new Error("传输任务响应无效");
+        if (state.syncJobs[key]?.id !== jobID) return;
+        state.syncJobs[key] = job;
+        delete state.syncPollUnavailable[key];
+        presentSyncJob(job);
+        renderSelected();
+        if (syncJobActive(job)) {
+          scheduleSyncPoll(job);
+        } else if (state.view === "syncView" && state.selected === profile) {
+          Promise.all([loadSyncHistory(profile, { quiet: true }), loadEvents(false)]).catch(() => {});
+        }
+      } catch (err) {
+        const job = state.syncJobs[key];
+        if (!job || job.id !== jobID || !syncJobActive(job)) return;
+        if (err.status === 404 || /transfer job not found/i.test(String(err.message || err))) {
+          state.syncJobs[key] = {
+            ...job,
+            status: "interrupted",
+            error: [job.error || "", "传输任务不存在"].filter(Boolean).join("\n"),
+            finished_at: new Date().toISOString()
+          };
+          delete state.syncPollUnavailable[key];
+          presentSyncJob(state.syncJobs[key]);
+          renderSelected();
+          return;
+        }
+        state.syncPollUnavailable[key] = true;
+        presentSyncJob(job);
+        renderSelected();
+        scheduleSyncPoll(job);
+      } finally {
+        if (state.syncPollTimeouts[key]) {
+          window.clearTimeout(state.syncPollTimeouts[key]);
+          delete state.syncPollTimeouts[key];
+        }
       }
     }
 
-    function startSyncPushProgress() {
-      stopSyncPushProgressTimer();
-      setSyncPushProgress(0, "上传准备中");
-      let percent = 0;
-      state.syncProgressTimer = window.setInterval(() => {
-        percent = Math.min(95, percent + Math.max(1, Math.round((95 - percent) * 0.08)));
-        setSyncPushProgress(percent, "上传中");
-        if (percent >= 95) {
-          stopSyncPushProgressTimer();
+    async function loadSyncJobs(profile) {
+      if (!profile) return;
+      try {
+        const body = await localAgentAPI("/sync/jobs?profile=" + encodeURIComponent(profile));
+        const jobs = body.data?.jobs || [];
+        for (const direction of ["push", "pull"]) {
+          const latest = jobs.find((job) => job.direction === direction);
+          if (!latest) continue;
+          const key = syncJobKey(profile, direction);
+          state.syncJobs[key] = latest;
+          delete state.syncPollUnavailable[key];
+          if (syncJobActive(latest)) scheduleSyncPoll(latest);
         }
-      }, 600);
-    }
-
-    function parseRsyncPercent(text) {
-      const matches = String(text || "").match(/(\d{1,3})%/g);
-      if (!matches || !matches.length) return 0;
-      const last = matches[matches.length - 1].replace("%", "");
-      return Number(last) || 0;
+        if (state.selected === profile) renderSelected();
+      } catch (err) {
+        if (state.selected !== profile) return;
+        setStatus("状态暂时不可用");
+      }
     }
 
     async function deleteSyncHistory(id) {
@@ -2109,6 +2226,7 @@
         setStatus("Mac 未 ready，不能传输。");
         return;
       }
+      if (syncJobActive(syncJob(p.name, direction))) return;
       const payload = { profile: p.name };
       if (direction === "push") {
         payload.local_path = $("syncPushLocalPath").value.trim();
@@ -2117,14 +2235,9 @@
         payload.remote_path = $("syncPullRemotePath").value.trim();
         payload.local_path = $("syncPullLocalPath").value.trim();
       }
-      setBusy(true, direction === "push" ? "正在上传..." : "正在下载...");
-      setStatus(direction === "push" ? "上传中..." : "下载中...");
-      if (direction === "push") {
-        startSyncPushProgress();
-      } else {
-        stopSyncPushProgressTimer();
-        $("syncPushProgress").classList.add("hidden");
-      }
+      const label = syncDirectionLabel(direction);
+      setBusy(true, "正在启动" + label + "...");
+      setStatus("正在启动" + label + "...");
       try {
         if (!state.localAgent.online) {
           throw new Error("本机代理未启动，请先运行 cm local-agent");
@@ -2133,23 +2246,21 @@
           method: "POST",
           body: JSON.stringify(localAgentPayload(p.name, payload))
         });
-        setOutput((body.output || "") + (body.error || ""));
-        if (direction === "push") {
-          const percent = parseRsyncPercent((body.output || "") + "\n" + (body.error || "")) || 100;
-          stopSyncPushProgressTimer();
-          setSyncPushProgress(percent, "上传完成");
-        }
-        setStatus(direction === "push" ? "上传完成" : "下载完成");
-        await Promise.all([loadSyncHistory(), loadEvents(false)]);
-      } catch (err) {
-        if (direction === "push") {
-          stopSyncPushProgressTimer();
-          $("syncPushProgressLabel").textContent = "上传失败";
-        }
-        setOutput(String(err.message || err));
-        setStatus(direction === "push" ? "上传失败" : "下载失败");
-      } finally {
+        const job = body.data?.job;
+        if (!job?.id) throw new Error("传输任务启动响应无效");
+        const key = syncJobKey(job.profile || p.name, job.direction || direction);
+        state.syncJobs[key] = job;
+        delete state.syncPollUnavailable[key];
         setBusy(false);
+        renderProfiles();
+        renderSelected();
+        presentSyncJob(job);
+        scheduleSyncPoll(job);
+      } catch (err) {
+        setOutput(String(err.message || err));
+        setStatus(label + "启动失败");
+      } finally {
+        if (state.busy) setBusy(false);
         renderProfiles();
         renderSelected();
       }
@@ -3160,7 +3271,7 @@
       openSync(p.name);
     });
     $("syncBackBtn").addEventListener("click", () => showView("operationsView"));
-    $("syncRefreshHistoryBtn").addEventListener("click", loadSyncHistory);
+    $("syncRefreshHistoryBtn").addEventListener("click", () => loadSyncHistory());
     $("syncPushBrowseBtn").addEventListener("click", () => openLocalPicker("syncPushLocalPath"));
     $("syncPullBrowseBtn").addEventListener("click", () => openLocalPicker("syncPullLocalPath"));
     $("syncPushBtn").addEventListener("click", () => runSync("push"));
