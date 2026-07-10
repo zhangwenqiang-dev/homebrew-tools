@@ -142,13 +142,13 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 }
 
 func (a App) installLocalAgentLaunchAgent(opts localAgentOptions) int {
-	executable, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(a.Err, "resolve cm executable: %v\n", err)
-		return 1
-	}
-	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
-		executable = resolved
+	executable, err := exec.LookPath("cm")
+	if err != nil || executable == "" {
+		executable, err = os.Executable()
+		if err != nil {
+			fmt.Fprintf(a.Err, "resolve cm executable: %v\n", err)
+			return 1
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
