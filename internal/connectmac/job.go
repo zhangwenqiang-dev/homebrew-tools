@@ -20,12 +20,15 @@ const DefaultJobDir = "~/.connectmac/jobs"
 type JobStatus string
 
 const (
-	JobStatusRunning  JobStatus = "running"
-	JobStatusSuccess  JobStatus = "success"
-	JobStatusFailed   JobStatus = "failed"
-	JobStatusDeferred JobStatus = "deferred"
-	JobStatusUnknown  JobStatus = "unknown"
+	JobStatusRunning     JobStatus = "running"
+	JobStatusSuccess     JobStatus = "success"
+	JobStatusFailed      JobStatus = "failed"
+	JobStatusDeferred    JobStatus = "deferred"
+	JobStatusInterrupted JobStatus = "interrupted"
+	JobStatusUnknown     JobStatus = "unknown"
 )
+
+const interruptedJobError = "background process exited before recording completion"
 
 type Job struct {
 	ID          string    `json:"id"`
@@ -49,7 +52,17 @@ type JobManager struct {
 	Executable string
 	Now        func() time.Time
 	IsRunning  func(pid int) bool
+	Sleep      func(ctx context.Context, duration time.Duration) error
 	Notify     func(title, message string) error
+}
+
+type WaitAllTimeoutError struct {
+	Timeout time.Duration
+	Active  []Job
+}
+
+func (e *WaitAllTimeoutError) Error() string {
+	return fmt.Sprintf("timed out after %s waiting for %d active job(s)", e.Timeout, len(e.Active))
 }
 
 func NewJobManager(dir string) JobManager {
@@ -57,6 +70,7 @@ func NewJobManager(dir string) JobManager {
 		Dir:       dir,
 		Now:       time.Now,
 		IsRunning: ProcessRunning,
+		Sleep:     sleepContext,
 		Notify:    SendMacNotification,
 	}
 }
@@ -70,6 +84,9 @@ func (m JobManager) normalize() JobManager {
 	}
 	if m.IsRunning == nil {
 		m.IsRunning = ProcessRunning
+	}
+	if m.Sleep == nil {
+		m.Sleep = sleepContext
 	}
 	if m.Notify == nil {
 		m.Notify = SendMacNotification
@@ -117,7 +134,27 @@ func (m JobManager) Save(job Job) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	temp, err := os.CreateTemp(filepath.Dir(path), ".job-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary job file: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return fmt.Errorf("chmod temporary job file: %w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return fmt.Errorf("write temporary job file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close temporary job file: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace job file: %w", err)
+	}
+	return nil
 }
 
 func (m JobManager) Load(id string) (Job, error) {
@@ -133,7 +170,7 @@ func (m JobManager) Load(id string) (Job, error) {
 	if err := json.Unmarshal(data, &job); err != nil {
 		return Job{}, err
 	}
-	return m.refresh(job), nil
+	return job, nil
 }
 
 func (m JobManager) List() ([]Job, error) {
@@ -156,7 +193,7 @@ func (m JobManager) List() ([]Job, error) {
 		}
 		job, err := m.Load(entry.Name())
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("load job %s: %w", entry.Name(), err)
 		}
 		jobs = append(jobs, job)
 	}
@@ -164,6 +201,81 @@ func (m JobManager) List() ([]Job, error) {
 		return jobs[i].StartedAt.After(jobs[j].StartedAt)
 	})
 	return jobs, nil
+}
+
+func (m JobManager) Reconcile() error {
+	m = m.normalize()
+	jobs, err := m.List()
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job.Status != JobStatusRunning || job.PID <= 0 || m.IsRunning(job.PID) {
+			continue
+		}
+		job.Status = JobStatusInterrupted
+		job.FinishedAt = m.Now()
+		job.LastError = interruptedJobError
+		if err := m.Save(job); err != nil {
+			return fmt.Errorf("save reconciled job %s: %w", job.ID, err)
+		}
+	}
+	return nil
+}
+
+func (m JobManager) Active() ([]Job, error) {
+	m = m.normalize()
+	if err := m.Reconcile(); err != nil {
+		return nil, err
+	}
+	jobs, err := m.List()
+	if err != nil {
+		return nil, err
+	}
+	active := make([]Job, 0)
+	for _, job := range jobs {
+		if job.Status == JobStatusRunning {
+			active = append(active, job)
+		}
+	}
+	return active, nil
+}
+
+func (m JobManager) WaitAll(ctx context.Context, timeout, interval time.Duration, progress func(time.Duration, []Job)) error {
+	m = m.normalize()
+	if timeout <= 0 {
+		return fmt.Errorf("timeout must be positive")
+	}
+	if interval <= 0 {
+		return fmt.Errorf("interval must be positive")
+	}
+	started := m.Now()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		active, err := m.Active()
+		if err != nil {
+			return err
+		}
+		if len(active) == 0 {
+			return nil
+		}
+		elapsed := m.Now().Sub(started)
+		if elapsed > 0 && progress != nil {
+			progress(elapsed, active)
+		}
+		if elapsed >= timeout {
+			return &WaitAllTimeoutError{Timeout: timeout, Active: active}
+		}
+		wait := interval
+		if remaining := timeout - elapsed; wait > remaining {
+			wait = remaining
+		}
+		if err := m.Sleep(ctx, wait); err != nil {
+			return err
+		}
+	}
 }
 
 func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
@@ -260,14 +372,6 @@ func (m JobManager) JobPath(id string) (string, error) {
 	return filepath.Join(dir, id, "job.json"), nil
 }
 
-func (m JobManager) refresh(job Job) Job {
-	m = m.normalize()
-	if job.Status == JobStatusRunning && job.PID > 0 && !m.IsRunning(job.PID) {
-		job.Status = JobStatusUnknown
-	}
-	return job
-}
-
 func newJobID(jobType, profile string, at time.Time) string {
 	parts := []string{slugPart(jobType), slugPart(profile), at.Format("20060102150405")}
 	out := []string{}
@@ -280,6 +384,17 @@ func newJobID(jobType, profile string, at time.Time) string {
 		return "job-" + at.Format("20060102150405")
 	}
 	return strings.Join(out, "-")
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func slugPart(value string) string {

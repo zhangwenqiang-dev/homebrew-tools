@@ -65,6 +65,9 @@ func (a App) printUsage() {
   cm job status <job-id>
   cm job log <job-id>
   cm job wait <job-id>
+  cm job run <job-id>
+  cm job active [--json]
+  cm job wait-all [--timeout 2h] [--interval 10s]
   cm web [--host 127.0.0.1] [--port 8765] [--open] [--web-dir <path>] [--config <path>]
   cm local-agent [--host 127.0.0.1] [--port 18765]
   cm local-agent install [--host 127.0.0.1] [--port 18765]

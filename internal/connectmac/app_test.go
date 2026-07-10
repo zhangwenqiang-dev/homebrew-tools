@@ -3588,6 +3588,494 @@ func TestJobManagerRunJobMarksDeferred(t *testing.T) {
 	}
 }
 
+func TestJobManagerReconcilePersistsInterruptedDeadRunningJob(t *testing.T) {
+	dir := t.TempDir()
+	finishedAt := time.Date(2026, 7, 2, 9, 30, 0, 0, time.UTC)
+	manager := NewJobManager(filepath.Join(dir, "jobs"))
+	manager.Now = func() time.Time { return finishedAt }
+	manager.IsRunning = func(pid int) bool { return false }
+	job, err := manager.Create(Job{
+		ID:        "dead-job",
+		Status:    JobStatusRunning,
+		PID:       123,
+		StartedAt: finishedAt.Add(-time.Hour),
+		Command:   []string{"/bin/false"},
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	if err := manager.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got, err := manager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load reconciled job: %v", err)
+	}
+	if got.Status != JobStatusInterrupted {
+		t.Fatalf("status = %q, want interrupted", got.Status)
+	}
+	if !got.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("finished at = %s, want %s", got.FinishedAt, finishedAt)
+	}
+	if got.LastError != "background process exited before recording completion" {
+		t.Fatalf("last error = %q", got.LastError)
+	}
+	data, err := os.ReadFile(mustJobPath(t, manager, job.ID))
+	if err != nil {
+		t.Fatalf("read persisted job: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"status": "interrupted"`)) {
+		t.Fatalf("persisted job was not interrupted: %s", data)
+	}
+}
+
+func TestJobManagerReconcileLeavesLiveAndTerminalJobsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewJobManager(filepath.Join(dir, "jobs"))
+	manager.Now = func() time.Time { return time.Date(2026, 7, 2, 9, 30, 0, 0, time.UTC) }
+	manager.IsRunning = func(pid int) bool { return pid == 101 }
+	tests := []Job{
+		{ID: "live", Status: JobStatusRunning, PID: 101},
+		{ID: "pidless", Status: JobStatusRunning},
+		{ID: "success", Status: JobStatusSuccess, PID: 202},
+		{ID: "failed", Status: JobStatusFailed, PID: 203},
+		{ID: "deferred", Status: JobStatusDeferred, PID: 204},
+		{ID: "unknown", Status: JobStatusUnknown, PID: 205},
+		{ID: "interrupted", Status: JobStatusInterrupted, PID: 206},
+	}
+	for _, job := range tests {
+		if _, err := manager.Create(job); err != nil {
+			t.Fatalf("create %s: %v", job.ID, err)
+		}
+	}
+	if err := manager.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	for _, want := range tests {
+		got, err := manager.Load(want.ID)
+		if err != nil {
+			t.Fatalf("load %s: %v", want.ID, err)
+		}
+		if got.Status != want.Status || !got.FinishedAt.IsZero() || got.LastError != "" {
+			t.Fatalf("job %s changed: %#v", want.ID, got)
+		}
+	}
+}
+
+func TestJobManagerSaveIsAtomicAndReturnsErrors(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewJobManager(filepath.Join(dir, "jobs"))
+	job := Job{ID: "atomic", Status: JobStatusRunning}
+	if err := manager.Save(job); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	path := mustJobPath(t, manager, job.ID)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat job: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("job mode = %o, want 600", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("read job dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "job.json" {
+		t.Fatalf("job dir entries = %#v", entries)
+	}
+
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	manager.Dir = blocked
+	if err := manager.Save(Job{ID: "cannot-save"}); err == nil {
+		t.Fatal("save error = nil")
+	}
+}
+
+func TestJobManagerActiveReconcilesAndSorts(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewJobManager(filepath.Join(dir, "jobs"))
+	manager.Now = func() time.Time { return time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC) }
+	manager.IsRunning = func(pid int) bool { return pid != 20 }
+	for _, job := range []Job{
+		{ID: "older", Status: JobStatusRunning, PID: 10, StartedAt: manager.Now().Add(-time.Hour)},
+		{ID: "dead", Status: JobStatusRunning, PID: 20, StartedAt: manager.Now().Add(-30 * time.Minute)},
+		{ID: "newer", Status: JobStatusRunning, PID: 30, StartedAt: manager.Now().Add(-time.Minute)},
+		{ID: "done", Status: JobStatusSuccess, StartedAt: manager.Now()},
+	} {
+		if _, err := manager.Create(job); err != nil {
+			t.Fatalf("create %s: %v", job.ID, err)
+		}
+	}
+	active, err := manager.Active()
+	if err != nil {
+		t.Fatalf("active: %v", err)
+	}
+	if got := jobIDs(active); !reflect.DeepEqual(got, []string{"newer", "older"}) {
+		t.Fatalf("active IDs = %#v", got)
+	}
+	dead, err := manager.Load("dead")
+	if err != nil {
+		t.Fatalf("load dead: %v", err)
+	}
+	if dead.Status != JobStatusInterrupted {
+		t.Fatalf("dead status = %s", dead.Status)
+	}
+}
+
+func TestJobManagerActiveReturnsReadError(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	if _, err := manager.Create(Job{ID: "bad", Status: JobStatusRunning}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	path := mustJobPath(t, manager, "bad")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatalf("corrupt job: %v", err)
+	}
+	if _, err := manager.Active(); err == nil {
+		t.Fatal("active read error = nil")
+	}
+}
+
+func TestJobManagerActiveReturnsReconcileSaveError(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	manager.IsRunning = func(int) bool { return false }
+	job, err := manager.Create(Job{ID: "bad-save", Status: JobStatusRunning, PID: 77})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	job.ID = "invalid/id"
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("marshal invalid job: %v", err)
+	}
+	if err := os.WriteFile(mustJobPath(t, manager, "bad-save"), data, 0o600); err != nil {
+		t.Fatalf("write invalid job: %v", err)
+	}
+	if _, err := manager.Active(); err == nil || !strings.Contains(err.Error(), "save reconciled job") {
+		t.Fatalf("active save error = %v", err)
+	}
+}
+
+func TestJobManagerWaitAllImmediateAndEventual(t *testing.T) {
+	t.Run("immediate", func(t *testing.T) {
+		manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+		calls := 0
+		manager.Sleep = func(context.Context, time.Duration) error {
+			calls++
+			return nil
+		}
+		if err := manager.WaitAll(context.Background(), time.Hour, time.Second, nil); err != nil {
+			t.Fatalf("wait all: %v", err)
+		}
+		if calls != 0 {
+			t.Fatalf("sleep calls = %d, want 0", calls)
+		}
+	})
+
+	t.Run("eventual", func(t *testing.T) {
+		dir := t.TempDir()
+		now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+		running := true
+		manager := NewJobManager(filepath.Join(dir, "jobs"))
+		manager.Now = func() time.Time { return now }
+		manager.IsRunning = func(int) bool { return running }
+		manager.Sleep = func(ctx context.Context, duration time.Duration) error {
+			now = now.Add(duration)
+			running = false
+			return nil
+		}
+		if _, err := manager.Create(Job{ID: "eventual", Status: JobStatusRunning, PID: 44}); err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		progressCalls := 0
+		err := manager.WaitAll(context.Background(), time.Minute, 10*time.Second, func(elapsed time.Duration, active []Job) {
+			progressCalls++
+			if elapsed != 10*time.Second || !reflect.DeepEqual(jobIDs(active), []string{"eventual"}) {
+				t.Errorf("progress = %s %#v", elapsed, jobIDs(active))
+			}
+		})
+		if err != nil {
+			t.Fatalf("wait all: %v", err)
+		}
+		if progressCalls != 0 {
+			t.Fatalf("progress calls = %d, want 0 after completion", progressCalls)
+		}
+	})
+}
+
+func TestJobManagerWaitAllTimeoutInvalidAndCanceled(t *testing.T) {
+	newActiveManager := func(t *testing.T) (JobManager, *time.Time) {
+		t.Helper()
+		now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+		manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+		manager.Now = func() time.Time { return now }
+		manager.IsRunning = func(int) bool { return true }
+		if _, err := manager.Create(Job{ID: "still-running", Status: JobStatusRunning, PID: 99}); err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		return manager, &now
+	}
+
+	t.Run("timeout", func(t *testing.T) {
+		manager, now := newActiveManager(t)
+		manager.Sleep = func(ctx context.Context, duration time.Duration) error {
+			*now = now.Add(duration)
+			return nil
+		}
+		progressCalls := 0
+		err := manager.WaitAll(context.Background(), 20*time.Second, 10*time.Second, func(time.Duration, []Job) {
+			progressCalls++
+		})
+		var timeoutErr *WaitAllTimeoutError
+		if !errors.As(err, &timeoutErr) {
+			t.Fatalf("error = %T %v, want WaitAllTimeoutError", err, err)
+		}
+		if !reflect.DeepEqual(jobIDs(timeoutErr.Active), []string{"still-running"}) {
+			t.Fatalf("timeout active = %#v", jobIDs(timeoutErr.Active))
+		}
+		if progressCalls != 2 {
+			t.Fatalf("progress calls = %d, want 2", progressCalls)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		timeout  time.Duration
+		interval time.Duration
+	}{
+		{name: "zero timeout", interval: time.Second},
+		{name: "negative timeout", timeout: -time.Second, interval: time.Second},
+		{name: "zero interval", timeout: time.Second},
+		{name: "negative interval", timeout: time.Second, interval: -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+			if err := manager.WaitAll(context.Background(), tc.timeout, tc.interval, nil); err == nil {
+				t.Fatal("invalid duration error = nil")
+			}
+		})
+	}
+
+	t.Run("canceled", func(t *testing.T) {
+		manager, _ := newActiveManager(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		manager.Sleep = func(context.Context, time.Duration) error {
+			cancel()
+			return ctx.Err()
+		}
+		err := manager.WaitAll(ctx, time.Minute, time.Second, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	})
+
+	t.Run("already canceled", func(t *testing.T) {
+		manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := manager.WaitAll(ctx, time.Minute, time.Second, nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	})
+}
+
+func mustJobPath(t *testing.T, manager JobManager, id string) string {
+	t.Helper()
+	path, err := manager.JobPath(id)
+	if err != nil {
+		t.Fatalf("job path: %v", err)
+	}
+	return path
+}
+
+func jobIDs(jobs []Job) []string {
+	ids := make([]string, len(jobs))
+	for i, job := range jobs {
+		ids[i] = job.ID
+	}
+	return ids
+}
+
+func TestAppJobActiveTextAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if code := app.Run(context.Background(), []string{"job", "active"}); code != 0 {
+		t.Fatalf("empty active code = %d, err = %s", code, errOut.String())
+	}
+	if out.String() != "No active jobs.\n" {
+		t.Fatalf("empty active output = %q", out.String())
+	}
+	out.Reset()
+	if code := app.Run(context.Background(), []string{"job", "active", "--json"}); code != 0 {
+		t.Fatalf("empty active JSON code = %d, err = %s", code, errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "[]" {
+		t.Fatalf("empty active JSON = %q", out.String())
+	}
+
+	for _, job := range []Job{
+		{ID: "active-new", Type: "aws-destroy", Profile: "new", Status: JobStatusRunning, PID: 10, StartedAt: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)},
+		{ID: "active-old", Type: "aws-destroy", Profile: "old", Status: JobStatusRunning, PID: 11, StartedAt: time.Date(2026, 7, 1, 11, 0, 0, 0, time.UTC)},
+		{ID: "completed", Status: JobStatusSuccess, StartedAt: time.Date(2026, 7, 1, 13, 0, 0, 0, time.UTC)},
+	} {
+		if _, err := app.JobManager.Create(job); err != nil {
+			t.Fatalf("create %s: %v", job.ID, err)
+		}
+	}
+	out.Reset()
+	if code := app.Run(context.Background(), []string{"job", "active"}); code != 0 {
+		t.Fatalf("active code = %d, err = %s", code, errOut.String())
+	}
+	if text := out.String(); !strings.Contains(text, "ID") || !strings.Contains(text, "active-new") || !strings.Contains(text, "active-old") || strings.Contains(text, "completed") {
+		t.Fatalf("active table = %s", text)
+	}
+	out.Reset()
+	if code := app.Run(context.Background(), []string{"job", "active", "--json"}); code != 0 {
+		t.Fatalf("active JSON code = %d, err = %s", code, errOut.String())
+	}
+	var jobs []Job
+	if err := json.Unmarshal(out.Bytes(), &jobs); err != nil {
+		t.Fatalf("decode active JSON: %v\n%s", err, out.String())
+	}
+	if got := jobIDs(jobs); !reflect.DeepEqual(got, []string{"active-new", "active-old"}) {
+		t.Fatalf("active JSON IDs = %#v", got)
+	}
+}
+
+func TestAppJobWaitAllImmediateProgressAndTimeout(t *testing.T) {
+	t.Run("immediate", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		app.JobManager.Sleep = func(context.Context, time.Duration) error {
+			t.Fatal("unexpected sleep")
+			return nil
+		}
+		if code := app.Run(context.Background(), []string{"job", "wait-all", "--timeout", "1m", "--interval", "5s"}); code != 0 {
+			t.Fatalf("wait-all code = %d, err = %s", code, errOut.String())
+		}
+		if !strings.Contains(out.String(), "All background jobs completed.") {
+			t.Fatalf("wait-all output = %q", out.String())
+		}
+	})
+
+	t.Run("progress then complete", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+		running := true
+		sleeps := 0
+		app.JobManager.Now = func() time.Time { return now }
+		app.JobManager.IsRunning = func(int) bool { return running }
+		app.JobManager.Sleep = func(context.Context, time.Duration) error {
+			sleeps++
+			now = now.Add(10 * time.Second)
+			if sleeps == 2 {
+				running = false
+			}
+			return nil
+		}
+		if _, err := app.JobManager.Create(Job{ID: "job-progress", Status: JobStatusRunning, PID: 42}); err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if code := app.Run(context.Background(), []string{"job", "wait-all", "--timeout", "1m", "--interval", "10s"}); code != 0 {
+			t.Fatalf("wait-all code = %d, err = %s", code, errOut.String())
+		}
+		if text := out.String(); !strings.Contains(text, "elapsed=10s") || !strings.Contains(text, "job-progress") || !strings.Contains(text, "All background jobs completed.") {
+			t.Fatalf("wait-all progress = %q", text)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+		app.JobManager.Now = func() time.Time { return now }
+		app.JobManager.Sleep = func(context.Context, time.Duration) error {
+			now = now.Add(10 * time.Second)
+			return nil
+		}
+		if _, err := app.JobManager.Create(Job{ID: "job-timeout", Status: JobStatusRunning, PID: 42}); err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if code := app.Run(context.Background(), []string{"job", "wait-all", "--timeout", "20s", "--interval", "10s"}); code != 1 {
+			t.Fatalf("wait-all timeout code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+		}
+		if text := errOut.String(); !strings.Contains(text, "timed out after 20s") || !strings.Contains(text, "job-timeout") {
+			t.Fatalf("wait-all timeout error = %q", text)
+		}
+	})
+}
+
+func TestAppJobWaitAllStrictArgumentsAndCancellation(t *testing.T) {
+	invalid := [][]string{
+		{"job", "wait-all", "--wat"},
+		{"job", "wait-all", "--timeout"},
+		{"job", "wait-all", "--interval"},
+		{"job", "wait-all", "--timeout", "1m", "--timeout", "2m"},
+		{"job", "wait-all", "--interval", "1s", "--interval", "2s"},
+		{"job", "wait-all", "--timeout", "nope"},
+		{"job", "wait-all", "--interval", "0s"},
+		{"job", "wait-all", "--timeout", "-1s"},
+	}
+	for _, args := range invalid {
+		t.Run(strings.Join(args[2:], "_"), func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, t.TempDir())
+			if code := app.Run(context.Background(), args); code != 2 {
+				t.Fatalf("code = %d, want 2; out=%s err=%s", code, out.String(), errOut.String())
+			}
+		})
+	}
+
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if _, err := app.JobManager.Create(Job{ID: "job-cancel", Status: JobStatusRunning, PID: 42}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	app.JobManager.Sleep = func(context.Context, time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
+	if code := app.Run(ctx, []string{"job", "wait-all", "--timeout", "1m", "--interval", "10s"}); code != 1 {
+		t.Fatalf("cancel code = %d, out=%s err=%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "context canceled") {
+		t.Fatalf("cancel error = %q", errOut.String())
+	}
+}
+
+func TestAppJobCompletionCommandsAndOptions(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"completion", "job-commands"}); code != 0 {
+		t.Fatalf("job commands code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"list", "status", "log", "wait", "run", "active", "wait-all"} {
+		if !strings.Contains(out.String(), want+"\n") {
+			t.Fatalf("job commands missing %q: %q", want, out.String())
+		}
+	}
+	for _, shell := range []string{"zsh", "bash", "fish"} {
+		out.Reset()
+		errOut.Reset()
+		if code := app.Run(context.Background(), []string{"completion", shell}); code != 0 {
+			t.Fatalf("%s completion code = %d, err = %s", shell, code, errOut.String())
+		}
+		for _, want := range []string{"active", "wait-all", "--json", "--timeout", "--interval"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("%s completion missing %q", shell, want)
+			}
+		}
+	}
+}
+
 func TestAppAWSRunningListsRunningInstances(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)

@@ -8,7 +8,7 @@ import (
 
 func (a App) runCompletion(ctx context.Context, configPath string, args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands|member-commands|logs-commands|host-key-commands|local-agent-commands>")
+		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|job-commands|profile-commands|member-commands|logs-commands|host-key-commands|local-agent-commands>")
 		return 2
 	}
 	switch args[0] {
@@ -29,6 +29,9 @@ func (a App) runCompletion(ctx context.Context, configPath string, args []string
 		return 0
 	case "mcp-commands":
 		printLines(a.Out, completionMCPCommands())
+		return 0
+	case "job-commands":
+		printLines(a.Out, completionJobCommands())
 		return 0
 	case "profile-commands":
 		printLines(a.Out, completionProfileCommands())
@@ -118,7 +121,7 @@ func completionCommands() []string {
 	}
 }
 func completionJobCommands() []string {
-	return []string{"list", "status", "log", "wait"}
+	return []string{"list", "status", "log", "wait", "run", "active", "wait-all"}
 }
 func completionProfileCommands() []string {
 	return []string{"accounts", "find", "show", "add", "wizard", "remove", "rename", "edit", "export", "import", "import-dir"}
@@ -191,7 +194,7 @@ _cm() {
   commands=("${(@f)$(command cm completion commands 2>/dev/null)}")
   aws_commands=("${(@f)$(command cm completion aws-commands 2>/dev/null)}")
   mcp_commands=("${(@f)$(command cm completion mcp-commands 2>/dev/null)}")
-  job_commands=(list status log wait)
+	job_commands=("${(@f)$(command cm completion job-commands 2>/dev/null)}")
   profile_commands=("${(@f)$(command cm completion profile-commands 2>/dev/null)}")
   member_commands=("${(@f)$(command cm completion member-commands 2>/dev/null)}")
   logs_commands=("${(@f)$(command cm completion logs-commands 2>/dev/null)}")
@@ -287,6 +290,10 @@ _cm() {
     job)
       if (( CURRENT == 3 )); then
         compadd -- "${job_commands[@]}"
+	  elif [[ "${words[3]}" == "active" ]]; then
+		_values 'job active option' --json
+	  elif [[ "${words[3]}" == "wait-all" ]]; then
+		_values 'job wait-all option' --timeout --interval
       fi
       ;;
     logs)
@@ -422,7 +429,11 @@ func bashCompletionScript() string {
       ;;
     job)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "list status log wait" -- "$cur") )
+		COMPREPLY=( $(compgen -W "$(cm completion job-commands 2>/dev/null)" -- "$cur") )
+	  elif [[ "${COMP_WORDS[2]}" == "active" ]]; then
+		COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+	  elif [[ "${COMP_WORDS[2]}" == "wait-all" ]]; then
+		COMPREPLY=( $(compgen -W "--timeout --interval" -- "$cur") )
       fi
       ;;
     logs)
@@ -482,7 +493,9 @@ complete -c cm -n "__fish_seen_subcommand_from aws; and not __fish_seen_subcomma
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from (cm completion aws-commands)" -a "(cm completion apple-emails)"
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from destroy" -a "--background --notify"
-complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcommand_from list status log wait" -a "list status log wait"
+complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcommand_from (cm completion job-commands)" -a "(cm completion job-commands)"
+complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from active" -a "--json"
+complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from wait-all" -a "--timeout --interval"
 complete -c cm -n "__fish_seen_subcommand_from logs; and not __fish_seen_subcommand_from (cm completion logs-commands)" -a "(cm completion logs-commands)"
 complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_from export" -a "--output"
 complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"

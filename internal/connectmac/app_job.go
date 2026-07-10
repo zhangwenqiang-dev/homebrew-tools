@@ -2,13 +2,21 @@ package connectmac
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
+)
+
+const (
+	defaultJobWaitAllTimeout  = 2 * time.Hour
+	defaultJobWaitAllInterval = 10 * time.Second
 )
 
 func (a App) runJob(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.Err, "usage: cm job <list|status|log|wait> [job-id]")
+		fmt.Fprintln(a.Err, "usage: cm job <list|status|log|wait|run|active|wait-all>")
 		return 2
 	}
 	switch args[0] {
@@ -72,10 +80,114 @@ func (a App) runJob(ctx context.Context, args []string) int {
 			return 1
 		}
 		return 0
+	case "active":
+		return a.runJobActive(args[1:])
+	case "wait-all":
+		return a.runJobWaitAll(ctx, args[1:])
 	default:
 		fmt.Fprintf(a.Err, "unknown job command %q\n", args[0])
 		return 2
 	}
+}
+
+func (a App) runJobActive(args []string) int {
+	jsonOutput := false
+	switch {
+	case len(args) == 0:
+	case len(args) == 1 && args[0] == "--json":
+		jsonOutput = true
+	default:
+		fmt.Fprintln(a.Err, "usage: cm job active [--json]")
+		return 2
+	}
+	jobs, err := a.JobManager.Active()
+	if err != nil {
+		fmt.Fprintf(a.Err, "job active failed: %v\n", err)
+		return 1
+	}
+	if jsonOutput {
+		if err := json.NewEncoder(a.Out).Encode(jobs); err != nil {
+			fmt.Fprintf(a.Err, "job active failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if len(jobs) == 0 {
+		fmt.Fprintln(a.Out, "No active jobs.")
+		return 0
+	}
+	fmt.Fprint(a.Out, formatJobsTable(jobs))
+	return 0
+}
+
+func (a App) runJobWaitAll(ctx context.Context, args []string) int {
+	timeout, interval, err := parseJobWaitAllArgs(args)
+	if err != nil {
+		fmt.Fprintf(a.Err, "job wait-all: %v\n", err)
+		fmt.Fprintln(a.Err, "usage: cm job wait-all [--timeout 2h] [--interval 10s]")
+		return 2
+	}
+	err = a.JobManager.WaitAll(ctx, timeout, interval, func(elapsed time.Duration, active []Job) {
+		fmt.Fprintf(a.Out, "Waiting for background jobs: elapsed=%s active=%s\n", elapsed, strings.Join(jobIDsForOutput(active), ","))
+	})
+	if err == nil {
+		fmt.Fprintln(a.Out, "All background jobs completed.")
+		return 0
+	}
+	var timeoutErr *WaitAllTimeoutError
+	if errors.As(err, &timeoutErr) {
+		fmt.Fprintf(a.Err, "job wait-all timed out after %s; active jobs: %s\n", timeoutErr.Timeout, strings.Join(jobIDsForOutput(timeoutErr.Active), ", "))
+		return 1
+	}
+	fmt.Fprintf(a.Err, "job wait-all failed: %v\n", err)
+	return 1
+}
+
+func parseJobWaitAllArgs(args []string) (time.Duration, time.Duration, error) {
+	timeout := defaultJobWaitAllTimeout
+	interval := defaultJobWaitAllInterval
+	seenTimeout := false
+	seenInterval := false
+	for i := 0; i < len(args); i++ {
+		flag := args[i]
+		if flag != "--timeout" && flag != "--interval" {
+			return 0, 0, fmt.Errorf("unknown argument %q", flag)
+		}
+		if i+1 >= len(args) {
+			return 0, 0, fmt.Errorf("%s requires a duration", flag)
+		}
+		i++
+		duration, err := time.ParseDuration(args[i])
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid %s duration %q: %w", strings.TrimPrefix(flag, "--"), args[i], err)
+		}
+		if duration <= 0 {
+			return 0, 0, fmt.Errorf("%s must be positive", strings.TrimPrefix(flag, "--"))
+		}
+		switch flag {
+		case "--timeout":
+			if seenTimeout {
+				return 0, 0, errors.New("--timeout may only be specified once")
+			}
+			seenTimeout = true
+			timeout = duration
+		case "--interval":
+			if seenInterval {
+				return 0, 0, errors.New("--interval may only be specified once")
+			}
+			seenInterval = true
+			interval = duration
+		}
+	}
+	return timeout, interval, nil
+}
+
+func jobIDsForOutput(jobs []Job) []string {
+	ids := make([]string, len(jobs))
+	for i, job := range jobs {
+		ids[i] = job.ID
+	}
+	return ids
 }
 
 func (a App) runJobWait(ctx context.Context, id string) int {
