@@ -76,15 +76,17 @@ The startup scan only changes stale local metadata. It never resumes a command.
 
 ## Deployment Workflow
 
-The supported staging upgrade sequence becomes:
+The supported staging upgrade sequence first verifies and extracts the incoming package, then uses its new binary for the preflight. This also protects the first deployment when the installed `cm` does not yet provide `job wait-all`:
 
 ```bash
-sudo -u root HOME=/var/lib/connectmac /usr/sbin/cm job wait-all --timeout 2h
+sha256sum -c <package-checksum>
+dpkg-deb -x /tmp/cm_<version>_arm64.deb /tmp/cm-<version>-preflight
+sudo -u root HOME=/var/lib/connectmac /tmp/cm-<version>-preflight/usr/sbin/cm job wait-all --timeout 2h
 sudo apt install -y /tmp/cm_<version>_arm64.deb
 sudo systemctl restart connectmac
 ```
 
-The wait command must use the same `HOME` and job directory as the service. A timeout stops the deployment before APT installation or service restart.
+The wait command must use the same `HOME` and job directory as the service. Package checksum failure, extraction failure, or wait timeout stops the deployment before APT installation or service restart.
 
 This repository will document or script that preflight, but it cannot prevent an administrator from bypassing it with a direct `systemctl restart`.
 
