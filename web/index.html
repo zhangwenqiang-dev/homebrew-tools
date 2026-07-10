@@ -872,7 +872,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollTimeouts: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -985,6 +985,9 @@
       renderSelected();
       if (options.refreshOnDisconnect && wasOnline && !state.localAgent.online) {
         setStatus("本机代理已断开，已刷新本地操作状态");
+      }
+      if (!wasOnline && state.localAgent.online && state.view === "syncView" && state.selected) {
+        restoreSyncProfile(state.selected).catch(() => {});
       }
       return state.localAgent.online;
     }
@@ -1962,15 +1965,20 @@
       if (!profile || state.view !== "syncView" || state.selected !== profile) return;
       const generation = ++state.syncViewGeneration;
       state.syncHistory = [];
-      renderSyncHistory();
+      renderSyncHistoryMessage("正在加载同步历史...");
       setOutput("");
       setStatus("正在加载传输任务...");
       const jobsPromise = loadSyncJobs(profile);
       presentLatestSyncJob(profile, "正在加载传输任务...");
-      const [jobsLoaded] = await Promise.all([jobsPromise, loadSyncHistory(profile, { quiet: true })]);
+      const [jobsLoaded, historyResult] = await Promise.all([jobsPromise, loadSyncHistory(profile)]);
       if (generation !== state.syncViewGeneration || state.view !== "syncView" || state.selected !== profile) return;
       presentLatestSyncJob(profile, jobsLoaded ? "还没有传输任务。" : "状态暂时不可用");
-      if (!jobsLoaded) setStatus("状态暂时不可用");
+      if (historyResult?.error) {
+        setOutput(historyResult.error);
+        setStatus("同步历史读取失败");
+      } else if (!jobsLoaded) {
+        setStatus("状态暂时不可用");
+      }
     }
 
     async function openLocalPicker(target) {
@@ -2033,19 +2041,28 @@
 
     async function loadSyncHistory(profileName = "", options = {}) {
       const p = profileName ? state.profiles.find((item) => item.name === profileName) : selectedProfile();
-      if (!p) return;
+      if (!p) return { stale: true };
       const generation = (state.syncHistoryGenerations[p.name] || 0) + 1;
       state.syncHistoryGenerations[p.name] = generation;
       try {
         const body = await api("/api/sync/history?profile=" + encodeURIComponent(p.name));
-        if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name) return;
+        if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name) return { stale: true };
         state.syncHistory = body.data.items || [];
         renderSyncHistory();
+        return { ok: true };
       } catch (err) {
-        if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name || options.quiet) return;
-        setOutput(String(err.message || err));
+        if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name) return { stale: true };
+        const message = String(err.message || err);
+        if (options.quiet) return { error: message };
+        renderSyncHistoryMessage("同步历史读取失败");
+        setOutput(message);
         setStatus("同步历史读取失败");
+        return { error: message };
       }
+    }
+
+    function renderSyncHistoryMessage(message) {
+      $("syncHistory").innerHTML = "<div class=\"muted\">" + escapeHTML(message || "") + "</div>";
     }
 
     function renderSyncHistory() {
@@ -2111,7 +2128,13 @@
 
     function syncJobOutput(job) {
       if (!job) return "";
-      return [job.output || "", job.error || ""].filter(Boolean).join("\n");
+      const output = String(job.output || "").trim();
+      const error = String(job.error || "").trim();
+      if (job.status === "failed" || job.status === "interrupted") return error || output;
+      if (!output) return error;
+      if (!error || output.includes(error)) return output;
+      if (error.includes(output)) return error;
+      return output + "\n" + error;
     }
 
     function renderSyncProgress(direction, job) {
@@ -2138,7 +2161,7 @@
     function presentLatestSyncJob(profile, emptyStatus = "还没有传输任务。") {
       if (state.view !== "syncView" || state.selected !== profile) return;
       const jobs = [syncJob(profile, "push"), syncJob(profile, "pull")].filter(Boolean);
-      jobs.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      jobs.sort((a, b) => compareSyncJobOrder(b, a));
       if (jobs[0]) {
         presentSyncJob(jobs[0]);
         return;
@@ -2156,13 +2179,48 @@
       return 0;
     }
 
+    function parseSyncJobID(id) {
+      const match = /^transfer-(\d+)-(\d+)$/.exec(String(id || ""));
+      if (!match) return null;
+      try {
+        return { unixNano: BigInt(match[1]), sequence: BigInt(match[2]) };
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function compareSyncJobOrder(left, right) {
+      const leftID = parseSyncJobID(left?.id);
+      const rightID = parseSyncJobID(right?.id);
+      if (leftID && rightID) {
+        if (leftID.unixNano !== rightID.unixNano) return leftID.unixNano > rightID.unixNano ? 1 : -1;
+        if (leftID.sequence !== rightID.sequence) return leftID.sequence > rightID.sequence ? 1 : -1;
+        if (left?.id === right?.id) return 0;
+      }
+      const leftCreated = Date.parse(left?.created_at || "") || 0;
+      const rightCreated = Date.parse(right?.created_at || "") || 0;
+      if (leftCreated !== rightCreated) return leftCreated > rightCreated ? 1 : -1;
+      const leftStable = String(left?.id || "");
+      const rightStable = String(right?.id || "");
+      return leftStable === rightStable ? 0 : (leftStable > rightStable ? 1 : -1);
+    }
+
+    function verifySyncJobOrdering() {
+      const createdAt = "2026-07-10T10:00:00.123Z";
+      const older = { id: "transfer-1000000000000000001-9", created_at: createdAt };
+      const newerNano = { id: "transfer-1000000000000000002-1", created_at: createdAt };
+      const newerSequence = { id: "transfer-1000000000000000002-2", created_at: createdAt };
+      if (compareSyncJobOrder(newerNano, older) <= 0 || compareSyncJobOrder(newerSequence, newerNano) <= 0) {
+        throw new Error("传输任务排序自检失败");
+      }
+    }
+
     function newerSyncJob(current, incoming) {
       if (!current) return incoming;
       if (!incoming) return current;
-      const currentCreated = new Date(current.created_at || 0).getTime() || 0;
-      const incomingCreated = new Date(incoming.created_at || 0).getTime() || 0;
-      if (currentCreated > incomingCreated) return current;
-      if (incomingCreated > currentCreated) return incoming;
+      const order = compareSyncJobOrder(current, incoming);
+      if (order > 0) return current;
+      if (order < 0) return incoming;
       if (current.id !== incoming.id) return syncJobActive(current) ? current : incoming;
       const currentRank = syncJobStatusRank(current.status);
       const incomingRank = syncJobStatusRank(incoming.status);
@@ -2175,54 +2233,95 @@
     function latestSyncJob(jobs, direction) {
       return jobs.filter((job) => job.direction === direction).reduce((latest, job) => {
         if (!latest) return job;
-        const latestCreated = new Date(latest.created_at || 0).getTime() || 0;
-        const jobCreated = new Date(job.created_at || 0).getTime() || 0;
-        return jobCreated > latestCreated ? job : latest;
+        return compareSyncJobOrder(job, latest) > 0 ? job : latest;
       }, null);
+    }
+
+    verifySyncJobOrdering();
+
+    function clearSyncPollTimer(key, jobID = "") {
+      const timer = state.syncPollTimers[key];
+      if (!timer || (jobID && timer.jobID !== jobID)) return;
+      window.clearTimeout(timer.timerID);
+      if (state.syncPollTimers[key] === timer) delete state.syncPollTimers[key];
+    }
+
+    function cancelSyncPollRequest(key, jobID = "") {
+      const request = state.syncPollRequests[key];
+      if (!request || (jobID && request.jobID !== jobID)) return;
+      window.clearTimeout(request.timeoutID);
+      if (state.syncPollRequests[key] === request) delete state.syncPollRequests[key];
+      request.controller.abort();
+    }
+
+    function storeSyncJob(key, incoming) {
+      const current = state.syncJobs[key] || null;
+      const saved = newerSyncJob(current, incoming);
+      if (current && saved?.id !== current.id) {
+        clearSyncPollTimer(key, current.id);
+        cancelSyncPollRequest(key, current.id);
+      }
+      state.syncJobs[key] = saved;
+      return saved;
     }
 
     function scheduleSyncPoll(job, delay = 1000) {
       if (!syncJobActive(job)) return;
       const key = syncJobKey(job.profile, job.direction);
-      if (state.syncPollTimers[key]) window.clearTimeout(state.syncPollTimers[key]);
-      state.syncPollTimers[key] = window.setTimeout(() => {
+      const current = state.syncJobs[key];
+      if (!current || current.id !== job.id || !syncJobActive(current)) return;
+      const request = state.syncPollRequests[key];
+      if (request?.jobID === job.id) return;
+      if (request) cancelSyncPollRequest(key);
+      const existing = state.syncPollTimers[key];
+      if (existing?.jobID === job.id) return;
+      if (existing) clearSyncPollTimer(key);
+      const timer = { jobID: job.id, timerID: 0 };
+      timer.timerID = window.setTimeout(() => {
+        if (state.syncPollTimers[key] !== timer) return;
         delete state.syncPollTimers[key];
         pollSyncJob(job.profile, job.direction, job.id);
       }, delay);
+      state.syncPollTimers[key] = timer;
     }
 
     async function pollSyncJob(profile, direction, jobID) {
       const key = syncJobKey(profile, direction);
       const current = state.syncJobs[key];
       if (!current || current.id !== jobID || !syncJobActive(current)) return;
-      if (state.syncPollTimeouts[key]) return;
+      const existing = state.syncPollRequests[key];
+      if (existing?.jobID === jobID) return;
+      if (existing) cancelSyncPollRequest(key);
       const controller = new AbortController();
-      state.syncPollTimeouts[key] = window.setTimeout(() => controller.abort(), 8000);
+      const request = { jobID, controller, timeoutID: 0 };
+      request.timeoutID = window.setTimeout(() => {
+        if (state.syncPollRequests[key] === request) controller.abort();
+      }, 8000);
+      state.syncPollRequests[key] = request;
       try {
         const body = await localAgentAPI("/sync/job?id=" + encodeURIComponent(jobID), { signal: controller.signal });
+        if (state.syncPollRequests[key] !== request) return;
         const job = body.data?.job;
         if (!job || job.id !== jobID) throw new Error("传输任务响应无效");
         if (state.syncJobs[key]?.id !== jobID) return;
-        state.syncJobs[key] = newerSyncJob(state.syncJobs[key], job);
-        const savedJob = state.syncJobs[key];
+        const savedJob = storeSyncJob(key, job);
         delete state.syncPollUnavailable[key];
         presentSyncJob(savedJob);
         renderSelected();
-        if (syncJobActive(savedJob)) {
-          scheduleSyncPoll(savedJob);
-        } else if (state.view === "syncView" && state.selected === profile) {
+        if (!syncJobActive(savedJob) && state.view === "syncView" && state.selected === profile) {
           Promise.all([loadSyncHistory(profile, { quiet: true }), loadEvents(false)]).catch(() => {});
         }
       } catch (err) {
+        if (state.syncPollRequests[key] !== request) return;
         const job = state.syncJobs[key];
         if (!job || job.id !== jobID || !syncJobActive(job)) return;
         if (err.status === 404 || /transfer job not found/i.test(String(err.message || err))) {
-          state.syncJobs[key] = {
+          storeSyncJob(key, {
             ...job,
             status: "interrupted",
-            error: [job.error || "", "传输任务不存在"].filter(Boolean).join("\n"),
+            error: [job.error || job.output || "", "传输任务不存在"].filter(Boolean).join("\n"),
             finished_at: new Date().toISOString()
-          };
+          });
           delete state.syncPollUnavailable[key];
           presentSyncJob(state.syncJobs[key]);
           renderSelected();
@@ -2231,30 +2330,46 @@
         state.syncPollUnavailable[key] = true;
         presentSyncJob(job);
         renderSelected();
-        scheduleSyncPoll(job);
       } finally {
-        if (state.syncPollTimeouts[key]) {
-          window.clearTimeout(state.syncPollTimeouts[key]);
-          delete state.syncPollTimeouts[key];
+        if (state.syncPollRequests[key] === request) {
+          window.clearTimeout(request.timeoutID);
+          delete state.syncPollRequests[key];
+          const latest = state.syncJobs[key];
+          if (latest?.id === jobID && syncJobActive(latest)) scheduleSyncPoll(latest);
         }
       }
+    }
+
+    function cancelSyncJobsRequest(profile) {
+      const request = state.syncJobsRequests[profile];
+      if (!request) return;
+      window.clearTimeout(request.timeoutID);
+      if (state.syncJobsRequests[profile] === request) delete state.syncJobsRequests[profile];
+      request.controller.abort();
     }
 
     async function loadSyncJobs(profile) {
       if (!profile) return false;
       const generation = (state.syncJobsGenerations[profile] || 0) + 1;
       state.syncJobsGenerations[profile] = generation;
+      cancelSyncJobsRequest(profile);
       state.syncJobsLoading[profile] = true;
       if (state.selected === profile) renderSelected();
+      const controller = new AbortController();
+      const request = { generation, controller, timeoutID: 0 };
+      request.timeoutID = window.setTimeout(() => {
+        if (state.syncJobsRequests[profile] === request) controller.abort();
+      }, 8000);
+      state.syncJobsRequests[profile] = request;
       try {
-        const body = await localAgentAPI("/sync/jobs?profile=" + encodeURIComponent(profile));
-        if (state.syncJobsGenerations[profile] !== generation) return false;
+        const body = await localAgentAPI("/sync/jobs?profile=" + encodeURIComponent(profile), { signal: controller.signal });
+        if (state.syncJobsGenerations[profile] !== generation || state.syncJobsRequests[profile] !== request) return false;
         const jobs = body.data?.jobs || [];
         for (const direction of ["push", "pull"]) {
           const latest = latestSyncJob(jobs, direction);
           if (!latest) continue;
           const key = syncJobKey(profile, direction);
-          state.syncJobs[key] = newerSyncJob(state.syncJobs[key], latest);
+          storeSyncJob(key, latest);
           delete state.syncPollUnavailable[key];
           if (syncJobActive(state.syncJobs[key])) scheduleSyncPoll(state.syncJobs[key]);
         }
@@ -2262,6 +2377,10 @@
       } catch (err) {
         return false;
       } finally {
+        if (state.syncJobsRequests[profile] === request) {
+          window.clearTimeout(request.timeoutID);
+          delete state.syncJobsRequests[profile];
+        }
         if (state.syncJobsGenerations[profile] === generation) {
           delete state.syncJobsLoading[profile];
           if (state.selected === profile) renderSelected();
@@ -2319,7 +2438,7 @@
         const job = body.data?.job;
         if (!job?.id) throw new Error("传输任务启动响应无效");
         const key = syncJobKey(job.profile || p.name, job.direction || direction);
-        state.syncJobs[key] = newerSyncJob(state.syncJobs[key], job);
+        storeSyncJob(key, job);
         delete state.syncPollUnavailable[key];
         setBusy(false);
         renderProfiles();
