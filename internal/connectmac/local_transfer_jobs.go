@@ -24,8 +24,9 @@ const (
 )
 
 var (
-	rsyncPercentPattern = regexp.MustCompile(`(?:^|\s)(\d{1,3})%`)
-	rsyncToCheckPattern = regexp.MustCompile(`to-(?:chk|check)=(\d+)/(\d+)`)
+	ErrLocalTransferDraining = errors.New("local transfer manager is draining")
+	rsyncPercentPattern      = regexp.MustCompile(`(?:^|\s)(\d{1,3})%`)
+	rsyncToCheckPattern      = regexp.MustCompile(`to-(?:chk|check)=(\d+)/(\d+)`)
 )
 
 type LocalTransferJob struct {
@@ -51,6 +52,7 @@ type LocalTransferJobManager struct {
 	now       func() time.Time
 	retention time.Duration
 	sequence  uint64
+	draining  bool
 }
 
 func NewLocalTransferJobManager() *LocalTransferJobManager {
@@ -61,14 +63,18 @@ func NewLocalTransferJobManager() *LocalTransferJobManager {
 	}
 }
 
-func (m *LocalTransferJobManager) Start(profile, direction string, run func(func(string)) error) LocalTransferJob {
+func (m *LocalTransferJobManager) Start(profile, direction string, run func(func(string)) error) (LocalTransferJob, error) {
 	m.mu.Lock()
 	m.cleanupLocked()
+	if m.draining {
+		m.mu.Unlock()
+		return LocalTransferJob{}, ErrLocalTransferDraining
+	}
 	for _, job := range m.jobs {
 		if job.Profile == profile && job.Direction == direction && job.Active() {
 			result := *job
 			m.mu.Unlock()
-			return result
+			return result, nil
 		}
 	}
 	m.sequence++
@@ -85,7 +91,31 @@ func (m *LocalTransferJobManager) Start(profile, direction string, run func(func
 	m.mu.Unlock()
 
 	go m.run(job.ID, run)
-	return result
+	return result, nil
+}
+
+func (m *LocalTransferJobManager) TryDrain() ([]LocalTransferJob, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupLocked()
+	active := make([]LocalTransferJob, 0)
+	for _, job := range m.jobs {
+		if job.Active() {
+			active = append(active, *job)
+		}
+	}
+	if len(active) > 0 {
+		sort.Slice(active, func(i, j int) bool { return active[i].CreatedAt.Before(active[j].CreatedAt) })
+		return active, false
+	}
+	m.draining = true
+	return active, true
+}
+
+func (m *LocalTransferJobManager) Resume() {
+	m.mu.Lock()
+	m.draining = false
+	m.mu.Unlock()
 }
 
 func (m *LocalTransferJobManager) Get(id string) (LocalTransferJob, bool) {
@@ -212,39 +242,33 @@ func (m *LocalTransferJobManager) cleanupLocked() {
 }
 
 func parseRsyncProgress(output string) (int, bool) {
-	progress := 0
-	found := false
-	for _, match := range rsyncPercentPattern.FindAllStringSubmatch(output, -1) {
-		value, err := strconv.Atoi(match[1])
-		if err == nil {
-			progress = maxTransferProgress(progress, value)
-			found = true
-		}
-	}
-	for _, match := range rsyncToCheckPattern.FindAllStringSubmatch(output, -1) {
+	toCheckMatches := rsyncToCheckPattern.FindAllStringSubmatch(output, -1)
+	if len(toCheckMatches) > 0 {
+		match := toCheckMatches[len(toCheckMatches)-1]
 		remaining, errRemaining := strconv.Atoi(match[1])
 		total, errTotal := strconv.Atoi(match[2])
 		if errRemaining == nil && errTotal == nil && total > 0 {
-			value := (total - remaining) * 100 / total
-			progress = maxTransferProgress(progress, value)
-			found = true
+			return capRunningTransferProgress((total - remaining) * 100 / total), true
 		}
-	}
-	if !found {
 		return 0, false
 	}
+	percentMatches := rsyncPercentPattern.FindAllStringSubmatch(output, -1)
+	if len(percentMatches) == 0 {
+		return 0, false
+	}
+	progress, err := strconv.Atoi(percentMatches[len(percentMatches)-1][1])
+	if err != nil {
+		return 0, false
+	}
+	return capRunningTransferProgress(progress), true
+}
+
+func capRunningTransferProgress(progress int) int {
 	if progress > 99 {
 		progress = 99
 	}
 	if progress < 0 {
 		progress = 0
 	}
-	return progress, true
-}
-
-func maxTransferProgress(current, candidate int) int {
-	if candidate > current {
-		return candidate
-	}
-	return current
+	return progress
 }

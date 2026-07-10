@@ -568,6 +568,234 @@ func TestLocalAgentLaunchAgentPlist(t *testing.T) {
 	}
 }
 
+func TestLocalAgentRecoversInstalledAddressAndHonorsExplicitOptions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plist := localAgentLaunchAgentPlist(
+		localAgentLaunchLabel,
+		"/usr/local/bin/cm",
+		localAgentOptions{Host: "127.0.0.9", Port: 29876},
+		"/tmp/out.log",
+		"/tmp/err.log",
+	)
+	writeFile(t, path, plist)
+
+	opts, err := parseLocalAgentArgs(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveInstalledLocalAgentOptions(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Host != "127.0.0.9" || resolved.Port != 29876 {
+		t.Fatalf("resolved = %#v", resolved)
+	}
+
+	explicit, err := parseLocalAgentArgs([]string{"--host", "127.0.0.7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err = resolveInstalledLocalAgentOptions(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Host != "127.0.0.7" || resolved.Port != 29876 {
+		t.Fatalf("explicit resolved = %#v", resolved)
+	}
+}
+
+func TestLocalAgentStatusUsesInstalledAddressWithoutFlags(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
+	}))
+	defer server.Close()
+	opts := localAgentOptionsForURL(t, server.URL)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", opts, "/tmp/out", "/tmp/err"))
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	if code := app.runLocalAgentService(context.Background(), []string{"status"}); code != 0 {
+		t.Fatalf("status code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))) {
+		t.Fatalf("status output = %q", out.String())
+	}
+}
+
+func TestLocalAgentForceOptionSkipsDrainGuard(t *testing.T) {
+	opts, err := parseLocalAgentArgs([]string{"--host", "invalid.invalid", "--port", "1", "--force"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.Force || !opts.HostExplicit || !opts.PortExplicit {
+		t.Fatalf("opts = %#v", opts)
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	drained, allowed := app.prepareLocalAgentShutdown(context.Background(), opts)
+	if drained || !allowed || errOut.Len() != 0 {
+		t.Fatalf("prepare force = (%v, %v), err = %q", drained, allowed, errOut.String())
+	}
+}
+
+func TestLocalAgentLegacyDrainFallbackStillDetectsActivity(t *testing.T) {
+	active := LocalTransferJob{Profile: "remote-usw2", Direction: "push", Status: LocalTransferRunning}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/activity/drain":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/activity":
+			writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"active": []LocalTransferJob{active}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	opts := localAgentOptionsForURL(t, server.URL)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if drained, allowed := app.prepareLocalAgentShutdown(context.Background(), opts); drained || allowed {
+		t.Fatalf("prepare = (%v, %v)", drained, allowed)
+	}
+	if !strings.Contains(errOut.String(), "profile=remote-usw2") || !strings.Contains(errOut.String(), "direction=push") {
+		t.Fatalf("error = %q", errOut.String())
+	}
+}
+
+func TestLocalAgentBootoutFailureResumesDraining(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	plistPath, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, plistPath, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", localAgentOptions{Host: "127.0.0.1", Port: 18765}, "/tmp/out", "/tmp/err"))
+	binDir := t.TempDir()
+	launchctl := filepath.Join(binDir, "launchctl")
+	writeFile(t, launchctl, "#!/bin/sh\nexit 1\n")
+	if err := os.Chmod(launchctl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	resumed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/activity/drain":
+			writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"draining": true, "active": []LocalTransferJob{}}})
+		case "/activity/resume":
+			resumed <- struct{}{}
+			writeWebJSON(w, webAPIResponse{OK: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	opts := localAgentOptionsForURL(t, server.URL)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	if code := app.stopLocalAgentLaunchAgent(context.Background(), opts, false); code != 1 {
+		t.Fatalf("stop code = %d", code)
+	}
+	select {
+	case <-resumed:
+	case <-time.After(time.Second):
+		t.Fatal("resume endpoint was not called")
+	}
+}
+
+func localAgentOptionsForURL(t *testing.T, rawURL string) localAgentOptions {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return localAgentOptions{Host: host, Port: port, HostExplicit: true, PortExplicit: true}
+}
+
+func TestLocalAgentDrainEndpointsAreAtomic(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	release := make(chan struct{})
+	job, err := app.LocalTransfers.Start("remote-usw2", "push", func(onOutput func(string)) error {
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := app.newLocalAgentHandler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/activity/drain", nil))
+	var activeResp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Draining bool               `json:"draining"`
+			Active   []LocalTransferJob `json:"active"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &activeResp); err != nil {
+		t.Fatal(err)
+	}
+	if !activeResp.OK || activeResp.Data.Draining || len(activeResp.Data.Active) != 1 || activeResp.Data.Active[0].ID != job.ID {
+		t.Fatalf("active drain response = %s", rec.Body.String())
+	}
+	close(release)
+	waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/activity/drain", nil))
+	var drainedResp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Draining bool `json:"draining"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &drainedResp); err != nil {
+		t.Fatal(err)
+	}
+	if !drainedResp.OK || !drainedResp.Data.Draining {
+		t.Fatalf("drained response = %s", rec.Body.String())
+	}
+	if _, err := app.LocalTransfers.Start("remote-usw2", "pull", func(onOutput func(string)) error { return nil }); !errors.Is(err, ErrLocalTransferDraining) {
+		t.Fatalf("start while draining error = %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/activity/resume", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	resumed, err := app.LocalTransfers.Start("remote-usw2", "pull", func(onOutput func(string)) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForLocalTransferJob(t, app.LocalTransfers, resumed.ID)
+}
+
 func TestLocalAgentTransferJobAPI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -2673,7 +2901,7 @@ func TestAppCompletionZshScriptUsesDynamicProfiles(t *testing.T) {
 		t.Fatalf("completion zsh code = %d, err = %s", code, errOut.String())
 	}
 	text := out.String()
-	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands", "cm completion local-agent-commands", "open|close|next", "guide topic"} {
+	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands", "cm completion local-agent-commands", "open|close|next", "guide topic", "--force"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("zsh completion missing %q: %q", want, text)
 		}

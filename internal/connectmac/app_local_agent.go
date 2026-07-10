@@ -25,8 +25,11 @@ const localAgentLaunchLabel = "com.connectmac.local-agent"
 const localAgentPlistPath = "~/Library/LaunchAgents/com.connectmac.local-agent.plist"
 
 type localAgentOptions struct {
-	Host string
-	Port int
+	Host         string
+	Port         int
+	Force        bool
+	HostExplicit bool
+	PortExplicit bool
 }
 
 type localAgentRequest struct {
@@ -43,6 +46,10 @@ func (a App) runLocalAgent(ctx context.Context, args []string) int {
 	opts, err := parseLocalAgentArgs(args)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
+		return 2
+	}
+	if opts.Force {
+		fmt.Fprintln(a.Err, "--force is only supported for local-agent stop, restart, and uninstall")
 		return 2
 	}
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
@@ -80,6 +87,7 @@ func parseLocalAgentArgs(args []string) (localAgentOptions, error) {
 				return opts, fmt.Errorf("--host requires a value")
 			}
 			opts.Host = args[i]
+			opts.HostExplicit = true
 		case "--port":
 			i++
 			if i >= len(args) {
@@ -90,8 +98,11 @@ func parseLocalAgentArgs(args []string) (localAgentOptions, error) {
 				return opts, fmt.Errorf("--port must be between 1 and 65535")
 			}
 			opts.Port = port
+			opts.PortExplicit = true
+		case "--force":
+			opts.Force = true
 		case "--help", "-h":
-			return opts, fmt.Errorf("usage: cm local-agent [--host 127.0.0.1] [--port 18765]\n       cm local-agent <install|start|stop|restart|status|uninstall> [--host 127.0.0.1] [--port 18765]")
+			return opts, fmt.Errorf("usage: cm local-agent [--host 127.0.0.1] [--port 18765]\n       cm local-agent <install|start|stop|restart|status|uninstall> [--host 127.0.0.1] [--port 18765] [--force]")
 		default:
 			return opts, fmt.Errorf("unknown local-agent option %q", args[i])
 		}
@@ -109,6 +120,17 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 2
+	}
+	if opts.Force && command != "stop" && command != "restart" && command != "uninstall" {
+		fmt.Fprintln(a.Err, "--force is only supported for local-agent stop, restart, and uninstall")
+		return 2
+	}
+	if !opts.Force && (command == "status" || command == "stop" || command == "restart" || command == "uninstall") {
+		opts, err = resolveInstalledLocalAgentOptions(opts)
+		if err != nil {
+			fmt.Fprintf(a.Err, "read installed local-agent options: %v\n", err)
+			return 1
+		}
 	}
 	switch command {
 	case "install":
@@ -142,6 +164,103 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 	default:
 		fmt.Fprintf(a.Err, "unknown local-agent command %q\n", command)
 		return 2
+	}
+}
+
+func resolveInstalledLocalAgentOptions(opts localAgentOptions) (localAgentOptions, error) {
+	if opts.HostExplicit && opts.PortExplicit {
+		return opts, nil
+	}
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		return opts, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return opts, nil
+		}
+		return opts, err
+	}
+	defer file.Close()
+	installed, err := localAgentOptionsFromPlist(file)
+	if err != nil {
+		return opts, err
+	}
+	if !opts.HostExplicit && installed.HostExplicit {
+		opts.Host = installed.Host
+	}
+	if !opts.PortExplicit && installed.PortExplicit {
+		opts.Port = installed.Port
+	}
+	return opts, nil
+}
+
+func localAgentOptionsFromPlist(reader io.Reader) (localAgentOptions, error) {
+	decoder := xml.NewDecoder(reader)
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return localAgentOptions{Host: "127.0.0.1", Port: 18765}, nil
+		}
+		if err != nil {
+			return localAgentOptions{}, err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "key" {
+			continue
+		}
+		var key string
+		if err := decoder.DecodeElement(&key, &start); err != nil {
+			return localAgentOptions{}, err
+		}
+		if key != "ProgramArguments" {
+			continue
+		}
+		args, err := decodePlistStringArray(decoder)
+		if err != nil {
+			return localAgentOptions{}, err
+		}
+		for i, arg := range args {
+			if arg == "local-agent" {
+				return parseLocalAgentArgs(args[i+1:])
+			}
+		}
+		return localAgentOptions{Host: "127.0.0.1", Port: 18765}, nil
+	}
+}
+
+func decodePlistStringArray(decoder *xml.Decoder) ([]string, error) {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "array" {
+			continue
+		}
+		var args []string
+		for {
+			token, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			switch value := token.(type) {
+			case xml.StartElement:
+				if value.Name.Local == "string" {
+					var arg string
+					if err := decoder.DecodeElement(&arg, &value); err != nil {
+						return nil, err
+					}
+					args = append(args, arg)
+				}
+			case xml.EndElement:
+				if value.Name.Local == "array" {
+					return args, nil
+				}
+			}
+		}
 	}
 }
 
@@ -210,16 +329,23 @@ func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
 }
 
 func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptions, ignoreMissing bool) int {
-	if !a.guardLocalAgentActivity(ctx, opts) {
+	drained, allowed := a.prepareLocalAgentShutdown(ctx, opts)
+	if !allowed {
 		return 1
 	}
 	path, err := ExpandPath(localAgentPlistPath)
 	if err != nil {
+		if drained {
+			a.resumeLocalAgentActivity(opts)
+		}
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
 	err = exec.CommandContext(ctx, "launchctl", "bootout", localAgentLaunchDomain(), path).Run()
 	if err != nil {
+		if drained {
+			a.resumeLocalAgentActivity(opts)
+		}
 		if ignoreMissing {
 			return 0
 		}
@@ -228,6 +354,62 @@ func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptio
 	}
 	fmt.Fprintf(a.Out, "stopped %s\n", localAgentLaunchLabel)
 	return 0
+}
+
+func (a App) prepareLocalAgentShutdown(ctx context.Context, opts localAgentOptions) (bool, bool) {
+	if opts.Force {
+		return false, true
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	endpoint := fmt.Sprintf("http://%s/activity/drain", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		fmt.Fprintf(a.Err, "unable to verify local-agent activity: create drain request: %v\n", err)
+		return false, false
+	}
+	resp, err := localAgentHTTPClient().Do(req)
+	if err != nil {
+		if localAgentConnectionUnavailable(err) {
+			return false, true
+		}
+		fmt.Fprintf(a.Err, "unable to verify local-agent activity: drain request failed: %v\n", err)
+		return false, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, a.guardLocalAgentActivity(ctx, opts)
+	}
+	draining, active, err := decodeLocalAgentDrainResponse(resp)
+	if err != nil {
+		fmt.Fprintf(a.Err, "unable to verify local-agent activity: %v\n", err)
+		return false, false
+	}
+	if len(active) > 0 {
+		for _, job := range active {
+			fmt.Fprintf(a.Err, "local-agent has an active transfer: profile=%s direction=%s\n", job.Profile, job.Direction)
+		}
+		return false, false
+	}
+	if !draining {
+		fmt.Fprintln(a.Err, "unable to verify local-agent activity: drain was not activated")
+		return false, false
+	}
+	return true, true
+}
+
+func (a App) resumeLocalAgentActivity(opts localAgentOptions) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	endpoint := fmt.Sprintf("http://%s/activity/resume", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return
+	}
+	resp, err := localAgentHTTPClient().Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
 }
 
 func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions) bool {
@@ -239,10 +421,7 @@ func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions
 		fmt.Fprintf(a.Err, "unable to verify local-agent activity: create request: %v\n", err)
 		return false
 	}
-	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	resp, err := client.Do(req)
+	resp, err := localAgentHTTPClient().Do(req)
 	if err != nil {
 		if localAgentConnectionUnavailable(err) {
 			return true
@@ -266,6 +445,12 @@ func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions
 		fmt.Fprintf(a.Err, "local-agent has an active transfer: profile=%s direction=%s\n", job.Profile, job.Direction)
 	}
 	return false
+}
+
+func localAgentHTTPClient() *http.Client {
+	return &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
 }
 
 func localAgentConnectionUnavailable(err error) bool {
@@ -305,6 +490,30 @@ func decodeLocalAgentActivityResponse(resp *http.Response) ([]LocalTransferJob, 
 		return nil, fmt.Errorf("response ok=false: %s", reason)
 	}
 	return envelope.Data.Active, nil
+}
+
+func decodeLocalAgentDrainResponse(resp *http.Response) (bool, []LocalTransferJob, error) {
+	if resp == nil {
+		return false, nil, fmt.Errorf("empty drain response")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, nil, fmt.Errorf("drain HTTP status %s", resp.Status)
+	}
+	var envelope struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Data  struct {
+			Draining bool               `json:"draining"`
+			Active   []LocalTransferJob `json:"active"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return false, nil, fmt.Errorf("decode drain response: %w", err)
+	}
+	if !envelope.OK {
+		return false, nil, fmt.Errorf("drain response ok=false: %s", strings.TrimSpace(envelope.Error))
+	}
+	return envelope.Data.Draining, envelope.Data.Active, nil
 }
 
 func (a App) statusLocalAgent(ctx context.Context, opts localAgentOptions) int {
@@ -391,6 +600,8 @@ func (a App) newLocalAgentHandler() http.Handler {
 	mux.HandleFunc("/sync/job", localAgentCORS(a.localAgentTransferJobHandler()))
 	mux.HandleFunc("/sync/jobs", localAgentCORS(a.localAgentTransferJobsHandler()))
 	mux.HandleFunc("/activity", localAgentCORS(a.localAgentActivityHandler()))
+	mux.HandleFunc("/activity/drain", localAgentCORS(a.localAgentDrainHandler()))
+	mux.HandleFunc("/activity/resume", localAgentCORS(a.localAgentResumeHandler()))
 	mux.HandleFunc("/local/pick", localAgentCORS(a.localAgentPickHandler()))
 	mux.HandleFunc("/local/list", localAgentCORS(a.webLocalListHandler()))
 	return mux
@@ -480,10 +691,10 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction string) (L
 		return LocalTransferJob{}, err
 	}
 
-	job := a.LocalTransfers.Start(profileName, direction, func(onOutput func(string)) error {
+	job, err := a.LocalTransfers.Start(profileName, direction, func(onOutput func(string)) error {
 		return a.Runner.RunRsyncProgress(context.Background(), rsyncArgs, onOutput)
 	})
-	return job, nil
+	return job, err
 }
 
 func (a App) localAgentTransferJobHandler() http.HandlerFunc {
@@ -524,6 +735,30 @@ func (a App) localAgentActivityHandler() http.HandlerFunc {
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"active": a.LocalTransfers.Active()}})
+	}
+}
+
+func (a App) localAgentDrainHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		active, draining := a.LocalTransfers.TryDrain()
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
+			"active": active, "draining": draining,
+		}})
+	}
+}
+
+func (a App) localAgentResumeHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.LocalTransfers.Resume()
+		writeWebJSON(w, webAPIResponse{OK: true})
 	}
 }
 

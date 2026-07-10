@@ -69,10 +69,10 @@ func (a App) printUsage() {
   cm local-agent [--host 127.0.0.1] [--port 18765]
   cm local-agent install [--host 127.0.0.1] [--port 18765]
   cm local-agent start
-  cm local-agent stop
-  cm local-agent restart
+  cm local-agent stop [--host 127.0.0.1] [--port 18765] [--force]
+  cm local-agent restart [--host 127.0.0.1] [--port 18765] [--force]
   cm local-agent status [--host 127.0.0.1] [--port 18765]
-  cm local-agent uninstall
+  cm local-agent uninstall [--host 127.0.0.1] [--port 18765] [--force]
   cm mcp [--config <path>]
   cm mcp tools [--json]
   cm doctor [--fix] [--config <path>]

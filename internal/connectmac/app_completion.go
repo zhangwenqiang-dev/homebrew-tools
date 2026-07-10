@@ -305,6 +305,8 @@ _cm() {
       if (( CURRENT == 3 )); then
         compadd -- "${local_agent_commands[@]}"
         _values 'local-agent option' --host --port
+      elif [[ "${words[3]}" == "stop" || "${words[3]}" == "restart" || "${words[3]}" == "uninstall" ]]; then
+        _values 'local-agent option' --host --port --force
       else
         _values 'local-agent option' --host --port
       fi
@@ -438,6 +440,8 @@ func bashCompletionScript() string {
     local-agent)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$(cm completion local-agent-commands 2>/dev/null) --host --port" -- "$cur") )
+      elif [[ "${COMP_WORDS[2]}" == "stop" || "${COMP_WORDS[2]}" == "restart" || "${COMP_WORDS[2]}" == "uninstall" ]]; then
+        COMPREPLY=( $(compgen -W "--host --port --force" -- "$cur") )
       else
         COMPREPLY=( $(compgen -W "--host --port" -- "$cur") )
       fi
@@ -484,6 +488,7 @@ complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_
 complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"
 complete -c cm -n "__fish_seen_subcommand_from local-agent; and not __fish_seen_subcommand_from (cm completion local-agent-commands)" -a "(cm completion local-agent-commands)"
 complete -c cm -n "__fish_seen_subcommand_from local-agent" -a "--host --port"
+complete -c cm -n "__fish_seen_subcommand_from local-agent; and __fish_seen_subcommand_from stop restart uninstall" -a "--force"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and not __fish_seen_subcommand_from (cm completion mcp-commands)" -a "(cm completion mcp-commands)"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and __fish_seen_subcommand_from tools" -a "--json"
 complete -c cm -n "__fish_seen_subcommand_from completion" -a "zsh bash fish"
