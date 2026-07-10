@@ -8,7 +8,7 @@ import (
 
 func (a App) runCompletion(ctx context.Context, configPath string, args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands|member-commands|logs-commands|host-key-commands>")
+		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|profile-commands|member-commands|logs-commands|host-key-commands|local-agent-commands>")
 		return 2
 	}
 	switch args[0] {
@@ -41,6 +41,9 @@ func (a App) runCompletion(ctx context.Context, configPath string, args []string
 		return 0
 	case "host-key-commands":
 		printLines(a.Out, completionHostKeyCommands())
+		return 0
+	case "local-agent-commands":
+		printLines(a.Out, completionLocalAgentCommands())
 		return 0
 	case "profiles":
 		cfg, code := a.loadCompletionConfig(ctx, configPath)
@@ -149,6 +152,9 @@ func completionAWSCommands() []string {
 func completionMCPCommands() []string {
 	return []string{"tools"}
 }
+func completionLocalAgentCommands() []string {
+	return []string{"install", "start", "stop", "restart", "status", "uninstall"}
+}
 func zshCompletionScript() string {
 	return `#compdef cm
 
@@ -181,7 +187,7 @@ _cm_profile_or_apple() {
 }
 
 _cm() {
-  local -a commands aws_commands mcp_commands job_commands profile_commands member_commands logs_commands host_key_commands
+  local -a commands aws_commands mcp_commands job_commands profile_commands member_commands logs_commands host_key_commands local_agent_commands
   commands=("${(@f)$(command cm completion commands 2>/dev/null)}")
   aws_commands=("${(@f)$(command cm completion aws-commands 2>/dev/null)}")
   mcp_commands=("${(@f)$(command cm completion mcp-commands 2>/dev/null)}")
@@ -190,6 +196,7 @@ _cm() {
   member_commands=("${(@f)$(command cm completion member-commands 2>/dev/null)}")
   logs_commands=("${(@f)$(command cm completion logs-commands 2>/dev/null)}")
   host_key_commands=("${(@f)$(command cm completion host-key-commands 2>/dev/null)}")
+  local_agent_commands=("${(@f)$(command cm completion local-agent-commands 2>/dev/null)}")
 
   if [[ "${words[$((CURRENT - 1))]}" == "--config" ]]; then
     _files
@@ -295,7 +302,12 @@ _cm() {
       _values 'web option' --host --port --open --web-dir --config
       ;;
     local-agent)
-      _values 'local-agent option' --host --port
+      if (( CURRENT == 3 )); then
+        compadd -- "${local_agent_commands[@]}"
+        _values 'local-agent option' --host --port
+      else
+        _values 'local-agent option' --host --port
+      fi
       ;;
     mcp)
       if (( CURRENT == 3 )); then
@@ -424,7 +436,11 @@ func bashCompletionScript() string {
       COMPREPLY=( $(compgen -W "--host --port --open --web-dir --config" -- "$cur") )
       ;;
     local-agent)
-      COMPREPLY=( $(compgen -W "--host --port" -- "$cur") )
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion local-agent-commands 2>/dev/null) --host --port" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--host --port" -- "$cur") )
+      fi
       ;;
     mcp)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -466,6 +482,7 @@ complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcomma
 complete -c cm -n "__fish_seen_subcommand_from logs; and not __fish_seen_subcommand_from (cm completion logs-commands)" -a "(cm completion logs-commands)"
 complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_from export" -a "--output"
 complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"
+complete -c cm -n "__fish_seen_subcommand_from local-agent; and not __fish_seen_subcommand_from (cm completion local-agent-commands)" -a "(cm completion local-agent-commands)"
 complete -c cm -n "__fish_seen_subcommand_from local-agent" -a "--host --port"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and not __fish_seen_subcommand_from (cm completion mcp-commands)" -a "(cm completion mcp-commands)"
 complete -c cm -n "__fish_seen_subcommand_from mcp; and __fish_seen_subcommand_from tools" -a "--json"

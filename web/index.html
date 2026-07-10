@@ -868,7 +868,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncProgressTimer: null, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncProgressTimer: null, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -1565,13 +1565,27 @@
 
     function renderAssignMemberOptions() {
       const select = $("assignMemberSelect");
-      const current = select.value || "";
+      const profile = selectedProfile();
+      const current = profile ? confirmOpenOwnerValue(profile.name) : "";
       const enabledMembers = state.members.filter((member) => member.enabled);
       select.innerHTML = "<option value=\"\">未选择负责人</option>" + enabledMembers.map((member) =>
         "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
       ).join("");
       select.value = enabledMembers.some((member) => member.email === current) ? current : "";
-      select.disabled = state.busy || !selectedProfile();
+      select.disabled = state.busy || !profile || !isAdmin();
+    }
+
+    function confirmOpenOwnerValue(profileName) {
+      if (!profileName) return "";
+      if (Object.prototype.hasOwnProperty.call(state.confirmOpenOwners, profileName)) {
+        return state.confirmOpenOwners[profileName] || "";
+      }
+      return state.profileOwners[profileName]?.email || "";
+    }
+
+    function setConfirmOpenOwner(profileName, ownerEmail) {
+      if (!profileName || !isAdmin()) return;
+      state.confirmOpenOwners[profileName] = ownerEmail || "";
     }
 
     function renderSelected() {
@@ -1695,7 +1709,7 @@
     async function runAWS(command, confirm = false) {
       const p = selectedProfile();
       if (!p) return false;
-      const ownerEmail = $("assignMemberSelect").value;
+      const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : "";
       if (confirm && command === "open" && isAdmin() && !ownerEmail && !profileReady(p.name)) {
         setStatus("管理员确认打开前必须选择负责人");
         return false;
@@ -1737,7 +1751,7 @@
       setBusy(true, command === "open" ? "正在预览打开..." : "正在预览释放...");
       setStatus(command === "open" ? "预览打开中..." : "预览释放中...");
       try {
-        const ownerEmail = $("assignMemberSelect").value;
+        const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : "";
         const body = await api("/api/aws/" + command, {
           method: "POST",
           body: JSON.stringify({ profile: p.name, confirm: false, background: false, notify: true, owner_email: ownerEmail })
@@ -1762,7 +1776,10 @@
       const isDestroy = command === "destroy";
       $("awsConfirmTitle").textContent = isDestroy ? "释放预览" : "打开预览";
       const email = profile.apple_email || profile.name;
-      const owner = !isDestroy && isAdmin() ? "负责人：" + ($("assignMemberSelect").selectedOptions[0]?.textContent || $("assignMemberSelect").value || "-") + "。" : "";
+      const ownerEmail = confirmOpenOwnerValue(profile.name);
+      const ownerMember = state.members.find((member) => member.email === ownerEmail);
+      const ownerLabel = ownerMember ? (ownerMember.name || ownerMember.email) : ownerEmail;
+      const owner = !isDestroy && isAdmin() ? "负责人：" + (ownerLabel || "-") + "。" : "";
       $("awsConfirmHint").textContent = (isDestroy ? "确认释放 " : "确认打开 ") + email + " 的 Mac？" + owner;
       $("awsConfirmOutput").textContent = outputText || "";
       $("runAWSConfirmBtn").textContent = isDestroy ? "确认释放" : "确认打开";
@@ -3108,6 +3125,12 @@
     $("statusBtn").addEventListener("click", loadStatus);
     $("openMacBtn").addEventListener("click", () => previewAWS("open"));
     $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
+    $("assignMemberSelect").addEventListener("change", () => {
+      const p = selectedProfile();
+      if (!p) return;
+      setConfirmOpenOwner(p.name, $("assignMemberSelect").value);
+      renderSelected();
+    });
     $("extendReminderBtn").addEventListener("click", openReleaseReminderEditor);
     $("cleanupRecordsBtn").addEventListener("click", cleanupLocalRecords);
     $("saveReleaseReminderBtn").addEventListener("click", saveReleaseReminder);

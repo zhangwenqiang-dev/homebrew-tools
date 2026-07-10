@@ -2427,9 +2427,22 @@ func TestAppCompletionZshScriptUsesDynamicProfiles(t *testing.T) {
 		t.Fatalf("completion zsh code = %d, err = %s", code, errOut.String())
 	}
 	text := out.String()
-	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands", "open|close|next", "guide topic"} {
+	for _, want := range []string{"#compdef cm", "cm completion profiles", "cm completion apple-emails", "cm completion aws-commands", "cm completion local-agent-commands", "open|close|next", "guide topic"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("zsh completion missing %q: %q", want, text)
+		}
+	}
+}
+
+func TestAppCompletionLocalAgentCommands(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if code := app.Run(context.Background(), []string{"completion", "local-agent-commands"}); code != 0 {
+		t.Fatalf("completion local-agent-commands code = %d, err = %s", code, errOut.String())
+	}
+	for _, want := range []string{"install", "start", "stop", "restart", "status", "uninstall"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("local-agent completion missing %q:\n%s", want, out.String())
 		}
 	}
 }
