@@ -321,6 +321,10 @@
     .sync-history-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
     .sync-history-item code { overflow-wrap: anywhere; white-space: normal; }
     .sync-history-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .sync-progress { display: grid; gap: 6px; }
+    .sync-progress-row { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+    .sync-progress-track { height: 8px; overflow: hidden; border-radius: 999px; background: #eef2f7; border: 1px solid var(--line); }
+    .sync-progress-bar { height: 100%; width: 0%; border-radius: inherit; background: var(--accent); transition: width .25s ease; }
     .path-row { display: flex; gap: 8px; align-items: center; }
     .path-row input { flex: 1; min-width: 0; }
     .picker-layer {
@@ -727,6 +731,10 @@
               </div>
               <input id="syncPushRemotePath" placeholder="远程目录，空则 ~/Downloads/">
               <button id="syncPushBtn" class="primary">开始上传</button>
+              <div id="syncPushProgress" class="sync-progress hidden">
+                <div class="sync-progress-row"><span id="syncPushProgressLabel">上传准备中</span><strong id="syncPushProgressPercent">0%</strong></div>
+                <div class="sync-progress-track"><div id="syncPushProgressBar" class="sync-progress-bar"></div></div>
+              </div>
             </div>
             <div class="sync-panel">
               <h2>下载到本机</h2>
@@ -860,7 +868,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncProgressTimer: null, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -878,7 +886,7 @@
       });
       document.querySelectorAll("[data-start]").forEach((button) => {
         const profile = button.getAttribute("data-start");
-        button.disabled = busy || !profileReady(profile) || !profileVNCReady(profile);
+        button.disabled = busy || !profileReady(profile);
       });
       document.querySelectorAll("[data-sync], [data-terminal]").forEach((button) => {
         const profile = button.getAttribute("data-sync") || button.getAttribute("data-terminal");
@@ -1311,9 +1319,7 @@
     function applyProfileOwners() {
       for (const profile of state.profiles) {
         const owner = state.profileOwners[profile.name];
-        if (owner) {
-          profile.owners = [owner];
-        }
+        profile.owners = owner ? [owner] : [];
       }
     }
 
@@ -1377,7 +1383,7 @@
         const status = state.statuses[p.name];
         const ready = !!status?.ready;
         const readyAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能执行该操作。\"";
-        const vncAttrs = ready && profileVNCReady(p.name) ? "" : " disabled title=\"" + (ready ? "请先点击连接，连接成功后再打开 VNC。" : "Mac 未 ready，不能打开 VNC。") + "\"";
+        const vncAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能打开 VNC。\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td data-label=\"Profile\"><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td data-label=\"Apple\">" + escapeHTML(p.apple_email || "-") + "</td>" +
@@ -1400,10 +1406,6 @@
           const profile = button.getAttribute("data-start");
           if (!profileReady(profile)) {
             setStatus("Mac 未 ready，不能打开 VNC。");
-            return;
-          }
-          if (!profileVNCReady(profile)) {
-            setStatus("请先点击连接，连接成功后再打开 VNC。");
             return;
           }
           startTunnel(profile);
@@ -1565,7 +1567,7 @@
       const select = $("assignMemberSelect");
       const current = select.value || "";
       const enabledMembers = state.members.filter((member) => member.enabled);
-      select.innerHTML = "<option value=\"\">不选择负责人</option>" + enabledMembers.map((member) =>
+      select.innerHTML = "<option value=\"\">未选择负责人</option>" + enabledMembers.map((member) =>
         "<option value=\"" + escapeAttr(member.email) + "\">" + escapeHTML(member.name || member.email) + "</option>"
       ).join("");
       select.value = enabledMembers.some((member) => member.email === current) ? current : "";
@@ -1846,7 +1848,7 @@
           method: "POST",
           body: JSON.stringify({ profile: p.name })
         });
-        await Promise.all([loadProfileOwners(), loadReleaseReminders(), loadEvents(false)]);
+        await Promise.all([loadProfiles(), loadProfileOwners(), loadReleaseReminders(), loadEvents(false)]);
         applyProfileOwners();
         setOutput(JSON.stringify(body.data || {}, null, 2));
         setStatus("记录已清理");
@@ -2029,6 +2031,41 @@
       setStatus("已填充同步记录");
     }
 
+    function setSyncPushProgress(percent, label) {
+      const value = Math.max(0, Math.min(100, Math.round(percent || 0)));
+      $("syncPushProgress").classList.remove("hidden");
+      $("syncPushProgressBar").style.width = value + "%";
+      $("syncPushProgressPercent").textContent = value + "%";
+      $("syncPushProgressLabel").textContent = label || "上传中";
+    }
+
+    function stopSyncPushProgressTimer() {
+      if (state.syncProgressTimer) {
+        window.clearInterval(state.syncProgressTimer);
+        state.syncProgressTimer = null;
+      }
+    }
+
+    function startSyncPushProgress() {
+      stopSyncPushProgressTimer();
+      setSyncPushProgress(0, "上传准备中");
+      let percent = 0;
+      state.syncProgressTimer = window.setInterval(() => {
+        percent = Math.min(95, percent + Math.max(1, Math.round((95 - percent) * 0.08)));
+        setSyncPushProgress(percent, "上传中");
+        if (percent >= 95) {
+          stopSyncPushProgressTimer();
+        }
+      }, 600);
+    }
+
+    function parseRsyncPercent(text) {
+      const matches = String(text || "").match(/(\d{1,3})%/g);
+      if (!matches || !matches.length) return 0;
+      const last = matches[matches.length - 1].replace("%", "");
+      return Number(last) || 0;
+    }
+
     async function deleteSyncHistory(id) {
       if (!id) return;
       setBusy(true, "正在删除同步记录...");
@@ -2065,6 +2102,12 @@
       }
       setBusy(true, direction === "push" ? "正在上传..." : "正在下载...");
       setStatus(direction === "push" ? "上传中..." : "下载中...");
+      if (direction === "push") {
+        startSyncPushProgress();
+      } else {
+        stopSyncPushProgressTimer();
+        $("syncPushProgress").classList.add("hidden");
+      }
       try {
         if (!state.localAgent.online) {
           throw new Error("本机代理未启动，请先运行 cm local-agent");
@@ -2074,9 +2117,18 @@
           body: JSON.stringify(localAgentPayload(p.name, payload))
         });
         setOutput((body.output || "") + (body.error || ""));
+        if (direction === "push") {
+          const percent = parseRsyncPercent((body.output || "") + "\n" + (body.error || "")) || 100;
+          stopSyncPushProgressTimer();
+          setSyncPushProgress(percent, "上传完成");
+        }
         setStatus(direction === "push" ? "上传完成" : "下载完成");
         await Promise.all([loadSyncHistory(), loadEvents(false)]);
       } catch (err) {
+        if (direction === "push") {
+          stopSyncPushProgressTimer();
+          $("syncPushProgressLabel").textContent = "上传失败";
+        }
         setOutput(String(err.message || err));
         setStatus(direction === "push" ? "上传失败" : "下载失败");
       } finally {

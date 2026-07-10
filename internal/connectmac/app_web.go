@@ -438,7 +438,7 @@ func (a App) webProfilesHandler(configPath string) http.HandlerFunc {
 		profiles := make([]webProfile, 0, len(cfg.Profiles))
 		for _, name := range sortedProfileNames(cfg) {
 			profile, _ := cfg.Profile(name)
-			owners, _ := a.MemberStore.MembersForApple(profile.AWS.AccountEmail)
+			owners := []PublicMember{}
 			if owner, ok, _ := a.MemberStore.ProfileOwner(profile.Name); ok {
 				owners = []PublicMember{owner.Owner}
 			}

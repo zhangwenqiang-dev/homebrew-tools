@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 func RemoteTarget(profile Profile, path string) string {
@@ -50,7 +51,7 @@ func RsyncPullArgs(profile Profile, remotePath, localDir string, filters SyncFil
 		"-e", "ssh -i " + keyPath,
 	}
 	args = appendRsyncFilters(args, filters)
-	args = append(args, RemoteTarget(profile, remotePath), localDir)
+	args = append(args, RemoteTarget(profile, EscapeRemotePath(remotePath)), localDir)
 	return args, nil
 }
 
@@ -65,8 +66,26 @@ func RsyncPushArgs(profile Profile, localPath, remoteDir string, filters SyncFil
 		"-e", "ssh -i " + keyPath,
 	}
 	args = appendRsyncFilters(args, filters)
-	args = append(args, localPath, RemoteTarget(profile, remoteDir))
+	args = append(args, localPath, RemoteTarget(profile, EscapeRemotePath(remoteDir)))
 	return args, nil
+}
+
+func EscapeRemotePath(path string) string {
+	var b strings.Builder
+	for _, r := range path {
+		if shouldEscapeRemotePathRune(r) {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func shouldEscapeRemotePathRune(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	return strings.ContainsRune("\\'\"$`&;()|<>*?[]{}!", r)
 }
 
 func appendRsyncFilters(args []string, filters SyncFilters) []string {

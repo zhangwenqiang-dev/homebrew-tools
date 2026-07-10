@@ -731,7 +731,7 @@ func TestAppWebProfilesAPI(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("response not ok: %#v", resp)
 	}
-	if !strings.Contains(rec.Body.String(), "xcode-vnc") || !strings.Contains(rec.Body.String(), "user@example.com") || !strings.Contains(rec.Body.String(), "whh@example.com") {
+	if !strings.Contains(rec.Body.String(), "xcode-vnc") || !strings.Contains(rec.Body.String(), "user@example.com") || strings.Contains(rec.Body.String(), "whh@example.com") {
 		t.Fatalf("profiles body = %s", rec.Body.String())
 	}
 }

@@ -105,3 +105,23 @@ func TestNormalizeRemotePathKeepsRemoteAbsolutePath(t *testing.T) {
 		t.Fatalf("path = %q", got)
 	}
 }
+
+func TestRsyncPullArgsEscapesRemotePathSpaces(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	profile := validProfile("~/.ssh/example.pem")
+	got, err := RsyncPullArgs(profile, "~/Documents/Telegram Bot 头像", "/Users/wenqiang/Downloads/", SyncFilters{})
+	if err != nil {
+		t.Fatalf("RsyncPullArgs returned error: %v", err)
+	}
+	key := filepath.Join(home, ".ssh", "example.pem")
+	want := []string{
+		"-avzP",
+		"-e", "ssh -i " + key,
+		"user@mac-host.example.com:~/Documents/Telegram\\ Bot\\ 头像",
+		"/Users/wenqiang/Downloads/",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
