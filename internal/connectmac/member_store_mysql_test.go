@@ -157,22 +157,36 @@ func TestMySQLReleaseReminderAutoReleaseSchemaMigrations(t *testing.T) {
 }
 
 func TestMySQLReleaseReminderSelectColumnsIncludeAutoReleaseState(t *testing.T) {
-	wantColumns := []string{
-		"auto_release_enabled",
-		"auto_release_at",
-		"auto_release_started_at",
-		"auto_release_last_attempt_at",
-		"auto_release_attempts",
-		"auto_release_last_error",
-		"auto_release_state",
+	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
+	if mysqlReleaseReminderSelectColumns != wantColumns {
+		t.Fatalf("release reminder SELECT columns = %q, want %q", mysqlReleaseReminderSelectColumns, wantColumns)
 	}
-	for _, column := range wantColumns {
-		if !strings.Contains(mysqlReleaseReminderSelectColumns, column) {
-			t.Errorf("release reminder SELECT columns missing %s", column)
+	wantQuery := `SELECT ` + wantColumns + ` FROM cm_release_reminders WHERE profile_name = ? FOR UPDATE`
+	if mysqlReleaseReminderSelectForUpdate != wantQuery {
+		t.Fatalf("release reminder lock query = %q, want %q", mysqlReleaseReminderSelectForUpdate, wantQuery)
+	}
+}
+
+func TestMySQLSchemaGuardRunsOnceAndSharesAcrossStoreCopies(t *testing.T) {
+	wantErr := errors.New("migration failed")
+	guard := &mysqlSchemaGuard{}
+	calls := 0
+	for range 2 {
+		if err := guard.run(func() error {
+			calls++
+			return wantErr
+		}); !errors.Is(err, wantErr) {
+			t.Fatalf("schema error = %v, want %v", err, wantErr)
 		}
 	}
-	if !strings.Contains(mysqlReleaseReminderSelectForUpdate, "WHERE profile_name = ? FOR UPDATE") {
-		t.Fatalf("release reminder update query does not lock one profile row: %s", mysqlReleaseReminderSelectForUpdate)
+	if calls != 1 {
+		t.Fatalf("schema migration calls = %d, want 1", calls)
+	}
+
+	store := MySQLMemberStore{DSN: "schema-guard-test"}
+	copyOfStore := store
+	if store.normalize().schemaGuard != copyOfStore.normalize().schemaGuard {
+		t.Fatal("copied MySQL stores do not share schema guard")
 	}
 }
 
@@ -253,6 +267,12 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(reminder, current) {
 			t.Fatalf("scanned reminder = %+v, want %+v", reminder, current)
 		}
+		reminder.ProfileName = "changed"
+		reminder.CreatedAt = "changed"
+		reminder.AppleEmail = " APPLE@EXAMPLE.COM "
+		reminder.OwnerEmail = " OWNER@EXAMPLE.COM "
+		reminder.LastExtendedByEmail = " ADMIN@EXAMPLE.COM "
+		reminder.Status = ""
 		reminder.AutoReleaseAttempts++
 		reminder.AutoReleaseLastError = ""
 		reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
@@ -265,6 +285,7 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 	want.AutoReleaseAttempts = 3
 	want.AutoReleaseLastError = ""
 	want.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	want.Status = ReleaseReminderStatusActive
 	want.UpdatedAt = now.Format(time.RFC3339)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("updated reminder = %+v, want %+v", got, want)
@@ -278,11 +299,87 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 	if len(tx.execArgs) != 21 {
 		t.Fatalf("UPDATE arg count = %d, want 21", len(tx.execArgs))
 	}
+	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
+	if tx.execQuery != wantUpdateQuery {
+		t.Fatalf("UPDATE query = %q, want %q", tx.execQuery, wantUpdateQuery)
+	}
 	if !reflect.DeepEqual(tx.written, want) {
 		t.Fatalf("written reminder = %+v, want %+v", tx.written, want)
 	}
 	if !tx.committed || tx.rolledBack {
 		t.Fatalf("transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
+	}
+}
+
+func TestMySQLUpsertReleaseReminderPreservesAutomaticReleaseState(t *testing.T) {
+	current := ReleaseReminder{
+		ProfileName:              "apple-usw2",
+		HostID:                   "h-original",
+		Status:                   ReleaseReminderStatusActive,
+		AutoReleaseEnabled:       true,
+		AutoReleaseAt:            "2026-07-02T08:00:00Z",
+		AutoReleaseStartedAt:     "2026-07-02T08:01:00Z",
+		AutoReleaseLastAttemptAt: "2026-07-02T08:02:00Z",
+		AutoReleaseAttempts:      2,
+		AutoReleaseLastError:     "pending",
+		AutoReleaseState:         ReleaseReminderAutoReleaseStateRetrying,
+		CreatedAt:                "2026-07-01T08:00:00Z",
+		UpdatedAt:                "2026-07-02T08:02:00Z",
+	}
+	tx := &fakeMySQLReleaseReminderTransaction{row: fakeMySQLReleaseReminderRow{reminder: current}}
+	now := time.Date(2026, 7, 2, 8, 3, 0, 0, time.UTC)
+	got, err := upsertReleaseReminderInMySQLTransaction(tx, ReleaseReminder{
+		ProfileName:         current.ProfileName,
+		AppleEmail:          " APPLE@EXAMPLE.COM ",
+		HostID:              "h-updated",
+		OwnerEmail:          " OWNER@EXAMPLE.COM ",
+		LastExtendedByEmail: " ADMIN@EXAMPLE.COM ",
+	}, now)
+	if err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	want := current
+	want.AppleEmail = "apple@example.com"
+	want.HostID = "h-updated"
+	want.OwnerEmail = "owner@example.com"
+	want.LastExtendedByEmail = "admin@example.com"
+	want.Status = ReleaseReminderStatusActive
+	want.UpdatedAt = now.Format(time.RFC3339)
+	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(tx.written, want) {
+		t.Fatalf("upserted reminder got=%+v written=%+v want=%+v", got, tx.written, want)
+	}
+	if !tx.committed || tx.rolledBack {
+		t.Fatalf("upsert transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
+	}
+}
+
+func TestMySQLUpsertReleaseReminderInsertsMissingRow(t *testing.T) {
+	tx := &fakeMySQLReleaseReminderTransaction{row: fakeMySQLReleaseReminderRow{err: sql.ErrNoRows}}
+	now := time.Date(2026, 7, 2, 8, 3, 0, 0, time.UTC)
+	want := ReleaseReminder{
+		ProfileName:        "apple-usw2",
+		Status:             ReleaseReminderStatusActive,
+		AutoReleaseEnabled: true,
+		AutoReleaseAt:      "2026-07-02T08:00:00Z",
+		AutoReleaseState:   ReleaseReminderAutoReleaseStateScheduled,
+		CreatedAt:          now.Format(time.RFC3339),
+		UpdatedAt:          now.Format(time.RFC3339),
+	}
+	got, err := upsertReleaseReminderInMySQLTransaction(tx, ReleaseReminder{
+		ProfileName:        want.ProfileName,
+		Status:             want.Status,
+		AutoReleaseEnabled: want.AutoReleaseEnabled,
+		AutoReleaseAt:      want.AutoReleaseAt,
+		AutoReleaseState:   want.AutoReleaseState,
+	}, now)
+	if err != nil {
+		t.Fatalf("insert reminder: %v", err)
+	}
+	if tx.execQuery != mysqlReleaseReminderInsertQuery || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(tx.written, want) {
+		t.Fatalf("inserted reminder query=%q got=%+v written=%+v want=%+v", tx.execQuery, got, tx.written, want)
+	}
+	if !tx.committed || tx.rolledBack {
+		t.Fatalf("insert transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
 	}
 }
 

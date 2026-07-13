@@ -382,3 +382,114 @@ func TestMemberStoreUpdateReleaseReminderSerializesConcurrentUpdates(t *testing.
 		t.Fatalf("auto-release attempts = %d, want %d", reminder.AutoReleaseAttempts, updates)
 	}
 }
+
+func TestMemberStoreReleaseReminderLegacyWritersShareAtomicLock(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		writer func(MemberStore) error
+		check  func(*testing.T, ReleaseReminder)
+	}{
+		{
+			name: "upsert",
+			writer: func(store MemberStore) error {
+				_, err := store.UpsertReleaseReminder(ReleaseReminder{
+					ProfileName: "apple-usw2",
+					HostID:      "h-updated",
+					Status:      ReleaseReminderStatusActive,
+				})
+				return err
+			},
+			check: func(t *testing.T, reminder ReleaseReminder) {
+				if reminder.HostID != "h-updated" {
+					t.Fatalf("legacy upsert host ID = %q", reminder.HostID)
+				}
+			},
+		},
+		{
+			name: "due status",
+			writer: func(store MemberStore) error {
+				_, err := store.MarkReleaseReminderDue("apple-usw2", "2026-07-02T08:05:00Z")
+				return err
+			},
+			check: func(t *testing.T, reminder ReleaseReminder) {
+				if reminder.Status != ReleaseReminderStatusDueNotified || reminder.LastNotifiedAt != "2026-07-02T08:05:00Z" {
+					t.Fatalf("due status mutation = %+v", reminder)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+			if _, err := store.UpsertReleaseReminder(ReleaseReminder{
+				ProfileName:        "apple-usw2",
+				HostID:             "h-original",
+				AutoReleaseEnabled: true,
+				AutoReleaseAt:      "2026-07-02T08:00:00Z",
+				AutoReleaseState:   ReleaseReminderAutoReleaseStateScheduled,
+			}); err != nil {
+				t.Fatalf("seed reminder: %v", err)
+			}
+
+			callbackEntered := make(chan struct{})
+			releaseCallback := make(chan struct{})
+			updateDone := make(chan error, 1)
+			go func() {
+				_, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+					close(callbackEntered)
+					<-releaseCallback
+					reminder.AutoReleaseAttempts++
+					return reminder, nil
+				})
+				updateDone <- err
+			}()
+			<-callbackEntered
+
+			writerDone := make(chan error, 1)
+			go func() { writerDone <- test.writer(store) }()
+			select {
+			case err := <-writerDone:
+				close(releaseCallback)
+				<-updateDone
+				t.Fatalf("legacy writer bypassed reminder lock: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(releaseCallback)
+			if err := <-updateDone; err != nil {
+				t.Fatalf("automatic-release update: %v", err)
+			}
+			if err := <-writerDone; err != nil {
+				t.Fatalf("legacy writer: %v", err)
+			}
+			reminder, _, err := store.ReleaseReminder("apple-usw2")
+			if err != nil {
+				t.Fatalf("load reminder: %v", err)
+			}
+			if !reminder.AutoReleaseEnabled || reminder.AutoReleaseAt != "2026-07-02T08:00:00Z" || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateScheduled || reminder.AutoReleaseAttempts != 1 {
+				t.Fatalf("automatic-release state was overwritten: %+v", reminder)
+			}
+			test.check(t, reminder)
+		})
+	}
+}
+
+func TestMemberStoreUpdateReleaseReminderNormalizesCallbackOutput(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	if _, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "apple-usw2", CreatedAt: "created"}); err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	got, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.ProfileName = "changed"
+		reminder.CreatedAt = "changed"
+		reminder.AppleEmail = " APPLE@EXAMPLE.COM "
+		reminder.OwnerEmail = " OWNER@EXAMPLE.COM "
+		reminder.LastExtendedByEmail = " ADMIN@EXAMPLE.COM "
+		reminder.Status = ""
+		return reminder, nil
+	})
+	if err != nil {
+		t.Fatalf("update reminder: %v", err)
+	}
+	if got.ProfileName != "apple-usw2" || got.CreatedAt != "created" || got.AppleEmail != "apple@example.com" || got.OwnerEmail != "owner@example.com" || got.LastExtendedByEmail != "admin@example.com" || got.Status != ReleaseReminderStatusActive {
+		t.Fatalf("normalized reminder = %+v", got)
+	}
+}

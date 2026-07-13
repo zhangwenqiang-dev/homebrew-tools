@@ -628,7 +628,26 @@ func (s MemberStore) ReleaseReminder(profileName string) (ReleaseReminder, bool,
 }
 
 func (s MemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {
-	return upsertReleaseReminderInStore(s, reminder)
+	reminder = normalizeReleaseReminder(reminder)
+	if reminder.ProfileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	return s.mutateReleaseReminders(func(db *MemberData, now string) (ReleaseReminder, error) {
+		for i := range db.Reminders {
+			if db.Reminders[i].ProfileName != reminder.ProfileName {
+				continue
+			}
+			reminder = mergeReleaseReminderUpsert(db.Reminders[i], reminder, now)
+			db.Reminders[i] = reminder
+			return reminder, nil
+		}
+		if reminder.CreatedAt == "" {
+			reminder.CreatedAt = now
+		}
+		reminder.UpdatedAt = now
+		db.Reminders = append(db.Reminders, reminder)
+		return reminder, nil
+	})
 }
 
 func (s MemberStore) UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error) {
@@ -639,6 +658,46 @@ func (s MemberStore) UpdateReleaseReminder(profileName string, update func(Relea
 	if update == nil {
 		return ReleaseReminder{}, errors.New("release reminder update is required")
 	}
+	return s.mutateReleaseReminders(func(db *MemberData, now string) (ReleaseReminder, error) {
+		for i := range db.Reminders {
+			if db.Reminders[i].ProfileName != profileName {
+				continue
+			}
+			updated, err := update(db.Reminders[i])
+			if err != nil {
+				return ReleaseReminder{}, err
+			}
+			updated = normalizeReleaseReminderCallback(db.Reminders[i], updated, now)
+			db.Reminders[i] = updated
+			return updated, nil
+		}
+		return ReleaseReminder{}, releaseReminderNotFoundError(profileName)
+	})
+}
+
+func (s MemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {
+	if notifiedAt == "" {
+		notifiedAt = s.currentTime().Format(time.RFC3339)
+	}
+	return s.UpdateReleaseReminder(profileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.Status = ReleaseReminderStatusDueNotified
+		reminder.LastNotifiedAt = notifiedAt
+		return reminder, nil
+	})
+}
+
+func (s MemberStore) MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error) {
+	if releasedAt == "" {
+		releasedAt = s.currentTime().Format(time.RFC3339)
+	}
+	return s.UpdateReleaseReminder(profileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.Status = ReleaseReminderStatusReleased
+		reminder.ReleasedAt = releasedAt
+		return reminder, nil
+	})
+}
+
+func (s MemberStore) mutateReleaseReminders(mutate func(*MemberData, string) (ReleaseReminder, error)) (ReleaseReminder, error) {
 	s = s.normalize()
 	path, err := ExpandPath(s.Path)
 	if err != nil {
@@ -647,40 +706,22 @@ func (s MemberStore) UpdateReleaseReminder(profileName string, update func(Relea
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return ReleaseReminder{}, err
 	}
-	var updated ReleaseReminder
+	var result ReleaseReminder
 	err = withFileLock(path+".lock", func() error {
 		db, err := s.Load()
 		if err != nil {
 			return err
 		}
-		for i := range db.Reminders {
-			if db.Reminders[i].ProfileName != profileName {
-				continue
-			}
-			updated, err = update(db.Reminders[i])
-			if err != nil {
-				return err
-			}
-			updated.ProfileName = profileName
-			updated.CreatedAt = db.Reminders[i].CreatedAt
-			updated.UpdatedAt = s.currentTime().Format(time.RFC3339)
-			db.Reminders[i] = updated
-			return s.Save(db)
+		result, err = mutate(&db, s.currentTime().Format(time.RFC3339))
+		if err != nil {
+			return err
 		}
-		return releaseReminderNotFoundError(profileName)
+		return s.Save(db)
 	})
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	return updated, nil
-}
-
-func (s MemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {
-	return markReleaseReminderDueInStore(s, profileName, notifiedAt)
-}
-
-func (s MemberStore) MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error) {
-	return markReleaseReminderReleasedInStore(s, profileName, releasedAt)
+	return result, nil
 }
 
 func (s MemberStore) WebSettings() (WebSettings, error) {
@@ -1637,74 +1678,35 @@ func releaseReminderInStore(s memberDataStore, profileName string) (ReleaseRemin
 	return ReleaseReminder{}, false, nil
 }
 
-func upsertReleaseReminderInStore(s memberDataStore, reminder ReleaseReminder) (ReleaseReminder, error) {
+func normalizeReleaseReminder(reminder ReleaseReminder) ReleaseReminder {
 	reminder.ProfileName = strings.TrimSpace(reminder.ProfileName)
 	reminder.AppleEmail = normalizeEmail(reminder.AppleEmail)
 	reminder.OwnerEmail = normalizeEmail(reminder.OwnerEmail)
 	reminder.LastExtendedByEmail = normalizeEmail(reminder.LastExtendedByEmail)
-	if reminder.ProfileName == "" {
-		return ReleaseReminder{}, errors.New("profile is required")
-	}
 	if reminder.Status == "" {
 		reminder.Status = ReleaseReminderStatusActive
 	}
-	db, err := s.Load()
-	if err != nil {
-		return ReleaseReminder{}, err
-	}
-	now := s.currentTime().Format(time.RFC3339)
-	if reminder.CreatedAt == "" {
-		reminder.CreatedAt = now
-	}
-	reminder.UpdatedAt = now
-	for i := range db.Reminders {
-		if db.Reminders[i].ProfileName == reminder.ProfileName {
-			if reminder.CreatedAt == now && db.Reminders[i].CreatedAt != "" {
-				reminder.CreatedAt = db.Reminders[i].CreatedAt
-			}
-			db.Reminders[i] = reminder
-			return reminder, s.Save(db)
-		}
-	}
-	db.Reminders = append(db.Reminders, reminder)
-	return reminder, s.Save(db)
+	return reminder
 }
 
-func markReleaseReminderDueInStore(s memberDataStore, profileName, notifiedAt string) (ReleaseReminder, error) {
-	return updateReleaseReminderStatusInStore(s, profileName, ReleaseReminderStatusDueNotified, notifiedAt)
+func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now string) ReleaseReminder {
+	updated.ProfileName = current.ProfileName
+	updated.CreatedAt = current.CreatedAt
+	updated = normalizeReleaseReminder(updated)
+	updated.UpdatedAt = now
+	return updated
 }
 
-func markReleaseReminderReleasedInStore(s memberDataStore, profileName, releasedAt string) (ReleaseReminder, error) {
-	return updateReleaseReminderStatusInStore(s, profileName, ReleaseReminderStatusReleased, releasedAt)
-}
-
-func updateReleaseReminderStatusInStore(s memberDataStore, profileName, status, at string) (ReleaseReminder, error) {
-	profileName = strings.TrimSpace(profileName)
-	if profileName == "" {
-		return ReleaseReminder{}, errors.New("profile is required")
-	}
-	db, err := s.Load()
-	if err != nil {
-		return ReleaseReminder{}, err
-	}
-	if at == "" {
-		at = s.currentTime().Format(time.RFC3339)
-	}
-	for i := range db.Reminders {
-		if db.Reminders[i].ProfileName != profileName {
-			continue
-		}
-		db.Reminders[i].Status = status
-		db.Reminders[i].UpdatedAt = s.currentTime().Format(time.RFC3339)
-		switch status {
-		case ReleaseReminderStatusDueNotified:
-			db.Reminders[i].LastNotifiedAt = at
-		case ReleaseReminderStatusReleased:
-			db.Reminders[i].ReleasedAt = at
-		}
-		return db.Reminders[i], s.Save(db)
-	}
-	return ReleaseReminder{}, releaseReminderNotFoundError(profileName)
+func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) ReleaseReminder {
+	updated = normalizeReleaseReminderCallback(current, updated, now)
+	updated.AutoReleaseEnabled = current.AutoReleaseEnabled
+	updated.AutoReleaseAt = current.AutoReleaseAt
+	updated.AutoReleaseStartedAt = current.AutoReleaseStartedAt
+	updated.AutoReleaseLastAttemptAt = current.AutoReleaseLastAttemptAt
+	updated.AutoReleaseAttempts = current.AutoReleaseAttempts
+	updated.AutoReleaseLastError = current.AutoReleaseLastError
+	updated.AutoReleaseState = current.AutoReleaseState
+	return updated
 }
 
 func releaseReminderNotFoundError(profileName string) error {
