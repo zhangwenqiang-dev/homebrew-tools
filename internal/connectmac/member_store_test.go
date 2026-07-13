@@ -545,7 +545,9 @@ func TestMemberStoreUnrelatedWritersShareReminderMutationBoundary(t *testing.T) 
 			}); err != nil {
 				t.Fatalf("seed reminder: %v", err)
 			}
-			storeCopy := store
+			store.mutationGuard = &storeMutationGuard{}
+			storeCopy := NewMemberStore(store.Path)
+			storeCopy.mutationGuard = &storeMutationGuard{}
 			callbackEntered := make(chan struct{})
 			releaseCallback := make(chan struct{})
 			updateDone := make(chan error, 1)
@@ -598,7 +600,10 @@ func TestMemberStoreStaleSavePreservesCurrentReminders(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed reminder: %v", err)
 	}
-	stale, err := store.Load()
+	store.mutationGuard = &storeMutationGuard{}
+	independentStore := NewMemberStore(store.Path)
+	independentStore.mutationGuard = &storeMutationGuard{}
+	stale, err := independentStore.Load()
 	if err != nil {
 		t.Fatalf("load stale snapshot: %v", err)
 	}
@@ -609,7 +614,7 @@ func TestMemberStoreStaleSavePreservesCurrentReminders(t *testing.T) {
 		t.Fatalf("update reminder: %v", err)
 	}
 	stale.Events = append(stale.Events, OperationEvent{ID: "event-stale-save"})
-	if err := store.Save(stale); err != nil {
+	if err := independentStore.Save(stale); err != nil {
 		t.Fatalf("save stale snapshot: %v", err)
 	}
 	db, err := store.Load()

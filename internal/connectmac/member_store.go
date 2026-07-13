@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +14,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const DefaultMemberDataPath = "~/.connectmac/members.json"
@@ -27,8 +29,7 @@ type MemberStore struct {
 
 type storeMutationGuard struct {
 	// Serializes repository mutations in this process; registry-backed pointers keep store copies coordinated.
-	mu       sync.Mutex
-	revision atomic.Uint64
+	mu sync.Mutex
 }
 
 var storeMutationGuards sync.Map
@@ -238,15 +239,37 @@ func (s MemberStore) normalize() MemberStore {
 	return s
 }
 
-func (s MemberStore) lockMutation() func() {
+func (s MemberStore) lockMutation() (func(), error) {
 	s = s.normalize()
 	s.mutationGuard.mu.Lock()
-	return s.mutationGuard.mu.Unlock
+	path, err := ExpandPath(s.Path)
+	if err != nil {
+		s.mutationGuard.mu.Unlock()
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		s.mutationGuard.mu.Unlock()
+		return nil, err
+	}
+	file, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		s.mutationGuard.mu.Unlock()
+		return nil, fmt.Errorf("open lock file %s: %w", path+".lock", err)
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		file.Close()
+		s.mutationGuard.mu.Unlock()
+		return nil, fmt.Errorf("lock %s: %w", path+".lock", err)
+	}
+	return func() {
+		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		_ = file.Close()
+		s.mutationGuard.mu.Unlock()
+	}, nil
 }
 
 func (s MemberStore) Load() (MemberData, error) {
 	s = s.normalize()
-	revision := s.mutationGuard.revision.Load()
 	path, err := ExpandPath(s.Path)
 	if err != nil {
 		return MemberData{}, err
@@ -254,7 +277,7 @@ func (s MemberStore) Load() (MemberData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings(), mutationRevision: revision}, nil
+			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
 		}
 		return MemberData{}, err
 	}
@@ -263,18 +286,22 @@ func (s MemberStore) Load() (MemberData, error) {
 		return MemberData{}, fmt.Errorf("parse members data %s: %w", path, err)
 	}
 	normalizeMemberData(&db)
-	db.mutationRevision = revision
+	db.mutationRevision = memberDataRevision(data)
 	return db, nil
 }
 
 func (s MemberStore) Save(db MemberData) error {
 	s = s.normalize()
-	defer s.lockMutation()()
-	if db.mutationRevision != s.mutationGuard.revision.Load() {
-		current, err := s.Load()
-		if err != nil {
-			return err
-		}
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	current, err := s.Load()
+	if err != nil {
+		return err
+	}
+	if db.mutationRevision != current.mutationRevision {
 		db.Reminders = current.Reminders
 	}
 	return s.saveUnlocked(db)
@@ -301,8 +328,12 @@ func (s MemberStore) saveUnlocked(db MemberData) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	s.mutationGuard.revision.Add(1)
 	return nil
+}
+
+func memberDataRevision(data []byte) uint64 {
+	sum := sha256.Sum256(data)
+	return binary.BigEndian.Uint64(sum[:8])
 }
 
 func (s MemberStore) ListMembers() ([]MemberWithAssignments, error) {
@@ -333,7 +364,11 @@ func (s MemberStore) ListMembers() ([]MemberWithAssignments, error) {
 }
 
 func (s MemberStore) AddMember(name, email, role string) (Member, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return Member{}, err
+	}
+	defer unlock()
 	name = strings.TrimSpace(name)
 	email = normalizeEmail(email)
 	if strings.TrimSpace(role) == "" {
@@ -388,12 +423,20 @@ func (s MemberStore) AddMemberWithPassword(name, email, role, password string) (
 }
 
 func (s MemberStore) SetupAdmin(name, email, password string) (Member, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return Member{}, err
+	}
+	defer unlock()
 	return setupAdminInStore(s.unlocked(), name, email, password)
 }
 
 func (s MemberStore) SetMemberPassword(emailOrUsername, password string) error {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if len(password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
@@ -416,7 +459,11 @@ func (s MemberStore) SetMemberPassword(emailOrUsername, password string) error {
 }
 
 func (s MemberStore) UpdateMemberEmail(memberID, newEmail string) (Member, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return Member{}, err
+	}
+	defer unlock()
 	newEmail = normalizeEmail(newEmail)
 	if newEmail == "" || !strings.Contains(newEmail, "@") {
 		return Member{}, errors.New("valid email is required")
@@ -449,7 +496,11 @@ func (s MemberStore) UpdateMemberEmail(memberID, newEmail string) (Member, error
 }
 
 func (s MemberStore) UpdateMember(emailOrUsername, name, email, role string) (Member, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return Member{}, err
+	}
+	defer unlock()
 	return updateMemberInStore(s.unlocked(), emailOrUsername, name, email, role)
 }
 
@@ -483,7 +534,11 @@ func (s MemberStore) HasPasswordMembers() (bool, error) {
 }
 
 func (s MemberStore) SetMemberEnabled(email string, enabled bool) (Member, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return Member{}, err
+	}
+	defer unlock()
 	email = normalizeEmail(email)
 	db, err := s.Load()
 	if err != nil {
@@ -499,7 +554,11 @@ func (s MemberStore) SetMemberEnabled(email string, enabled bool) (Member, error
 }
 
 func (s MemberStore) AssignMember(appleEmail, memberEmail, relation string) (AppleAccountMember, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return AppleAccountMember{}, err
+	}
+	defer unlock()
 	appleEmail = normalizeEmail(appleEmail)
 	memberEmail = normalizeEmail(memberEmail)
 	relation = strings.TrimSpace(strings.ToLower(relation))
@@ -533,7 +592,11 @@ func (s MemberStore) AssignMember(appleEmail, memberEmail, relation string) (App
 }
 
 func (s MemberStore) UnassignMember(appleEmail, memberEmail string) error {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	appleEmail = normalizeEmail(appleEmail)
 	memberEmail = normalizeEmail(memberEmail)
 	db, err := s.Load()
@@ -587,12 +650,20 @@ func (s MemberStore) ProfileOwner(profileName string) (PublicProfileOwner, bool,
 }
 
 func (s MemberStore) SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	defer unlock()
 	return setProfileOwnerInStore(s.unlocked(), profileName, memberEmail)
 }
 
 func (s MemberStore) ClearProfileOwner(profileName string) error {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return clearProfileOwnerInStore(s.unlocked(), profileName)
 }
 
@@ -601,32 +672,56 @@ func (s MemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProfile, 
 }
 
 func (s MemberStore) UpsertManagedProfile(profile Profile) (ManagedProfile, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ManagedProfile{}, err
+	}
+	defer unlock()
 	return upsertManagedProfileInStore(s.unlocked(), profile)
 }
 
 func (s MemberStore) SetManagedProfileEnabled(profileName string, enabled bool) (ManagedProfile, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ManagedProfile{}, err
+	}
+	defer unlock()
 	return setManagedProfileEnabledInStore(s.unlocked(), profileName, enabled)
 }
 
 func (s MemberStore) DeleteManagedProfile(profileName string) error {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return deleteManagedProfileInStore(s.unlocked(), profileName)
 }
 
 func (s MemberStore) AssignProfileAccess(profileName, memberEmail string) (ProfileAccess, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ProfileAccess{}, err
+	}
+	defer unlock()
 	return assignProfileAccessInStore(s.unlocked(), profileName, memberEmail)
 }
 
 func (s MemberStore) UnassignProfileAccess(profileName, memberEmail string) error {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return unassignProfileAccessInStore(s.unlocked(), profileName, memberEmail)
 }
 
 func (s MemberStore) SetMemberProfileAccess(memberEmail string, profileNames []string) ([]ProfileAccess, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return setMemberProfileAccessInStore(s.unlocked(), memberEmail, profileNames)
 }
 
@@ -643,7 +738,11 @@ func (s MemberStore) ReleaseReminder(profileName string) (ReleaseReminder, bool,
 }
 
 func (s MemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer unlock()
 	reminder = normalizeReleaseReminder(reminder)
 	if reminder.ProfileName == "" {
 		return ReleaseReminder{}, errors.New("profile is required")
@@ -667,7 +766,11 @@ func (s MemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseRem
 }
 
 func (s MemberStore) UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer unlock()
 	profileName = strings.TrimSpace(profileName)
 	if profileName == "" {
 		return ReleaseReminder{}, errors.New("profile is required")
@@ -716,29 +819,15 @@ func (s MemberStore) MarkReleaseReminderReleased(profileName, releasedAt string)
 
 func (s MemberStore) mutateReleaseReminders(mutate func(*MemberData, string) (ReleaseReminder, error)) (ReleaseReminder, error) {
 	s = s.normalize()
-	path, err := ExpandPath(s.Path)
+	db, err := s.Load()
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return ReleaseReminder{}, err
-	}
-	var result ReleaseReminder
-	err = withFileLock(path+".lock", func() error {
-		db, err := s.Load()
-		if err != nil {
-			return err
-		}
-		result, err = mutate(&db, s.currentTime().Format(time.RFC3339))
-		if err != nil {
-			return err
-		}
-		return s.saveUnlocked(db)
-	})
+	result, err := mutate(&db, s.currentTime().Format(time.RFC3339))
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	return result, nil
+	return result, s.saveUnlocked(db)
 }
 
 func (s MemberStore) WebSettings() (WebSettings, error) {
@@ -750,7 +839,11 @@ func (s MemberStore) WebSettings() (WebSettings, error) {
 }
 
 func (s MemberStore) UpdateWebSettings(update WebSettings) (WebSettings, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return WebSettings{}, err
+	}
+	defer unlock()
 	db, err := s.Load()
 	if err != nil {
 		return WebSettings{}, err
@@ -766,7 +859,11 @@ func (s MemberStore) UpdateWebSettings(update WebSettings) (WebSettings, error) 
 }
 
 func (s MemberStore) EnsureAuthSecret() (string, error) {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	db, err := s.Load()
 	if err != nil {
 		return "", err
@@ -785,7 +882,11 @@ func (s MemberStore) EnsureAuthSecret() (string, error) {
 }
 
 func (s MemberStore) RecordEvent(event OperationEvent) error {
-	defer s.lockMutation()()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	db, err := s.Load()
 	if err != nil {
 		return err

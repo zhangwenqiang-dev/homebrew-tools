@@ -28,6 +28,21 @@ const mysqlReleaseReminderInsertQuery = `INSERT INTO cm_release_reminders (profi
 
 const mysqlReleaseReminderUpdateQuery = `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 
+const mysqlStoreLockName = "member_store"
+
+const mysqlStoreLockForUpdateQuery = `SELECT version FROM cm_store_locks WHERE lock_name = ? FOR UPDATE`
+
+const mysqlStoreLockVersionQuery = `SELECT version FROM cm_store_locks WHERE lock_name = ?`
+
+const mysqlStoreLockAdvanceQuery = `UPDATE cm_store_locks SET version = version + 1 WHERE lock_name = ?`
+
+const mysqlStoreLockTableStatement = `CREATE TABLE IF NOT EXISTS cm_store_locks (
+			lock_name VARCHAR(128) PRIMARY KEY,
+			version BIGINT UNSIGNED NOT NULL DEFAULT 0
+		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+
+const mysqlStoreLockSeedStatement = `INSERT INTO cm_store_locks (lock_name, version) VALUES (?, 0) ON DUPLICATE KEY UPDATE lock_name = VALUES(lock_name)`
+
 var mysqlReleaseReminderMigrationStatements = []string{
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_at VARCHAR(64) NULL`,
@@ -218,6 +233,7 @@ func (s MySQLMemberStore) ensureSchema() error {
 			INDEX idx_cm_release_reminders_due (status, release_due_at),
 			INDEX idx_cm_release_reminders_apple_email (apple_email)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+		mysqlStoreLockTableStatement,
 		`CREATE TABLE IF NOT EXISTS cm_settings (
 			setting_key VARCHAR(128) PRIMARY KEY,
 			setting_value TEXT NULL
@@ -251,12 +267,14 @@ func (s MySQLMemberStore) ensureSchema() error {
 			return err
 		}
 	}
+	if _, err := db.Exec(mysqlStoreLockSeedStatement, mysqlStoreLockName); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (s MySQLMemberStore) Load() (MemberData, error) {
 	s = s.normalize()
-	revision := s.mutationGuard.revision.Load()
 	if err := s.EnsureSchema(); err != nil {
 		return MemberData{}, err
 	}
@@ -266,6 +284,9 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 	}
 	defer db.Close()
 	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
+	if err := db.QueryRow(mysqlStoreLockVersionQuery, mysqlStoreLockName).Scan(&out.mutationRevision); err != nil {
+		return MemberData{}, err
+	}
 	rows, err := db.Query(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), COALESCE(api_token_hash, ''), COALESCE(api_token_at, ''), created_at, updated_at FROM cm_members ORDER BY email`)
 	if err != nil {
 		return MemberData{}, err
@@ -398,20 +419,12 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 		return MemberData{}, err
 	}
 	normalizeMemberData(&out)
-	out.mutationRevision = revision
 	return out, nil
 }
 
 func (s MySQLMemberStore) Save(data MemberData) error {
 	s = s.normalize()
 	defer s.lockMutation()()
-	if data.mutationRevision != s.mutationGuard.revision.Load() {
-		current, err := s.Load()
-		if err != nil {
-			return err
-		}
-		data.Reminders = current.Reminders
-	}
 	return s.saveUnlocked(data)
 }
 
@@ -431,10 +444,10 @@ func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"cm_events", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
-		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
-			return err
-		}
+	storeTx := sqlMySQLReleaseReminderTransaction{tx: tx}
+	data, err = prepareMySQLWholeStoreSave(storeTx, data)
+	if err != nil {
+		return err
 	}
 	for _, member := range data.Members {
 		if _, err := tx.Exec(`INSERT INTO cm_members (id, name, email, username, role, enabled, password_hash, password_salt, api_token_hash, api_token_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -492,10 +505,12 @@ func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
 			return err
 		}
 	}
+	if err := advanceMySQLStoreLock(storeTx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.mutationGuard.revision.Add(1)
 	return nil
 }
 
@@ -700,7 +715,6 @@ func (s MySQLMemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (Relea
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	s.normalize().mutationGuard.revision.Add(1)
 	return result, nil
 }
 
@@ -729,7 +743,6 @@ func (s MySQLMemberStore) UpdateReleaseReminder(profileName string, update func(
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	s.normalize().mutationGuard.revision.Add(1)
 	return result, nil
 }
 
@@ -744,12 +757,27 @@ type mysqlReleaseReminderTransaction interface {
 	Rollback() error
 }
 
+type mysqlRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Close() error
+}
+
+type mysqlStoreTransaction interface {
+	mysqlReleaseReminderTransaction
+	Query(query string, args ...any) (mysqlRows, error)
+}
+
 type sqlMySQLReleaseReminderTransaction struct {
 	tx *sql.Tx
 }
 
 func (tx sqlMySQLReleaseReminderTransaction) QueryRow(query string, args ...any) mysqlReleaseReminderScanner {
 	return tx.tx.QueryRow(query, args...)
+}
+
+func (tx sqlMySQLReleaseReminderTransaction) Query(query string, args ...any) (mysqlRows, error) {
+	return tx.tx.Query(query, args...)
 }
 
 func (tx sqlMySQLReleaseReminderTransaction) Exec(query string, args ...any) error {
@@ -763,6 +791,50 @@ func (tx sqlMySQLReleaseReminderTransaction) Commit() error {
 
 func (tx sqlMySQLReleaseReminderTransaction) Rollback() error {
 	return tx.tx.Rollback()
+}
+
+func lockMySQLStore(tx mysqlReleaseReminderTransaction) (uint64, error) {
+	var version uint64
+	if err := tx.QueryRow(mysqlStoreLockForUpdateQuery, mysqlStoreLockName).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func advanceMySQLStoreLock(tx mysqlReleaseReminderExecer) error {
+	return tx.Exec(mysqlStoreLockAdvanceQuery, mysqlStoreLockName)
+}
+
+func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (MemberData, error) {
+	version, err := lockMySQLStore(tx)
+	if err != nil {
+		return MemberData{}, err
+	}
+	if data.mutationRevision != version {
+		rows, err := tx.Query(`SELECT ` + mysqlReleaseReminderSelectColumns + ` FROM cm_release_reminders ORDER BY profile_name`)
+		if err != nil {
+			return MemberData{}, err
+		}
+		var reminders []ReleaseReminder
+		for rows.Next() {
+			var reminder ReleaseReminder
+			if err := scanMySQLReleaseReminder(rows, &reminder); err != nil {
+				rows.Close()
+				return MemberData{}, err
+			}
+			reminders = append(reminders, reminder)
+		}
+		if err := rows.Close(); err != nil {
+			return MemberData{}, err
+		}
+		data.Reminders = reminders
+	}
+	for _, table := range []string{"cm_events", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+		if err := tx.Exec("DELETE FROM " + table); err != nil {
+			return MemberData{}, err
+		}
+	}
+	return data, nil
 }
 
 func insertMySQLReleaseReminder(execer mysqlReleaseReminderExecer, reminder ReleaseReminder) error {
@@ -786,6 +858,9 @@ func upsertReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 		}
 	}()
 
+	if _, err = lockMySQLStore(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
 	var current ReleaseReminder
 	err = scanMySQLReleaseReminder(tx.QueryRow(mysqlReleaseReminderSelectForUpdate, reminder.ProfileName), &current)
 	switch {
@@ -806,6 +881,9 @@ func upsertReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 			return ReleaseReminder{}, err
 		}
 	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return ReleaseReminder{}, err
 	}
@@ -824,6 +902,9 @@ func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 		}
 	}()
 
+	if _, err = lockMySQLStore(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
 	var current ReleaseReminder
 	row := tx.QueryRow(mysqlReleaseReminderSelectForUpdate, profileName)
 	if err := scanMySQLReleaseReminder(row, &current); err != nil {
@@ -838,6 +919,9 @@ func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 	}
 	updated = normalizeReleaseReminderCallback(current, updated, now.Format(time.RFC3339))
 	if err = updateMySQLReleaseReminder(tx, profileName, updated); err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
 		return ReleaseReminder{}, err
 	}
 	if err := tx.Commit(); err != nil {

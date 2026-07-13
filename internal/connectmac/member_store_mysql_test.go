@@ -17,6 +17,44 @@ type fakeMySQLReleaseReminderRow struct {
 	err      error
 }
 
+type fakeMySQLStoreLockRow struct {
+	version uint64
+	err     error
+}
+
+func (r fakeMySQLStoreLockRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != 1 {
+		return errors.New("unexpected store lock scan destination count")
+	}
+	*dest[0].(*uint64) = r.version
+	return nil
+}
+
+type fakeMySQLReleaseReminderRows struct {
+	reminders []ReleaseReminder
+	index     int
+}
+
+func (r *fakeMySQLReleaseReminderRows) Next() bool {
+	return r.index < len(r.reminders)
+}
+
+func (r *fakeMySQLReleaseReminderRows) Scan(dest ...any) error {
+	if r.index >= len(r.reminders) {
+		return errors.New("scan past release reminder rows")
+	}
+	err := (fakeMySQLReleaseReminderRow{reminder: r.reminders[r.index]}).Scan(dest...)
+	r.index++
+	return err
+}
+
+func (r *fakeMySQLReleaseReminderRows) Close() error {
+	return nil
+}
+
 func (r fakeMySQLReleaseReminderRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
@@ -61,17 +99,32 @@ type fakeMySQLReleaseReminderTransaction struct {
 	rollbackErr error
 	committed   bool
 	rolledBack  bool
+	lockVersion uint64
+	queryRows   []ReleaseReminder
+	operations  []string
 }
 
 func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...any) mysqlReleaseReminderScanner {
+	tx.operations = append(tx.operations, "query-row:"+query)
+	if query == mysqlStoreLockForUpdateQuery {
+		return fakeMySQLStoreLockRow{version: tx.lockVersion}
+	}
 	tx.query = query
 	tx.queryArgs = args
 	return tx.row
 }
 
+func (tx *fakeMySQLReleaseReminderTransaction) Query(query string, args ...any) (mysqlRows, error) {
+	tx.operations = append(tx.operations, "query:"+query)
+	return &fakeMySQLReleaseReminderRows{reminders: tx.queryRows}, nil
+}
+
 func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) error {
-	tx.execQuery = query
-	tx.execArgs = args
+	tx.operations = append(tx.operations, "exec:"+query)
+	if query == mysqlReleaseReminderInsertQuery || query == mysqlReleaseReminderUpdateQuery {
+		tx.execQuery = query
+		tx.execArgs = args
+	}
 	if tx.execErr == nil && len(args) == 22 {
 		tx.written = ReleaseReminder{
 			ProfileName:              args[0].(string),
@@ -156,6 +209,15 @@ func TestMySQLReleaseReminderAutoReleaseSchemaMigrations(t *testing.T) {
 	}
 	if strings.Contains(strings.ToUpper(joined), "DROP ") || strings.Contains(strings.ToUpper(joined), "DELETE ") {
 		t.Fatalf("release reminder migrations are destructive: %s", joined)
+	}
+}
+
+func TestMySQLStoreLockSchemaIsMigrationSafe(t *testing.T) {
+	if !strings.Contains(mysqlStoreLockTableStatement, "CREATE TABLE IF NOT EXISTS cm_store_locks") {
+		t.Fatalf("store lock table migration = %q", mysqlStoreLockTableStatement)
+	}
+	if !strings.Contains(mysqlStoreLockSeedStatement, "ON DUPLICATE KEY UPDATE") {
+		t.Fatalf("store lock seed migration = %q", mysqlStoreLockSeedStatement)
 	}
 }
 
@@ -294,6 +356,43 @@ func TestMySQLSaveReleaseReminderInsertRoundTripsThroughScan(t *testing.T) {
 	}
 }
 
+func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testing.T) {
+	current := ReleaseReminder{
+		ProfileName:         "apple-usw2",
+		AutoReleaseEnabled:  true,
+		AutoReleaseAttempts: 3,
+		AutoReleaseState:    ReleaseReminderAutoReleaseStateRetrying,
+	}
+	tx := &fakeMySQLReleaseReminderTransaction{
+		lockVersion: 7,
+		queryRows:   []ReleaseReminder{current},
+	}
+	data := MemberData{
+		Reminders:        []ReleaseReminder{{ProfileName: "apple-usw2"}},
+		mutationRevision: 6,
+	}
+	got, err := prepareMySQLWholeStoreSave(tx, data)
+	if err != nil {
+		t.Fatalf("prepare whole-store save: %v", err)
+	}
+	if !reflect.DeepEqual(got.Reminders, []ReleaseReminder{current}) {
+		t.Fatalf("stale save reminders = %+v, want %+v", got.Reminders, current)
+	}
+	if len(tx.operations) < 3 {
+		t.Fatalf("whole-store operations = %v", tx.operations)
+	}
+	if tx.operations[0] != "query-row:"+mysqlStoreLockForUpdateQuery {
+		t.Fatalf("first whole-store operation = %q", tx.operations[0])
+	}
+	wantReminderQuery := "query:SELECT " + mysqlReleaseReminderSelectColumns + " FROM cm_release_reminders ORDER BY profile_name"
+	if tx.operations[1] != wantReminderQuery {
+		t.Fatalf("second whole-store operation = %q, want %q", tx.operations[1], wantReminderQuery)
+	}
+	if tx.operations[2] != "exec:DELETE FROM cm_events" {
+		t.Fatalf("first delete operation = %q", tx.operations[2])
+	}
+}
+
 func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 	current := ReleaseReminder{
 		ProfileName:              "apple-usw2",
@@ -365,6 +464,15 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(tx.written, want) {
 		t.Fatalf("written reminder = %+v, want %+v", tx.written, want)
 	}
+	wantOperations := []string{
+		"query-row:" + mysqlStoreLockForUpdateQuery,
+		"query-row:" + mysqlReleaseReminderSelectForUpdate,
+		"exec:" + mysqlReleaseReminderUpdateQuery,
+		"exec:" + mysqlStoreLockAdvanceQuery,
+	}
+	if !reflect.DeepEqual(tx.operations, wantOperations) {
+		t.Fatalf("transaction operations = %v, want %v", tx.operations, wantOperations)
+	}
 	if !tx.committed || tx.rolledBack {
 		t.Fatalf("transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
 	}
@@ -407,6 +515,15 @@ func TestMySQLUpsertReleaseReminderPreservesAutomaticReleaseState(t *testing.T) 
 	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(tx.written, want) {
 		t.Fatalf("upserted reminder got=%+v written=%+v want=%+v", got, tx.written, want)
 	}
+	wantOperations := []string{
+		"query-row:" + mysqlStoreLockForUpdateQuery,
+		"query-row:" + mysqlReleaseReminderSelectForUpdate,
+		"exec:" + mysqlReleaseReminderUpdateQuery,
+		"exec:" + mysqlStoreLockAdvanceQuery,
+	}
+	if !reflect.DeepEqual(tx.operations, wantOperations) {
+		t.Fatalf("upsert operations = %v, want %v", tx.operations, wantOperations)
+	}
 	if !tx.committed || tx.rolledBack {
 		t.Fatalf("upsert transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
 	}
@@ -436,6 +553,15 @@ func TestMySQLUpsertReleaseReminderInsertsMissingRow(t *testing.T) {
 	}
 	if tx.execQuery != mysqlReleaseReminderInsertQuery || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(tx.written, want) {
 		t.Fatalf("inserted reminder query=%q got=%+v written=%+v want=%+v", tx.execQuery, got, tx.written, want)
+	}
+	wantOperations := []string{
+		"query-row:" + mysqlStoreLockForUpdateQuery,
+		"query-row:" + mysqlReleaseReminderSelectForUpdate,
+		"exec:" + mysqlReleaseReminderInsertQuery,
+		"exec:" + mysqlStoreLockAdvanceQuery,
+	}
+	if !reflect.DeepEqual(tx.operations, wantOperations) {
+		t.Fatalf("insert operations = %v, want %v", tx.operations, wantOperations)
 	}
 	if !tx.committed || tx.rolledBack {
 		t.Fatalf("insert transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
