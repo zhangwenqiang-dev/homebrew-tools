@@ -2583,16 +2583,12 @@ func TestAppWebStartupReconcilesInterruptedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	listeners := injectEphemeralWebListener(&app)
 	ctx, cancel := context.WithCancel(context.Background())
 	codes := make(chan int, 1)
-	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, []string{"--port", strconv.Itoa(port)}) }()
-	waitForTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, []string{"--open"}) }()
+	listener := <-listeners
+	waitForTCP(t, listener.Addr().String())
 	cancel()
 	if code := <-codes; code != 0 {
 		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
@@ -2610,6 +2606,9 @@ func TestAppWebStartupReconcilesInterruptedJob(t *testing.T) {
 	if runner := app.Runner.(*fakeRunner); len(runner.foreground) != 0 || len(runner.background) != 0 {
 		t.Fatalf("stored command was executed: %#v %#v", runner.foreground, runner.background)
 	}
+	if got := app.Runner.(*fakeRunner).openedURL; got != "http://"+listener.Addr().String() {
+		t.Fatalf("opened URL = %q, want actual listener address", got)
+	}
 }
 
 func TestAppWebStartupReconcileFailureStopsBeforeListening(t *testing.T) {
@@ -2619,23 +2618,20 @@ func TestAppWebStartupReconcileFailureStopsBeforeListening(t *testing.T) {
 	invalid := filepath.Join(dir, "not-a-directory")
 	writeFile(t, invalid, "invalid")
 	app.JobManager.Dir = invalid
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
+	listenCalled := false
+	app.Listen = func(string, string) (net.Listener, error) {
+		listenCalled = true
+		return nil, errors.New("listen should not be called")
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	if code := app.runWeb(context.Background(), DefaultConfigPath, []string{"--port", strconv.Itoa(port)}); code != 1 {
+	if code := app.runWeb(context.Background(), DefaultConfigPath, nil); code != 1 {
 		t.Fatalf("runWeb code = %d, want 1", code)
 	}
 	if !strings.Contains(errOut.String(), "job reconciliation failed:") {
 		t.Fatalf("error = %q", errOut.String())
 	}
-	probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		t.Fatalf("web unexpectedly retained listener: %v", err)
+	if listenCalled {
+		t.Fatal("listener initialized after reconciliation failure")
 	}
-	probe.Close()
 }
 
 func TestAppWebBindFailurePreservesDrain(t *testing.T) {
@@ -2645,13 +2641,8 @@ func TestAppWebBindFailurePreservesDrain(t *testing.T) {
 	if err := app.JobManager.BeginDrain(); err != nil {
 		t.Fatalf("begin drain: %v", err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("occupy port: %v", err)
-	}
-	defer listener.Close()
-	port := listener.Addr().(*net.TCPAddr).Port
-	if code := app.runWeb(context.Background(), DefaultConfigPath, []string{"--port", strconv.Itoa(port)}); code != 1 {
+	app.Listen = func(string, string) (net.Listener, error) { return nil, errors.New("address already in use") }
+	if code := app.runWeb(context.Background(), DefaultConfigPath, nil); code != 1 {
 		t.Fatalf("runWeb code = %d, want 1", code)
 	}
 	if _, err := os.Stat(filepath.Join(app.JobManager.Dir, ".draining")); err != nil {
@@ -2666,16 +2657,12 @@ func TestAppWebSuccessfulBindEndsDrain(t *testing.T) {
 	if err := app.JobManager.BeginDrain(); err != nil {
 		t.Fatalf("begin drain: %v", err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	listeners := injectEphemeralWebListener(&app)
 	ctx, cancel := context.WithCancel(context.Background())
 	codes := make(chan int, 1)
-	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, []string{"--port", strconv.Itoa(port)}) }()
-	waitForTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, nil) }()
+	listener := <-listeners
+	waitForTCP(t, listener.Addr().String())
 	if _, err := os.Stat(filepath.Join(app.JobManager.Dir, ".draining")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("drain marker still exists: %v", err)
 	}
@@ -2683,6 +2670,84 @@ func TestAppWebSuccessfulBindEndsDrain(t *testing.T) {
 	if code := <-codes; code != 0 {
 		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
 	}
+}
+
+func TestAppWebCancelWaitsForServeAndReminderWorker(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	listeners := injectEphemeralWebListener(&app)
+	workerStarted := make(chan struct{})
+	workerDone := make(chan struct{})
+	app.WebReminderWorker = func(ctx context.Context) {
+		close(workerStarted)
+		<-ctx.Done()
+		close(workerDone)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	codes := make(chan int, 1)
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, nil) }()
+	listener := <-listeners
+	waitForTCP(t, listener.Addr().String())
+	<-workerStarted
+	cancel()
+	if code := <-codes; code != 0 {
+		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
+	}
+	select {
+	case <-workerDone:
+	default:
+		t.Fatal("runWeb returned before reminder worker stopped")
+	}
+	if _, err := net.DialTimeout("tcp", listener.Addr().String(), 25*time.Millisecond); err == nil {
+		t.Fatal("listener still accepts connections after runWeb returned")
+	}
+}
+
+func TestAppWebShutdownTimeoutForcesClose(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	listeners := injectEphemeralWebListener(&app)
+	requestStarted := make(chan struct{})
+	unblockRequest := make(chan struct{})
+	app.WebHandler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(requestStarted)
+		<-unblockRequest
+	})
+	app.WebShutdownTimeout = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	codes := make(chan int, 1)
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, nil) }()
+	listener := <-listeners
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		_, _ = http.Get("http://" + listener.Addr().String())
+	}()
+	<-requestStarted
+	started := time.Now()
+	cancel()
+	if code := <-codes; code != 0 {
+		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded shutdown took %s", elapsed)
+	}
+	close(unblockRequest)
+	<-requestDone
+}
+
+func injectEphemeralWebListener(app *App) <-chan net.Listener {
+	listeners := make(chan net.Listener, 1)
+	app.Listen = func(string, string) (net.Listener, error) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			listeners <- listener
+		}
+		return listener, err
+	}
+	return listeners
 }
 
 func waitForTCP(t *testing.T, addr string) {
@@ -2726,7 +2791,7 @@ func TestWebJobBadgesIncludeStartingAndInterruptedLabels(t *testing.T) {
 		t.Fatalf("read web index: %v", err)
 	}
 	html := string(data)
-	for _, want := range []string{`starting: { label: "启动中", cls: "wait" }`, `interrupted: { label: "已中断", cls: "blocked" }`} {
+	for _, want := range []string{`starting: { label: "启动中", cls: "wait" }`, `interrupted: { label: "已中断", cls: "blocked" }`, `job.status === "starting" || job.status === "running"`} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web index missing %q", want)
 		}

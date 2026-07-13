@@ -3265,7 +3265,7 @@
       document.querySelectorAll("[data-job-log]").forEach((button) => {
         button.addEventListener("click", () => loadJobLog(button.getAttribute("data-job-log")));
       });
-      if (jobs.some((job) => job.status === "running")) {
+      if (jobs.some((job) => job.status === "starting" || job.status === "running")) {
         scheduleJobRefresh();
       }
     }

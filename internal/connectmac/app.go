@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"time"
 )
 
 type Runner interface {
@@ -39,6 +42,10 @@ type App struct {
 	KnownHosts         string
 	RemoteUserAPI      bool
 	LoginConfigCleanup bool
+	Listen             func(network, address string) (net.Listener, error)
+	WebHandler         http.Handler
+	WebReminderWorker  func(context.Context)
+	WebShutdownTimeout time.Duration
 }
 
 func NewApp(out, err io.Writer) App {
@@ -58,6 +65,8 @@ func NewApp(out, err io.Writer) App {
 		LocalTransfers:     NewLocalTransferJobManager(),
 		KnownHosts:         "~/.ssh/known_hosts",
 		LoginConfigCleanup: true,
+		Listen:             net.Listen,
+		WebShutdownTimeout: 5 * time.Second,
 	}
 }
 

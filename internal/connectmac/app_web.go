@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -120,9 +121,11 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 		fmt.Fprintln(a.Out, "ConnectMac member store: mysql")
 	}
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
-	handler := a.newWebHandler(configPath)
-	server := &http.Server{Addr: addr, Handler: handler}
-	listener, err := net.Listen("tcp", addr)
+	listen := a.Listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	listener, err := listen("tcp", addr)
 	if err != nil {
 		fmt.Fprintf(a.Err, "web server failed: %v\n", err)
 		return 1
@@ -132,28 +135,55 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 		fmt.Fprintf(a.Err, "job drain cleanup failed: %v\n", err)
 		return 1
 	}
-	serverCtx, cancelServer := context.WithCancel(ctx)
-	defer cancelServer()
-	serveDone := make(chan struct{})
-	defer close(serveDone)
+	handler := a.WebHandler
+	if handler == nil {
+		handler = a.newWebHandler(configPath)
+	}
+	actualAddr := listener.Addr().String()
+	server := &http.Server{Addr: actualAddr, Handler: handler}
+	worker := a.WebReminderWorker
+	if worker == nil {
+		worker = a.runReleaseReminderWorker
+	}
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	var workerWG sync.WaitGroup
+	workerWG.Add(1)
 	go func() {
-		select {
-		case <-serverCtx.Done():
-			_ = server.Shutdown(context.Background())
-		case <-serveDone:
-		}
+		defer workerWG.Done()
+		worker(workerCtx)
 	}()
-	go a.runReleaseReminderWorker(serverCtx)
 	if opts.Open {
-		url := "http://" + addr
+		url := "http://" + actualAddr
 		if err := a.Runner.OpenURL(ctx, url); err != nil {
 			fmt.Fprintf(a.Err, "open browser failed: %v\n", err)
 		}
 	}
-	fmt.Fprintf(a.Out, "ConnectMac web manager: http://%s\n", addr)
+	fmt.Fprintf(a.Out, "ConnectMac web manager: http://%s\n", actualAddr)
 	fmt.Fprintln(a.Out, "Press Ctrl+C to stop.")
-	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintf(a.Err, "web server failed: %v\n", err)
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- server.Serve(listener)
+	}()
+	var serveErr error
+	select {
+	case serveErr = <-serveResult:
+	case <-ctx.Done():
+		shutdownTimeout := a.WebShutdownTimeout
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 5 * time.Second
+		}
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownErr := server.Shutdown(shutdownCtx)
+		cancelShutdown()
+		if shutdownErr != nil {
+			_ = server.Close()
+		}
+		serveErr = <-serveResult
+	}
+	cancelWorker()
+	workerWG.Wait()
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		fmt.Fprintf(a.Err, "web server failed: %v\n", serveErr)
 		return 1
 	}
 	return 0
