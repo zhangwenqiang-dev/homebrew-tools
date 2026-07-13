@@ -493,3 +493,133 @@ func TestMemberStoreUpdateReleaseReminderNormalizesCallbackOutput(t *testing.T) 
 		t.Fatalf("normalized reminder = %+v", got)
 	}
 }
+
+func TestMemberStoreUnrelatedWritersShareReminderMutationBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		writer func(MemberStore) error
+		check  func(*testing.T, MemberData)
+	}{
+		{
+			name: "record event",
+			writer: func(store MemberStore) error {
+				return store.RecordEvent(OperationEvent{ID: "event-race", Action: "test", Profile: "apple-usw2"})
+			},
+			check: func(t *testing.T, db MemberData) {
+				if len(db.Events) != 1 || db.Events[0].ID != "event-race" {
+					t.Fatalf("events after race = %+v", db.Events)
+				}
+			},
+		},
+		{
+			name: "update settings",
+			writer: func(store MemberStore) error {
+				_, err := store.UpdateWebSettings(WebSettings{DefaultStatusFilter: "active"})
+				return err
+			},
+			check: func(t *testing.T, db MemberData) {
+				if db.Settings.DefaultStatusFilter != "active" {
+					t.Fatalf("settings after race = %+v", db.Settings)
+				}
+			},
+		},
+		{
+			name: "add member",
+			writer: func(store MemberStore) error {
+				_, err := store.AddMember("User", "user@example.com", "operator")
+				return err
+			},
+			check: func(t *testing.T, db MemberData) {
+				if len(db.Members) != 1 || db.Members[0].Email != "user@example.com" {
+					t.Fatalf("members after race = %+v", db.Members)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+			if _, err := store.UpsertReleaseReminder(ReleaseReminder{
+				ProfileName:        "apple-usw2",
+				AutoReleaseEnabled: true,
+				AutoReleaseState:   ReleaseReminderAutoReleaseStateScheduled,
+			}); err != nil {
+				t.Fatalf("seed reminder: %v", err)
+			}
+			storeCopy := store
+			callbackEntered := make(chan struct{})
+			releaseCallback := make(chan struct{})
+			updateDone := make(chan error, 1)
+			go func() {
+				_, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+					close(callbackEntered)
+					<-releaseCallback
+					reminder.AutoReleaseAttempts++
+					return reminder, nil
+				})
+				updateDone <- err
+			}()
+			<-callbackEntered
+
+			writerDone := make(chan error, 1)
+			go func() { writerDone <- test.writer(storeCopy) }()
+			select {
+			case err := <-writerDone:
+				close(releaseCallback)
+				<-updateDone
+				t.Fatalf("unrelated writer bypassed mutation boundary: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(releaseCallback)
+			if err := <-updateDone; err != nil {
+				t.Fatalf("automatic-release update: %v", err)
+			}
+			if err := <-writerDone; err != nil {
+				t.Fatalf("unrelated writer: %v", err)
+			}
+
+			db, err := store.Load()
+			if err != nil {
+				t.Fatalf("load store: %v", err)
+			}
+			if len(db.Reminders) != 1 || !db.Reminders[0].AutoReleaseEnabled || db.Reminders[0].AutoReleaseState != ReleaseReminderAutoReleaseStateScheduled || db.Reminders[0].AutoReleaseAttempts != 1 {
+				t.Fatalf("automatic-release state after unrelated writer = %+v", db.Reminders)
+			}
+			test.check(t, db)
+		})
+	}
+}
+
+func TestMemberStoreStaleSavePreservesCurrentReminders(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	if _, err := store.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:        "apple-usw2",
+		AutoReleaseEnabled: true,
+		AutoReleaseState:   ReleaseReminderAutoReleaseStateScheduled,
+	}); err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	stale, err := store.Load()
+	if err != nil {
+		t.Fatalf("load stale snapshot: %v", err)
+	}
+	if _, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseAttempts++
+		return reminder, nil
+	}); err != nil {
+		t.Fatalf("update reminder: %v", err)
+	}
+	stale.Events = append(stale.Events, OperationEvent{ID: "event-stale-save"})
+	if err := store.Save(stale); err != nil {
+		t.Fatalf("save stale snapshot: %v", err)
+	}
+	db, err := store.Load()
+	if err != nil {
+		t.Fatalf("load saved data: %v", err)
+	}
+	if len(db.Reminders) != 1 || db.Reminders[0].AutoReleaseAttempts != 1 || !db.Reminders[0].AutoReleaseEnabled {
+		t.Fatalf("reminders after stale save = %+v", db.Reminders)
+	}
+	if len(db.Events) != 1 || db.Events[0].ID != "event-stale-save" {
+		t.Fatalf("events after stale save = %+v", db.Events)
+	}
+}

@@ -3,8 +3,11 @@ package connectmac
 import (
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -167,25 +170,81 @@ func TestMySQLReleaseReminderSelectColumnsIncludeAutoReleaseState(t *testing.T) 
 	}
 }
 
-func TestMySQLSchemaGuardRunsOnceAndSharesAcrossStoreCopies(t *testing.T) {
+func TestMySQLSchemaGuardRetriesFailureThenCachesSuccess(t *testing.T) {
 	wantErr := errors.New("migration failed")
 	guard := &mysqlSchemaGuard{}
 	calls := 0
-	for range 2 {
-		if err := guard.run(func() error {
-			calls++
-			return wantErr
-		}); !errors.Is(err, wantErr) {
-			t.Fatalf("schema error = %v, want %v", err, wantErr)
+	if err := guard.run(func() error {
+		calls++
+		return wantErr
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("first schema error = %v, want %v", err, wantErr)
+	}
+	if err := guard.run(func() error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatalf("retry schema migration: %v", err)
+	}
+	if err := guard.run(func() error {
+		calls++
+		return errors.New("must not run")
+	}); err != nil {
+		t.Fatalf("cached schema migration: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("schema migration calls = %d, want 2", calls)
+	}
+}
+
+func TestMySQLSchemaGuardCoalescesConcurrentSuccess(t *testing.T) {
+	guard := &mysqlSchemaGuard{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	const callers = 8
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- guard.run(func() error {
+				if calls.Add(1) == 1 {
+					close(started)
+				}
+				<-release
+				return nil
+			})
+		}()
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent schema migration: %v", err)
 		}
 	}
-	if calls != 1 {
-		t.Fatalf("schema migration calls = %d, want 1", calls)
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent schema migration calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestStoreMutationGuardSharedAcrossCopies(t *testing.T) {
+	fileStore := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	fileCopy := fileStore
+	if fileStore.normalize().mutationGuard != fileCopy.normalize().mutationGuard {
+		t.Fatal("copied file stores do not share mutation guard")
 	}
 
-	store := MySQLMemberStore{DSN: "schema-guard-test"}
-	copyOfStore := store
-	if store.normalize().schemaGuard != copyOfStore.normalize().schemaGuard {
+	mysqlStore := MySQLMemberStore{DSN: "mutation-guard-test"}
+	mysqlCopy := mysqlStore
+	if mysqlStore.normalize().mutationGuard != mysqlCopy.normalize().mutationGuard {
+		t.Fatal("copied MySQL stores do not share mutation guard")
+	}
+	if mysqlStore.normalize().schemaGuard != mysqlCopy.normalize().schemaGuard {
 		t.Fatal("copied MySQL stores do not share schema guard")
 	}
 }

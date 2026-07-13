@@ -14,9 +14,10 @@ import (
 )
 
 type MySQLMemberStore struct {
-	DSN         string
-	Now         func() time.Time
-	schemaGuard *mysqlSchemaGuard
+	DSN           string
+	Now           func() time.Time
+	schemaGuard   *mysqlSchemaGuard
+	mutationGuard *storeMutationGuard
 }
 
 const mysqlReleaseReminderSelectColumns = `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
@@ -38,15 +39,21 @@ var mysqlReleaseReminderMigrationStatements = []string{
 }
 
 type mysqlSchemaGuard struct {
-	once sync.Once
-	err  error
+	mu      sync.Mutex
+	success bool
 }
 
 func (g *mysqlSchemaGuard) run(migrate func() error) error {
-	g.once.Do(func() {
-		g.err = migrate()
-	})
-	return g.err
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.success {
+		return nil
+	}
+	if err := migrate(); err != nil {
+		return err
+	}
+	g.success = true
+	return nil
 }
 
 var mysqlSchemaGuards sync.Map
@@ -84,7 +91,7 @@ func NewMySQLMemberStoreFromEnv() (MySQLMemberStore, bool, error) {
 		Collation:            "utf8mb4_unicode_ci",
 		AllowNativePasswords: true,
 	}).FormatDSN()
-	return MySQLMemberStore{DSN: dsn, Now: time.Now, schemaGuard: sharedMySQLSchemaGuard(dsn)}, true, nil
+	return MySQLMemberStore{DSN: dsn, Now: time.Now, schemaGuard: sharedMySQLSchemaGuard(dsn), mutationGuard: sharedStoreMutationGuard("mysql:" + strings.TrimSpace(dsn))}, true, nil
 }
 
 func (s MySQLMemberStore) normalize() MySQLMemberStore {
@@ -94,7 +101,16 @@ func (s MySQLMemberStore) normalize() MySQLMemberStore {
 	if s.schemaGuard == nil {
 		s.schemaGuard = sharedMySQLSchemaGuard(s.DSN)
 	}
+	if s.mutationGuard == nil {
+		s.mutationGuard = sharedStoreMutationGuard("mysql:" + strings.TrimSpace(s.DSN))
+	}
 	return s
+}
+
+func (s MySQLMemberStore) lockMutation() func() {
+	s = s.normalize()
+	s.mutationGuard.mu.Lock()
+	return s.mutationGuard.mu.Unlock
 }
 
 func (s MySQLMemberStore) open() (*sql.DB, error) {
@@ -239,6 +255,8 @@ func (s MySQLMemberStore) ensureSchema() error {
 }
 
 func (s MySQLMemberStore) Load() (MemberData, error) {
+	s = s.normalize()
+	revision := s.mutationGuard.revision.Load()
 	if err := s.EnsureSchema(); err != nil {
 		return MemberData{}, err
 	}
@@ -380,10 +398,25 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 		return MemberData{}, err
 	}
 	normalizeMemberData(&out)
+	out.mutationRevision = revision
 	return out, nil
 }
 
 func (s MySQLMemberStore) Save(data MemberData) error {
+	s = s.normalize()
+	defer s.lockMutation()()
+	if data.mutationRevision != s.mutationGuard.revision.Load() {
+		current, err := s.Load()
+		if err != nil {
+			return err
+		}
+		data.Reminders = current.Reminders
+	}
+	return s.saveUnlocked(data)
+}
+
+func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
+	s = s.normalize()
 	normalizeMemberData(&data)
 	if err := s.EnsureSchema(); err != nil {
 		return err
@@ -459,7 +492,11 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.mutationGuard.revision.Add(1)
+	return nil
 }
 
 func (s MySQLMemberStore) ListMembers() ([]MemberWithAssignments, error) {
@@ -489,8 +526,29 @@ func (s MySQLMemberStore) ListMembers() ([]MemberWithAssignments, error) {
 	return out, nil
 }
 
+type unlockedMySQLMemberStore struct {
+	store MySQLMemberStore
+}
+
+func (s MySQLMemberStore) unlocked() unlockedMySQLMemberStore {
+	return unlockedMySQLMemberStore{store: s}
+}
+
+func (s unlockedMySQLMemberStore) Load() (MemberData, error) {
+	return s.store.Load()
+}
+
+func (s unlockedMySQLMemberStore) Save(data MemberData) error {
+	return s.store.saveUnlocked(data)
+}
+
+func (s unlockedMySQLMemberStore) currentTime() time.Time {
+	return s.store.currentTime()
+}
+
 func (s MySQLMemberStore) AddMember(name, email, role string) (Member, error) {
-	return addMemberToStore(s, name, email, role)
+	defer s.lockMutation()()
+	return addMemberToStore(s.unlocked(), name, email, role)
 }
 
 func (s MySQLMemberStore) AddMemberWithPassword(name, email, role, password string) (Member, error) {
@@ -510,19 +568,23 @@ func (s MySQLMemberStore) AddMemberWithPassword(name, email, role, password stri
 }
 
 func (s MySQLMemberStore) SetupAdmin(name, email, password string) (Member, error) {
-	return setupAdminInStore(s, name, email, password)
+	defer s.lockMutation()()
+	return setupAdminInStore(s.unlocked(), name, email, password)
 }
 
 func (s MySQLMemberStore) SetMemberPassword(emailOrUsername, password string) error {
-	return setMemberPasswordInStore(s, emailOrUsername, password)
+	defer s.lockMutation()()
+	return setMemberPasswordInStore(s.unlocked(), emailOrUsername, password)
 }
 
 func (s MySQLMemberStore) UpdateMember(emailOrUsername, name, email, role string) (Member, error) {
-	return updateMemberInStore(s, emailOrUsername, name, email, role)
+	defer s.lockMutation()()
+	return updateMemberInStore(s.unlocked(), emailOrUsername, name, email, role)
 }
 
 func (s MySQLMemberStore) UpdateMemberEmail(memberID, newEmail string) (Member, error) {
-	return updateMemberEmailInStore(s, memberID, newEmail)
+	defer s.lockMutation()()
+	return updateMemberEmailInStore(s.unlocked(), memberID, newEmail)
 }
 
 func (s MySQLMemberStore) VerifyMemberPassword(emailOrUsername, password string) (Member, bool, error) {
@@ -534,15 +596,18 @@ func (s MySQLMemberStore) HasPasswordMembers() (bool, error) {
 }
 
 func (s MySQLMemberStore) SetMemberEnabled(email string, enabled bool) (Member, error) {
-	return setMemberEnabledInStore(s, email, enabled)
+	defer s.lockMutation()()
+	return setMemberEnabledInStore(s.unlocked(), email, enabled)
 }
 
 func (s MySQLMemberStore) AssignMember(appleEmail, memberEmail, relation string) (AppleAccountMember, error) {
-	return assignMemberInStore(s, appleEmail, memberEmail, relation)
+	defer s.lockMutation()()
+	return assignMemberInStore(s.unlocked(), appleEmail, memberEmail, relation)
 }
 
 func (s MySQLMemberStore) UnassignMember(appleEmail, memberEmail string) error {
-	return unassignMemberInStore(s, appleEmail, memberEmail)
+	defer s.lockMutation()()
+	return unassignMemberInStore(s.unlocked(), appleEmail, memberEmail)
 }
 
 func (s MySQLMemberStore) MembersForApple(appleEmail string) ([]PublicMember, error) {
@@ -558,11 +623,13 @@ func (s MySQLMemberStore) ProfileOwner(profileName string) (PublicProfileOwner, 
 }
 
 func (s MySQLMemberStore) SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error) {
-	return setProfileOwnerInStore(s, profileName, memberEmail)
+	defer s.lockMutation()()
+	return setProfileOwnerInStore(s.unlocked(), profileName, memberEmail)
 }
 
 func (s MySQLMemberStore) ClearProfileOwner(profileName string) error {
-	return clearProfileOwnerInStore(s, profileName)
+	defer s.lockMutation()()
+	return clearProfileOwnerInStore(s.unlocked(), profileName)
 }
 
 func (s MySQLMemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProfile, error) {
@@ -570,27 +637,33 @@ func (s MySQLMemberStore) ListManagedProfiles(memberEmail string) ([]ManagedProf
 }
 
 func (s MySQLMemberStore) UpsertManagedProfile(profile Profile) (ManagedProfile, error) {
-	return upsertManagedProfileInStore(s, profile)
+	defer s.lockMutation()()
+	return upsertManagedProfileInStore(s.unlocked(), profile)
 }
 
 func (s MySQLMemberStore) SetManagedProfileEnabled(profileName string, enabled bool) (ManagedProfile, error) {
-	return setManagedProfileEnabledInStore(s, profileName, enabled)
+	defer s.lockMutation()()
+	return setManagedProfileEnabledInStore(s.unlocked(), profileName, enabled)
 }
 
 func (s MySQLMemberStore) DeleteManagedProfile(profileName string) error {
-	return deleteManagedProfileInStore(s, profileName)
+	defer s.lockMutation()()
+	return deleteManagedProfileInStore(s.unlocked(), profileName)
 }
 
 func (s MySQLMemberStore) AssignProfileAccess(profileName, memberEmail string) (ProfileAccess, error) {
-	return assignProfileAccessInStore(s, profileName, memberEmail)
+	defer s.lockMutation()()
+	return assignProfileAccessInStore(s.unlocked(), profileName, memberEmail)
 }
 
 func (s MySQLMemberStore) UnassignProfileAccess(profileName, memberEmail string) error {
-	return unassignProfileAccessInStore(s, profileName, memberEmail)
+	defer s.lockMutation()()
+	return unassignProfileAccessInStore(s.unlocked(), profileName, memberEmail)
 }
 
 func (s MySQLMemberStore) SetMemberProfileAccess(memberEmail string, profileNames []string) ([]ProfileAccess, error) {
-	return setMemberProfileAccessInStore(s, memberEmail, profileNames)
+	defer s.lockMutation()()
+	return setMemberProfileAccessInStore(s.unlocked(), memberEmail, profileNames)
 }
 
 func (s MySQLMemberStore) MembersForProfile(profileName string) ([]PublicMember, error) {
@@ -606,6 +679,7 @@ func (s MySQLMemberStore) ReleaseReminder(profileName string) (ReleaseReminder, 
 }
 
 func (s MySQLMemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {
+	defer s.lockMutation()()
 	reminder = normalizeReleaseReminder(reminder)
 	if reminder.ProfileName == "" {
 		return ReleaseReminder{}, errors.New("profile is required")
@@ -622,10 +696,16 @@ func (s MySQLMemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (Relea
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	return upsertReleaseReminderInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, reminder, s.currentTime())
+	result, err := upsertReleaseReminderInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, reminder, s.currentTime())
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	s.normalize().mutationGuard.revision.Add(1)
+	return result, nil
 }
 
 func (s MySQLMemberStore) UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error) {
+	defer s.lockMutation()()
 	profileName = strings.TrimSpace(profileName)
 	if profileName == "" {
 		return ReleaseReminder{}, errors.New("profile is required")
@@ -645,7 +725,12 @@ func (s MySQLMemberStore) UpdateReleaseReminder(profileName string, update func(
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
-	return updateReleaseReminderInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, profileName, s.currentTime(), update)
+	result, err := updateReleaseReminderInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, profileName, s.currentTime(), update)
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	s.normalize().mutationGuard.revision.Add(1)
+	return result, nil
 }
 
 type mysqlReleaseReminderExecer interface {
@@ -789,15 +874,18 @@ func (s MySQLMemberStore) WebSettings() (WebSettings, error) {
 }
 
 func (s MySQLMemberStore) UpdateWebSettings(update WebSettings) (WebSettings, error) {
-	return updateWebSettingsInStore(s, update)
+	defer s.lockMutation()()
+	return updateWebSettingsInStore(s.unlocked(), update)
 }
 
 func (s MySQLMemberStore) EnsureAuthSecret() (string, error) {
-	return ensureAuthSecretInStore(s)
+	defer s.lockMutation()()
+	return ensureAuthSecretInStore(s.unlocked())
 }
 
 func (s MySQLMemberStore) RecordEvent(event OperationEvent) error {
-	return recordEventInStore(s, event)
+	defer s.lockMutation()()
+	return recordEventInStore(s.unlocked(), event)
 }
 
 func (s MySQLMemberStore) RecentEvents(appleEmail string, limit int) ([]OperationEvent, error) {
