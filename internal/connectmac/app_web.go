@@ -423,6 +423,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/release-reminders", a.requireWebRole(a.webReleaseRemindersHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/extend", a.requireWebRole(a.webReleaseReminderExtendHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/release-reminder/auto-release", a.requireWebRole(a.webReleaseReminderAutoReleaseHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/cleanup", a.requireWebRole(a.webReleaseReminderCleanupHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profiles", a.requireWebRole(a.webManagedProfilesHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/managed-profile/save", a.requireWebRole(a.webManagedProfileSaveHandler(), "admin"))
@@ -1002,6 +1003,76 @@ func (a App) webReleaseRemindersHandler() http.HandlerFunc {
 	}
 }
 
+var (
+	errAutomaticReleaseRunning = errors.New("automatic release is already running; wait for the release to finish")
+	errActiveDestroyJob        = errors.New("automatic release cannot be changed while an active aws-destroy job exists")
+)
+
+func (a App) webReleaseReminderAutoReleaseHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		if member.Role != "admin" {
+			writeWebError(w, http.StatusForbidden, "admin role required")
+			return
+		}
+		var req struct {
+			Profile string `json:"profile"`
+			Enabled bool   `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeWebError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		profileName := strings.TrimSpace(req.Profile)
+		if profileName == "" {
+			writeWebError(w, http.StatusBadRequest, "profile is required")
+			return
+		}
+
+		reminder, err := a.MemberStore.UpdateReleaseReminder(profileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
+				return current, errAutomaticReleaseRunning
+			}
+			active, err := a.JobManager.Active()
+			if err != nil {
+				return current, fmt.Errorf("check active jobs: %w", err)
+			}
+			if hasActiveDestroyJob(active, profileName) {
+				return current, errActiveDestroyJob
+			}
+			current.AutoReleaseEnabled = req.Enabled
+			return clearReleaseReminderAutoCycle(current), nil
+		})
+		if err != nil {
+			writeReleaseReminderUpdateError(w, err)
+			return
+		}
+
+		state := "disabled"
+		if req.Enabled {
+			state = "enabled"
+		}
+		_ = a.MemberStore.RecordEvent(OperationEvent{
+			Action:     "release-reminder.auto-release",
+			Profile:    reminder.ProfileName,
+			AppleEmail: reminder.AppleEmail,
+			MemberID:   member.ID,
+			Confirmed:  true,
+			Status:     "success",
+			Message:    "automatic release " + state + " by " + displayNameEmail(member.Name, member.Email),
+		})
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"reminder": reminder}})
+	}
+}
+
 func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1031,7 +1102,7 @@ func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "release_due_at must be RFC3339")
 			return
 		}
-		nowTime := time.Now()
+		nowTime := a.JobManager.normalize().Now().UTC()
 		if dueAt.Before(nowTime.Add(AutoReleaseGracePeriod)) {
 			writeWebError(w, http.StatusBadRequest, "release_due_at must be at least 10 minutes in the future")
 			return
@@ -1042,23 +1113,46 @@ func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 		}
 		oldDueAt := ""
 		reminder, err := a.MemberStore.UpdateReleaseReminder(profileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
+				return current, errAutomaticReleaseRunning
+			}
+			active, err := a.JobManager.Active()
+			if err != nil {
+				return current, fmt.Errorf("check active jobs: %w", err)
+			}
+			if hasActiveDestroyJob(active, profileName) {
+				return current, errActiveDestroyJob
+			}
 			oldDueAt = current.ReleaseDueAt
 			return applyReleaseReminderExtension(current, dueAt, nowTime, member.Email, member.Name)
 		})
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				writeWebError(w, http.StatusNotFound, "release reminder not found")
-				return
-			}
-			if strings.Contains(err.Error(), "already running") {
-				writeWebError(w, http.StatusConflict, err.Error())
-				return
-			}
-			writeWebError(w, http.StatusInternalServerError, err.Error())
+			writeReleaseReminderUpdateError(w, err)
 			return
 		}
 		a.notifyReleaseReminder("extend", reminder, member.Name, "释放提醒已延长（原时间："+oldDueAt+"）")
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"reminder": reminder}})
+	}
+}
+
+func clearReleaseReminderAutoCycle(reminder ReleaseReminder) ReleaseReminder {
+	reminder.AutoReleaseAt = ""
+	reminder.AutoReleaseStartedAt = ""
+	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseAttempts = 0
+	reminder.AutoReleaseLastError = ""
+	reminder.AutoReleaseState = ""
+	return reminder
+}
+
+func writeReleaseReminderUpdateError(w http.ResponseWriter, err error) {
+	switch {
+	case strings.Contains(err.Error(), "not found"):
+		writeWebError(w, http.StatusNotFound, "release reminder not found")
+	case errors.Is(err, errAutomaticReleaseRunning), errors.Is(err, errActiveDestroyJob):
+		writeWebError(w, http.StatusConflict, err.Error())
+	default:
+		writeWebError(w, http.StatusInternalServerError, err.Error())
 	}
 }
 
