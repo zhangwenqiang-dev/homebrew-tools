@@ -84,6 +84,16 @@ func (a App) runJob(ctx context.Context, args []string) int {
 		return a.runJobActive(args[1:])
 	case "wait-all":
 		return a.runJobWaitAll(ctx, args[1:])
+	case "end-drain":
+		if len(args) != 1 {
+			fmt.Fprintln(a.Err, "usage: cm job end-drain")
+			return 2
+		}
+		if err := a.JobManager.EndDrain(); err != nil {
+			fmt.Fprintf(a.Err, "job end-drain failed: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(a.Err, "unknown job command %q\n", args[0])
 		return 2

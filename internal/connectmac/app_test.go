@@ -4923,6 +4923,25 @@ func TestAppJobWaitAllDrainCleanupAndSuccessMarker(t *testing.T) {
 	})
 }
 
+func TestAppJobEndDrainIsInternalRecoveryCommand(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	if err := app.JobManager.BeginDrain(); err != nil {
+		t.Fatalf("begin drain: %v", err)
+	}
+	if code := app.Run(context.Background(), []string{"job", "end-drain"}); code != 0 {
+		t.Fatalf("end-drain code = %d, err = %s", code, errOut.String())
+	}
+	if _, err := app.JobManager.Create(Job{ID: "after-end-drain"}); err != nil {
+		t.Fatalf("create after end-drain: %v", err)
+	}
+	out.Reset()
+	app.printUsage()
+	if strings.Contains(out.String(), "end-drain") {
+		t.Fatal("internal recovery command must not appear in public usage")
+	}
+}
+
 func TestAppJobRunIsInternalOnly(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())

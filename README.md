@@ -26,6 +26,19 @@ sudo apt install ./dist/cm_0.1.76_arm64.deb
 cm version
 ```
 
+Deploy a built ARM64 package to staging with background-job protection:
+
+```bash
+scripts/build-deb.sh --version 0.1.120 --arch arm64
+scripts/deploy-staging.sh --version 0.1.120
+```
+
+The deploy script verifies the package checksum, then uses the incoming binary
+to block new background jobs and wait up to two hours for active jobs to finish.
+If verification or waiting fails, deployment stops before APT installation and
+before the `connectmac` service is restarted. Override the target or timeout with
+`--host <ssh-alias>` and `--timeout <duration>`.
+
 The Debian package installs the command as `cm`, stores web assets under `/usr/share/connectmac/web`, exposes them through `/var/lib/connectmac/web`, and installs a `connectmac.service` unit. It does not start the service automatically. To run the web manager on a server:
 
 ```bash

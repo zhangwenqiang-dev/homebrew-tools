@@ -81,12 +81,12 @@ The supported staging upgrade sequence first verifies and extracts the incoming 
 ```bash
 sha256sum -c <package-checksum>
 dpkg-deb -x /tmp/cm_<version>_arm64.deb /tmp/cm-<version>-preflight
-sudo -u root HOME=/var/lib/connectmac /tmp/cm-<version>-preflight/usr/sbin/cm job wait-all --timeout 2h
+sudo -u root HOME=/var/lib/connectmac /tmp/cm-<version>-preflight/usr/sbin/cm job wait-all --timeout 2h --drain
 sudo apt install -y /tmp/cm_<version>_arm64.deb
 sudo systemctl restart connectmac
 ```
 
-The wait command must use the same `HOME` and job directory as the service. Package checksum failure, extraction failure, or wait timeout stops the deployment before APT installation or service restart.
+The wait command must use the same `HOME` and job directory as the service. The drain marker makes checking active jobs and rejecting new jobs atomic for drain-aware binaries. Package checksum failure, extraction failure, or wait timeout stops the deployment before APT installation or service restart. If installation or restart fails after draining, the script uses the incoming binary's hidden `job end-drain` recovery command so a failed deployment cannot permanently block future jobs. A successful Web startup removes the marker only after configuration, database setup, and listener binding succeed.
 
 This repository will document or script that preflight, but it cannot prevent an administrator from bypassing it with a direct `systemctl restart`.
 

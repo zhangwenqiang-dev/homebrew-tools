@@ -9,3 +9,4 @@ scripts/
 !scripts/
 scripts/*
 !scripts/build-deb.sh
+!scripts/deploy-staging.sh
