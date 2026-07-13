@@ -2574,6 +2574,165 @@ func TestAppWebJobsAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebStartupReconcilesInterruptedJob(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.JobManager.IsRunning = func(int) bool { return false }
+	job, err := app.JobManager.Create(Job{ID: "stale-web-job", Status: JobStatusRunning, PID: 424242, Command: []string{"must-not-run"}})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	codes := make(chan int, 1)
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, []string{"--port", strconv.Itoa(port)}) }()
+	waitForTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	cancel()
+	if code := <-codes; code != 0 {
+		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
+	}
+	got, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if got.Status != JobStatusInterrupted {
+		t.Fatalf("status = %q, want interrupted", got.Status)
+	}
+	if !strings.Contains(out.String(), "Reconciled background job stale-web-job: interrupted") {
+		t.Fatalf("output = %q", out.String())
+	}
+	if runner := app.Runner.(*fakeRunner); len(runner.foreground) != 0 || len(runner.background) != 0 {
+		t.Fatalf("stored command was executed: %#v %#v", runner.foreground, runner.background)
+	}
+}
+
+func TestAppWebStartupReconcileFailureStopsBeforeListening(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	invalid := filepath.Join(dir, "not-a-directory")
+	writeFile(t, invalid, "invalid")
+	app.JobManager.Dir = invalid
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	if code := app.runWeb(context.Background(), DefaultConfigPath, []string{"--port", strconv.Itoa(port)}); code != 1 {
+		t.Fatalf("runWeb code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), "job reconciliation failed:") {
+		t.Fatalf("error = %q", errOut.String())
+	}
+	probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("web unexpectedly retained listener: %v", err)
+	}
+	probe.Close()
+}
+
+func TestAppWebBindFailurePreservesDrain(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if err := app.JobManager.BeginDrain(); err != nil {
+		t.Fatalf("begin drain: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	if code := app.runWeb(context.Background(), DefaultConfigPath, []string{"--port", strconv.Itoa(port)}); code != 1 {
+		t.Fatalf("runWeb code = %d, want 1", code)
+	}
+	if _, err := os.Stat(filepath.Join(app.JobManager.Dir, ".draining")); err != nil {
+		t.Fatalf("drain marker should remain: %v", err)
+	}
+}
+
+func TestAppWebSuccessfulBindEndsDrain(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if err := app.JobManager.BeginDrain(); err != nil {
+		t.Fatalf("begin drain: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	codes := make(chan int, 1)
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, []string{"--port", strconv.Itoa(port)}) }()
+	waitForTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if _, err := os.Stat(filepath.Join(app.JobManager.Dir, ".draining")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("drain marker still exists: %v", err)
+	}
+	cancel()
+	if code := <-codes; code != 0 {
+		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
+	}
+}
+
+func waitForTCP(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 25*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", addr)
+}
+
+func TestAppWebJobsAPIReconcilesInterruptedJob(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.JobManager.IsRunning = func(int) bool { return false }
+	job, err := app.JobManager.Create(Job{ID: "stale-api-job", Status: JobStatusRunning, PID: 989898})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"id":"`+job.ID+`"`) || !strings.Contains(rec.Body.String(), `"status":"interrupted"`) {
+		t.Fatalf("jobs body = %s", rec.Body.String())
+	}
+}
+
+func TestWebJobBadgesIncludeStartingAndInterruptedLabels(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{`starting: { label: "启动中", cls: "wait" }`, `interrupted: { label: "已中断", cls: "blocked" }`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web index missing %q", want)
+		}
+	}
+}
+
 func TestAppWebJobLogAPI(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer

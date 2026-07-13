@@ -3297,8 +3297,13 @@
     }
 
     function jobBadge(status) {
-      const cls = status === "success" ? "ready" : status === "running" ? "wait" : status === "deferred" ? "wait" : status === "failed" ? "blocked" : "stopped";
-      return "<span class=\"badge " + cls + "\">" + escapeHTML(status || "-") + "</span>";
+      const special = {
+        starting: { label: "启动中", cls: "wait" },
+        interrupted: { label: "已中断", cls: "blocked" }
+      };
+      const badge = special[status];
+      const cls = badge?.cls || (status === "success" ? "ready" : status === "running" ? "wait" : status === "deferred" ? "wait" : status === "failed" ? "blocked" : "stopped");
+      return "<span class=\"badge " + cls + "\">" + escapeHTML(badge?.label || status || "-") + "</span>";
     }
 
     function firstInstanceIP(status) {

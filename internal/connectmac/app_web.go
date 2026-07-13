@@ -96,6 +96,14 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	if opts.Dir != "" {
 		a.WebDir = opts.Dir
 	}
+	changedJobs, err := a.JobManager.Reconcile()
+	if err != nil {
+		fmt.Fprintf(a.Err, "job reconciliation failed: %v\n", err)
+		return 1
+	}
+	for _, job := range changedJobs {
+		fmt.Fprintf(a.Out, "Reconciled background job %s: %s\n", job.ID, job.Status)
+	}
 	if cfg, err := LoadConfig(configPath); err == nil && cfg.Server.UserAPI != "" {
 		a.RemoteUserAPI = true
 		fmt.Fprintf(a.Out, "ConnectMac user API: %s\n", cfg.Server.UserAPI)
@@ -114,7 +122,28 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
 	handler := a.newWebHandler(configPath)
 	server := &http.Server{Addr: addr, Handler: handler}
-	go a.runReleaseReminderWorker(ctx)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		fmt.Fprintf(a.Err, "web server failed: %v\n", err)
+		return 1
+	}
+	defer listener.Close()
+	if err := a.JobManager.EndDrain(); err != nil {
+		fmt.Fprintf(a.Err, "job drain cleanup failed: %v\n", err)
+		return 1
+	}
+	serverCtx, cancelServer := context.WithCancel(ctx)
+	defer cancelServer()
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	go func() {
+		select {
+		case <-serverCtx.Done():
+			_ = server.Shutdown(context.Background())
+		case <-serveDone:
+		}
+	}()
+	go a.runReleaseReminderWorker(serverCtx)
 	if opts.Open {
 		url := "http://" + addr
 		if err := a.Runner.OpenURL(ctx, url); err != nil {
@@ -123,7 +152,7 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	}
 	fmt.Fprintf(a.Out, "ConnectMac web manager: http://%s\n", addr)
 	fmt.Fprintln(a.Out, "Press Ctrl+C to stop.")
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(a.Err, "web server failed: %v\n", err)
 		return 1
 	}
