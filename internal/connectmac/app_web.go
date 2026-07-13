@@ -1789,7 +1789,7 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef str
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
-	job, plan, err := a.startAWSJobForResolvedProfile(r.Context(), runConfigPath, command, profile, notify)
+	job, plan, err := a.startAWSJobForResolvedProfile(r.Context(), runConfigPath, command, profile, notify, runConfigPath)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
