@@ -142,7 +142,7 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	server := &http.Server{Addr: actualAddr, Handler: handler}
 	worker := a.WebReminderWorker
 	if worker == nil {
-		worker = a.runReleaseReminderWorker
+		worker = func(ctx context.Context) { a.runReleaseReminderWorker(ctx, configPath) }
 	}
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
@@ -212,39 +212,127 @@ func waitForWebWorker(done <-chan struct{}, timeout time.Duration) bool {
 	}
 }
 
-func (a App) runReleaseReminderWorker(ctx context.Context) {
+func (a App) runReleaseReminderWorker(ctx context.Context, configPath string) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	a.sendDueReleaseReminders(time.Now())
+	a.advanceAutoReleaseReminders(ctx, configPath, time.Now())
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			a.sendDueReleaseReminders(now)
+			a.advanceAutoReleaseReminders(ctx, configPath, now)
 		}
 	}
 }
 
 func (a App) sendDueReleaseReminders(now time.Time) {
-	reminders, err := a.MemberStore.ListReleaseReminders("")
-	if err != nil {
+	a.advanceAutoReleaseReminders(context.Background(), DefaultConfigPath, now)
+}
+
+func (a App) advanceAutoReleaseReminders(ctx context.Context, configPath string, now time.Time) {
+	coordinator := a.newAutoReleaseCoordinator(configPath)
+	coordinator.Now = func() time.Time { return now }
+	if err := coordinator.Scan(ctx); err != nil {
 		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.worker", Message: err.Error()})
-		return
 	}
-	for _, reminder := range reminders {
-		if reminder.Status != ReleaseReminderStatusActive || strings.TrimSpace(reminder.ReleaseDueAt) == "" {
-			continue
+}
+
+func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinator {
+	return &AutoReleaseCoordinator{
+		Now:   time.Now,
+		Store: a.MemberStore,
+		Jobs:  a.JobManager,
+		ResolveProfile: func(ctx context.Context, reminder ReleaseReminder) (Profile, error) {
+			return a.resolveAutoReleaseProfile(ctx, configPath, reminder)
+		},
+		Status: func(ctx context.Context, profile Profile) (AWSStatus, error) {
+			_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+			return status, err
+		},
+		StartDestroy: func(ctx context.Context, profile Profile) (Job, error) {
+			runConfigPath, err := writeAutoReleaseProfileConfig(profile)
+			if err != nil {
+				return Job{}, TerminalAutoReleaseError(err)
+			}
+			job, _, err := a.startAWSJobForResolvedProfile(ctx, runConfigPath, "destroy", profile, true)
+			return job, err
+		},
+		CleanupReleased: func(profileName, reason string, _ time.Time) (ReleaseReminder, error) {
+			return a.cleanupProfileLocalRecords(profileName, reason)
+		},
+		Notify: func(notification AutoReleaseNotification) error {
+			description := "Mac 释放提醒已到期"
+			event := "due"
+			switch notification.Kind {
+			case AutoReleaseNotificationFirstFailure:
+				event, description = "auto-release-failure", "自动释放失败，将按计划重试："+notification.Error
+			case AutoReleaseNotificationFinalFailure:
+				event, description = "auto-release-failed", "自动释放已停止："+notification.Error
+			case AutoReleaseNotificationSuccess:
+				event, description = "auto-release-success", "Mac 自动释放成功，Elastic IP 分配已保留"
+			}
+			a.notifyReleaseReminder(event, notification.Reminder, "", description)
+			return nil
+		},
+		Emit: func(event AutoReleaseEvent) {
+			level := "info"
+			if event.Action == "retrying" || event.Action == "failed" {
+				level = "error"
+			}
+			_ = a.LogManager.Write(LogEntry{Level: level, Action: "auto-release." + event.Action, Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail, Message: event.Message})
+			_ = a.MemberStore.RecordEvent(OperationEvent{Action: "auto-release." + event.Action, Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail, Confirmed: true, Status: event.Action, Message: event.Message})
+		},
+	}
+}
+
+func (a App) resolveAutoReleaseProfile(_ context.Context, configPath string, reminder ReleaseReminder) (Profile, error) {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || !os.IsNotExist(pathErr.Err) {
+			return Profile{}, TerminalAutoReleaseError(err)
 		}
-		dueAt, err := time.Parse(time.RFC3339, reminder.ReleaseDueAt)
-		if err != nil || dueAt.After(now) {
-			continue
-		}
-		a.notifyReleaseReminder("due", reminder, "", "Mac 释放提醒已到期")
-		if _, err := a.MemberStore.MarkReleaseReminderDue(reminder.ProfileName, now.Format(time.RFC3339)); err != nil {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.worker", Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: err.Error()})
+		cfg = Config{Profiles: map[string]Profile{}}
+	}
+	records, err := a.MemberStore.ListManagedProfiles("")
+	if err != nil {
+		return Profile{}, TerminalAutoReleaseError(fmt.Errorf("load managed profiles: %w", err))
+	}
+	if len(records) > 0 {
+		cfg, err = a.mergeManagedProfileRecords(cfg, records)
+		if err != nil {
+			return Profile{}, TerminalAutoReleaseError(err)
 		}
 	}
+	profile, err := resolveProfileRef(cfg, reminder.ProfileName)
+	if err != nil {
+		return Profile{}, TerminalAutoReleaseError(err)
+	}
+	if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
+		return Profile{}, TerminalAutoReleaseError(errors.New(strings.Join(validationMessages(errs), "\n")))
+	}
+	return profile, nil
+}
+
+func writeAutoReleaseProfileConfig(profile Profile) (string, error) {
+	file, err := os.CreateTemp("", "cm-auto-release-config-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("create automatic release config: %w", err)
+	}
+	path := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		os.Remove(path)
+		return "", fmt.Errorf("secure automatic release config: %w", err)
+	}
+	_, writeErr := file.WriteString(FormatConfigProfiles(Config{Profiles: map[string]Profile{profile.Name: profile}}))
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(path)
+		return "", errors.Join(writeErr, closeErr)
+	}
+	return path, nil
 }
 
 func parseWebArgs(args []string) (webOptions, error) {
@@ -946,33 +1034,29 @@ func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "release_due_at must be RFC3339")
 			return
 		}
-		if dueAt.Before(time.Now().Add(-1 * time.Minute)) {
-			writeWebError(w, http.StatusBadRequest, "release_due_at must be in the future")
+		nowTime := time.Now()
+		if dueAt.Before(nowTime.Add(AutoReleaseGracePeriod)) {
+			writeWebError(w, http.StatusBadRequest, "release_due_at must be at least 10 minutes in the future")
 			return
 		}
 		if err := a.ensureWebMemberProfileAccess(member, profileName); err != nil {
 			writeWebError(w, http.StatusForbidden, err.Error())
 			return
 		}
-		reminder, ok, err := a.MemberStore.ReleaseReminder(profileName)
+		oldDueAt := ""
+		reminder, err := a.MemberStore.UpdateReleaseReminder(profileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+			oldDueAt = current.ReleaseDueAt
+			return applyReleaseReminderExtension(current, dueAt, nowTime, member.Email, member.Name)
+		})
 		if err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !ok {
-			writeWebError(w, http.StatusNotFound, "release reminder not found")
-			return
-		}
-		oldDueAt := reminder.ReleaseDueAt
-		now := time.Now().Format(time.RFC3339)
-		reminder.ReleaseDueAt = dueAt.Format(time.RFC3339)
-		reminder.LastExtendedByEmail = member.Email
-		reminder.LastExtendedByName = member.Name
-		reminder.LastExtendedAt = now
-		reminder.Status = ReleaseReminderStatusActive
-		reminder.LastNotifiedAt = ""
-		reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
-		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeWebError(w, http.StatusNotFound, "release reminder not found")
+				return
+			}
+			if strings.Contains(err.Error(), "already running") {
+				writeWebError(w, http.StatusConflict, err.Error())
+				return
+			}
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1696,30 +1780,11 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef str
 	if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
 		return webAPIResponse{OK: false, Code: 1, Error: strings.Join(validationMessages(errs), "\n")}
 	}
-	plan, err := a.AWSService.Plan(profile)
-	if err != nil {
-		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
-	}
 	runConfigPath, _, err := a.writeWebTempConfig(r, configPath)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
-	jobType := "aws-" + command
-	job, err := a.JobManager.Create(Job{
-		Type:       jobType,
-		Profile:    profile.Name,
-		AppleEmail: plan.AccountEmail,
-		Command:    []string{executable, "aws", command, profile.Name, "--confirm", "--config", runConfigPath},
-		Notify:     notify,
-	})
-	if err != nil {
-		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
-	}
-	job, err = a.JobManager.StartRunner(r.Context(), job)
+	job, plan, err := a.startAWSJobForResolvedProfile(r.Context(), runConfigPath, command, profile, notify)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
@@ -1735,6 +1800,29 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef str
 		fmt.Fprintln(&out, "Elastic IP allocation will be retained.")
 	}
 	return webAPIResponse{OK: true, Code: 0, Output: out.String(), Data: map[string]interface{}{"job": job}}
+}
+
+func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, command string, profile Profile, notify bool) (Job, MacPlan, error) {
+	plan, err := a.AWSService.Plan(profile)
+	if err != nil {
+		return Job{}, MacPlan{}, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return Job{}, MacPlan{}, err
+	}
+	job, err := a.JobManager.Create(Job{
+		Type:       "aws-" + command,
+		Profile:    profile.Name,
+		AppleEmail: plan.AccountEmail,
+		Command:    []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath},
+		Notify:     notify,
+	})
+	if err != nil {
+		return Job{}, MacPlan{}, err
+	}
+	job, err = a.JobManager.StartRunner(ctx, job)
+	return job, plan, err
 }
 
 func (a App) recordWebEvent(configPath, profileRef, action string, confirmed bool, resp webAPIResponse) {

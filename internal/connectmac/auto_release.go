@@ -1,0 +1,440 @@
+package connectmac
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+const (
+	AutoReleaseGracePeriod   = 10 * time.Minute
+	AutoReleaseRetryInterval = 5 * time.Minute
+	AutoReleaseRetryWindow   = time.Hour
+)
+
+type AutoReleaseNotificationKind string
+
+const (
+	AutoReleaseNotificationDue          AutoReleaseNotificationKind = "due"
+	AutoReleaseNotificationFirstFailure AutoReleaseNotificationKind = "first_failure"
+	AutoReleaseNotificationFinalFailure AutoReleaseNotificationKind = "final_failure"
+	AutoReleaseNotificationSuccess      AutoReleaseNotificationKind = "success"
+)
+
+type AutoReleaseNotification struct {
+	Kind     AutoReleaseNotificationKind
+	Reminder ReleaseReminder
+	Error    string
+}
+
+type AutoReleaseEvent struct {
+	Action   string
+	Reminder ReleaseReminder
+	Attempt  int
+	Message  string
+}
+
+type AutoReleaseStore interface {
+	ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error)
+	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
+	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
+}
+
+type AutoReleaseJobs interface {
+	Active() ([]Job, error)
+	List() ([]Job, error)
+}
+
+type AutoReleaseCoordinator struct {
+	Now             func() time.Time
+	Store           AutoReleaseStore
+	Jobs            AutoReleaseJobs
+	ResolveProfile  func(context.Context, ReleaseReminder) (Profile, error)
+	Status          func(context.Context, Profile) (AWSStatus, error)
+	StartDestroy    func(context.Context, Profile) (Job, error)
+	CleanupReleased func(profileName, reason string, at time.Time) (ReleaseReminder, error)
+	Notify          func(AutoReleaseNotification) error
+	Emit            func(AutoReleaseEvent)
+}
+
+type terminalAutoReleaseError struct{ cause error }
+
+func (e terminalAutoReleaseError) Error() string { return e.cause.Error() }
+func (e terminalAutoReleaseError) Unwrap() error { return e.cause }
+
+func TerminalAutoReleaseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return terminalAutoReleaseError{cause: err}
+}
+
+func applyReleaseReminderExtension(reminder ReleaseReminder, dueAt, now time.Time, memberEmail, memberName string) (ReleaseReminder, error) {
+	if dueAt.Before(now.Add(AutoReleaseGracePeriod)) {
+		return reminder, fmt.Errorf("release_due_at must be at least %s in the future", AutoReleaseGracePeriod)
+	}
+	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
+		return reminder, errors.New("automatic release is already running")
+	}
+	reminder.ReleaseDueAt = dueAt.UTC().Format(time.RFC3339)
+	reminder.LastExtendedByEmail = memberEmail
+	reminder.LastExtendedByName = memberName
+	reminder.LastExtendedAt = now.UTC().Format(time.RFC3339)
+	reminder.Status = ReleaseReminderStatusActive
+	reminder.LastNotifiedAt = ""
+	reminder.AutoReleaseAt = ""
+	reminder.AutoReleaseStartedAt = ""
+	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseAttempts = 0
+	reminder.AutoReleaseLastError = ""
+	reminder.AutoReleaseState = ""
+	return reminder, nil
+}
+
+var errAutoReleaseCycleChanged = errors.New("automatic release cycle changed")
+
+func (c *AutoReleaseCoordinator) Scan(ctx context.Context) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	now := c.Now().UTC()
+	reminders, err := c.Store.ListReleaseReminders("")
+	if err != nil {
+		return err
+	}
+	var scanErr error
+	for _, reminder := range reminders {
+		if err := c.scanReminder(ctx, reminder, now); err != nil && !errors.Is(err, errAutoReleaseCycleChanged) {
+			scanErr = errors.Join(scanErr, fmt.Errorf("auto release %s: %w", reminder.ProfileName, err))
+		}
+	}
+	return scanErr
+}
+
+func (c *AutoReleaseCoordinator) validate() error {
+	if c.Now == nil || c.Store == nil || c.Jobs == nil || c.ResolveProfile == nil || c.Status == nil || c.StartDestroy == nil || c.CleanupReleased == nil {
+		return errors.New("automatic release coordinator dependencies are incomplete")
+	}
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) scanReminder(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	if reminder.Status == ReleaseReminderStatusActive {
+		return c.scheduleDue(reminder, now)
+	}
+	if reminder.Status == ReleaseReminderStatusReleased || !reminder.AutoReleaseEnabled {
+		return nil
+	}
+	switch reminder.AutoReleaseState {
+	case ReleaseReminderAutoReleaseStateScheduled, ReleaseReminderAutoReleaseStateRetrying:
+		return c.advancePending(ctx, reminder, now)
+	case ReleaseReminderAutoReleaseStateRunning:
+		return c.observeRunning(ctx, reminder, now)
+	default:
+		return nil
+	}
+}
+
+func (c *AutoReleaseCoordinator) scheduleDue(reminder ReleaseReminder, now time.Time) error {
+	dueAt, err := parseAutoReleaseTime(reminder.ReleaseDueAt)
+	if err != nil || dueAt.After(now) {
+		return nil
+	}
+	if c.Notify != nil {
+		if err := c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationDue, Reminder: reminder}); err != nil {
+			return err
+		}
+	}
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if current.Status != ReleaseReminderStatusActive || current.ReleaseDueAt != reminder.ReleaseDueAt {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.Status = ReleaseReminderStatusDueNotified
+		current.LastNotifiedAt = now.Format(time.RFC3339)
+		if current.AutoReleaseEnabled {
+			current.AutoReleaseAt = now.Add(AutoReleaseGracePeriod).Format(time.RFC3339)
+			current.AutoReleaseState = ReleaseReminderAutoReleaseStateScheduled
+		}
+		return current, nil
+	})
+	if err == nil {
+		c.emit("scheduled", updated, 0, updated.AutoReleaseAt)
+	}
+	return err
+}
+
+func (c *AutoReleaseCoordinator) advancePending(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	autoAt, err := parseAutoReleaseTime(reminder.AutoReleaseAt)
+	if err != nil {
+		return c.finishFailure(reminder, now, TerminalAutoReleaseError(fmt.Errorf("invalid automatic release schedule: %w", err)))
+	}
+	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateScheduled && now.Before(autoAt) {
+		return nil
+	}
+	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateRetrying {
+		startedAt, err := parseAutoReleaseTime(reminder.AutoReleaseStartedAt)
+		if err != nil {
+			return c.finishFailure(reminder, now, TerminalAutoReleaseError(fmt.Errorf("invalid automatic release start time: %w", err)))
+		}
+		if !now.Before(startedAt.Add(AutoReleaseRetryWindow)) {
+			return c.finishFailure(reminder, now, fmt.Errorf("automatic release retry window of %s expired", AutoReleaseRetryWindow))
+		}
+		lastAttempt, err := parseAutoReleaseTime(reminder.AutoReleaseLastAttemptAt)
+		if err == nil && now.Before(lastAttempt.Add(AutoReleaseRetryInterval)) {
+			return nil
+		}
+	}
+	active, err := c.Jobs.Active()
+	if err != nil {
+		return err
+	}
+	if hasActiveDestroyJob(active, reminder.ProfileName) {
+		return nil
+	}
+	claimed, err := c.claim(reminder, now)
+	if err != nil {
+		return err
+	}
+	c.emit("attempt", claimed, claimed.AutoReleaseAttempts, "automatic release claimed")
+	profile, err := c.resolveAndValidateProfile(ctx, claimed)
+	if err != nil {
+		return c.recordAttemptFailure(claimed, now, err)
+	}
+	status, err := c.Status(ctx, profile)
+	if err != nil {
+		return c.recordAttemptFailure(claimed, now, err)
+	}
+	if err := validateAutoReleaseOwnership(claimed, status); err != nil {
+		return c.recordAttemptFailure(claimed, now, TerminalAutoReleaseError(err))
+	}
+	if autoReleaseResourcesClean(status) {
+		return c.completeRelease(claimed, now)
+	}
+	job, err := c.StartDestroy(ctx, profile)
+	if err != nil {
+		return c.recordAttemptFailure(claimed, now, err)
+	}
+	if job.Type != "aws-destroy" || job.Profile != claimed.ProfileName || (job.AppleEmail != "" && strings.TrimSpace(job.AppleEmail) != strings.TrimSpace(claimed.AppleEmail)) {
+		return c.recordAttemptFailure(claimed, now, TerminalAutoReleaseError(fmt.Errorf("started destroy job identity does not match reminder")))
+	}
+	c.emit("started", claimed, claimed.AutoReleaseAttempts, job.ID)
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) claim(reminder ReleaseReminder, now time.Time) (ReleaseReminder, error) {
+	return c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseCycle(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != reminder.AutoReleaseState {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+		if current.AutoReleaseStartedAt == "" {
+			current.AutoReleaseStartedAt = now.Format(time.RFC3339)
+		}
+		current.AutoReleaseLastAttemptAt = now.Format(time.RFC3339)
+		current.AutoReleaseAttempts++
+		current.AutoReleaseLastError = ""
+		return current, nil
+	})
+}
+
+func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	active, err := c.Jobs.Active()
+	if err != nil {
+		return err
+	}
+	if hasActiveDestroyJob(active, reminder.ProfileName) {
+		return nil
+	}
+	jobs, err := c.Jobs.List()
+	if err != nil {
+		return err
+	}
+	job, found := latestDestroyJob(jobs, reminder)
+	if !found {
+		return c.markRetrying(reminder, now, errors.New("automatic release was running but no active destroy job remains"))
+	}
+	profile, err := c.resolveAndValidateProfile(ctx, reminder)
+	if err != nil {
+		return c.recordAttemptFailure(reminder, now, err)
+	}
+	status, err := c.Status(ctx, profile)
+	if err != nil {
+		return c.recordAttemptFailure(reminder, now, err)
+	}
+	if err := validateAutoReleaseOwnership(reminder, status); err != nil {
+		return c.recordAttemptFailure(reminder, now, TerminalAutoReleaseError(err))
+	}
+	if autoReleaseResourcesClean(status) {
+		return c.completeRelease(reminder, now)
+	}
+	detail := strings.TrimSpace(job.LastError)
+	if detail == "" {
+		detail = fmt.Sprintf("destroy job %s completed as %s while managed resources remain", job.ID, job.Status)
+	}
+	return c.recordAttemptFailure(reminder, now, errors.New(detail))
+}
+
+func (c *AutoReleaseCoordinator) resolveAndValidateProfile(ctx context.Context, reminder ReleaseReminder) (Profile, error) {
+	profile, err := c.ResolveProfile(ctx, reminder)
+	if err != nil {
+		return Profile{}, err
+	}
+	if profile.Name != reminder.ProfileName {
+		return Profile{}, TerminalAutoReleaseError(fmt.Errorf("resolved profile %q does not match stored profile %q", profile.Name, reminder.ProfileName))
+	}
+	if strings.TrimSpace(reminder.AppleEmail) == "" || strings.TrimSpace(profile.AWS.AccountEmail) != strings.TrimSpace(reminder.AppleEmail) {
+		return Profile{}, TerminalAutoReleaseError(fmt.Errorf("apple account mismatch: stored=%q profile=%q", reminder.AppleEmail, profile.AWS.AccountEmail))
+	}
+	return profile, nil
+}
+
+func (c *AutoReleaseCoordinator) recordAttemptFailure(reminder ReleaseReminder, now time.Time, cause error) error {
+	if isTerminalAutoReleaseError(cause) {
+		return c.finishFailure(reminder, now, cause)
+	}
+	startedAt, err := parseAutoReleaseTime(reminder.AutoReleaseStartedAt)
+	if err == nil && !now.Before(startedAt.Add(AutoReleaseRetryWindow)) {
+		return c.finishFailure(reminder, now, cause)
+	}
+	return c.markRetrying(reminder, now, cause)
+}
+
+func (c *AutoReleaseCoordinator) markRetrying(reminder ReleaseReminder, now time.Time, cause error) error {
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseCycle(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+		current.AutoReleaseLastError = cause.Error()
+		return current, nil
+	})
+	if err != nil {
+		return err
+	}
+	c.emit("retrying", updated, updated.AutoReleaseAttempts, cause.Error())
+	if updated.AutoReleaseAttempts == 1 && c.Notify != nil {
+		return c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFirstFailure, Reminder: updated, Error: cause.Error()})
+	}
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) finishFailure(reminder ReleaseReminder, now time.Time, cause error) error {
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseCycle(current, reminder) || current.Status == ReleaseReminderStatusReleased || !current.AutoReleaseEnabled {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateFailed
+		current.AutoReleaseLastError = cause.Error()
+		return current, nil
+	})
+	if err != nil {
+		return err
+	}
+	c.emit("failed", updated, updated.AutoReleaseAttempts, cause.Error())
+	if c.Notify != nil {
+		return c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFinalFailure, Reminder: updated, Error: cause.Error()})
+	}
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) completeRelease(reminder ReleaseReminder, now time.Time) error {
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseCycle(current, reminder) || current.Status == ReleaseReminderStatusReleased || !current.AutoReleaseEnabled {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.Status = ReleaseReminderStatusReleased
+		current.ReleasedAt = now.Format(time.RFC3339)
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+		current.AutoReleaseLastError = ""
+		return current, nil
+	})
+	if err != nil {
+		return err
+	}
+	cleaned, err := c.CleanupReleased(reminder.ProfileName, "automatic release", now)
+	if err != nil {
+		return err
+	}
+	if cleaned.ProfileName != "" {
+		updated = cleaned
+		updated.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	}
+	c.emit("released", updated, updated.AutoReleaseAttempts, "eip_retained=true")
+	if c.Notify != nil {
+		return c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationSuccess, Reminder: updated})
+	}
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) emit(action string, reminder ReleaseReminder, attempt int, message string) {
+	if c.Emit != nil {
+		c.Emit(AutoReleaseEvent{Action: action, Reminder: reminder, Attempt: attempt, Message: message})
+	}
+}
+
+func parseAutoReleaseTime(value string) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, errors.New("timestamp is empty")
+	}
+	return time.Parse(time.RFC3339, value)
+}
+
+func sameAutoReleaseCycle(a, b ReleaseReminder) bool {
+	return a.ProfileName == b.ProfileName && a.AutoReleaseAt == b.AutoReleaseAt && a.ReleaseDueAt == b.ReleaseDueAt
+}
+
+func hasActiveDestroyJob(jobs []Job, profile string) bool {
+	for _, job := range jobs {
+		if job.Type == "aws-destroy" && job.Profile == profile && (job.Status == JobStatusStarting || job.Status == JobStatusRunning) {
+			return true
+		}
+	}
+	return false
+}
+
+func latestDestroyJob(jobs []Job, reminder ReleaseReminder) (Job, bool) {
+	lastAttempt, _ := parseAutoReleaseTime(reminder.AutoReleaseLastAttemptAt)
+	var latest Job
+	found := false
+	for _, job := range jobs {
+		if job.Type != "aws-destroy" || job.Profile != reminder.ProfileName || (job.AppleEmail != "" && strings.TrimSpace(job.AppleEmail) != strings.TrimSpace(reminder.AppleEmail)) || (!lastAttempt.IsZero() && job.StartedAt.Before(lastAttempt)) {
+			continue
+		}
+		if !found || job.StartedAt.After(latest.StartedAt) {
+			latest, found = job, true
+		}
+	}
+	return latest, found
+}
+
+func autoReleaseResourcesClean(status AWSStatus) bool {
+	return len(status.Hosts) == 0 && len(status.Instances) == 0 && strings.TrimSpace(status.ElasticIP.AssociationID) == "" && strings.TrimSpace(status.ElasticIP.InstanceID) == ""
+}
+
+func validateAutoReleaseOwnership(reminder ReleaseReminder, status AWSStatus) error {
+	if strings.TrimSpace(reminder.HostID) == "" || len(status.Hosts) == 0 {
+		return nil
+	}
+	for _, host := range status.Hosts {
+		if host.HostID == reminder.HostID {
+			return nil
+		}
+	}
+	return fmt.Errorf("ambiguous resource ownership: managed host does not match reminder host %s", reminder.HostID)
+}
+
+func isTerminalAutoReleaseError(err error) bool {
+	var terminal terminalAutoReleaseError
+	if errors.As(err, &terminal) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{"accessdenied", "unauthorized", "not authorized", "forbidden", "credential", "expiredtoken", "invalidclienttokenid", "signaturedoesnotmatch", "authentication", "aws profile", "config profile", "ambiguous ownership", "resource ownership", "apple account mismatch"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
