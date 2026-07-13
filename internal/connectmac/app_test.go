@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -3570,6 +3571,7 @@ func TestJobManagerRunJobMarksDeferred(t *testing.T) {
 	job, err := manager.Create(Job{
 		Type:        "aws-destroy",
 		Profile:     "xcode-vnc",
+		Status:      JobStatusRunning,
 		Command:     []string{"/bin/echo", "Need rerun: true"},
 		Notify:      true,
 		RunnerToken: "test-runner-token",
@@ -3587,6 +3589,69 @@ func TestJobManagerRunJobMarksDeferred(t *testing.T) {
 	}
 	if job.ExitCode == nil || *job.ExitCode != 0 {
 		t.Fatalf("exit code = %#v", job.ExitCode)
+	}
+}
+
+func TestJobManagerCreateDefaultsToStartingWithCreator(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	job, err := manager.Create(Job{ID: "default-starting"})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if job.Status != JobStatusStarting || job.CreatorPID != os.Getpid() || job.PID != 0 {
+		t.Fatalf("default job = %#v", job)
+	}
+
+	legacy, err := manager.Create(Job{ID: "legacy-running", Status: JobStatusRunning})
+	if err != nil {
+		t.Fatalf("create legacy job: %v", err)
+	}
+	if legacy.Status != JobStatusRunning || legacy.CreatorPID != 0 {
+		t.Fatalf("legacy job = %#v", legacy)
+	}
+}
+
+func TestJobManagerReconcileStartingLease(t *testing.T) {
+	now := time.Date(2026, 7, 2, 9, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		creatorPID  int
+		startedAt   time.Time
+		ownerAlive  bool
+		wantStatus  JobStatus
+		wantChanged bool
+	}{
+		{name: "owner dead", creatorPID: 101, startedAt: now.Add(-time.Second), wantStatus: JobStatusInterrupted, wantChanged: true},
+		{name: "owner alive within lease", creatorPID: 102, startedAt: now.Add(-59 * time.Second), ownerAlive: true, wantStatus: JobStatusStarting},
+		{name: "lease expired", creatorPID: 103, startedAt: now.Add(-time.Minute), ownerAlive: true, wantStatus: JobStatusInterrupted, wantChanged: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+			manager.Now = func() time.Time { return now }
+			manager.IsRunning = func(pid int) bool { return tc.ownerAlive && pid == tc.creatorPID }
+			job, err := manager.Create(Job{ID: "starting", Status: JobStatusStarting, CreatorPID: tc.creatorPID, StartedAt: tc.startedAt})
+			if err != nil {
+				t.Fatalf("create job: %v", err)
+			}
+			changed, err := manager.Reconcile()
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if (len(changed) == 1) != tc.wantChanged {
+				t.Fatalf("changed = %#v", changed)
+			}
+			got, err := manager.loadRaw(job.ID)
+			if err != nil {
+				t.Fatalf("load job: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %s, want %s", got.Status, tc.wantStatus)
+			}
+			if tc.wantChanged && got.LastError != interruptedJobError {
+				t.Fatalf("last error = %q", got.LastError)
+			}
+		})
 	}
 }
 
@@ -3786,7 +3851,7 @@ func TestJobManagerStartRunnerFailureMarksJobFailed(t *testing.T) {
 	manager.Executable = filepath.Join(t.TempDir(), "missing-cm")
 	finished := time.Date(2026, 7, 3, 8, 0, 0, 0, time.UTC)
 	manager.Now = func() time.Time { return finished }
-	job, err := manager.Create(Job{ID: "startup-failure", Status: JobStatusRunning})
+	job, err := manager.Create(Job{ID: "startup-failure"})
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
@@ -3797,8 +3862,45 @@ func TestJobManagerStartRunnerFailureMarksJobFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load failed job: %v", err)
 	}
-	if got.Status != JobStatusFailed || !got.FinishedAt.Equal(finished) || got.LastError == "" {
+	if got.Status != JobStatusFailed || got.CreatorPID != 0 || !got.FinishedAt.Equal(finished) || got.LastError == "" {
 		t.Fatalf("failed job = %#v", got)
+	}
+}
+
+func TestJobManagerStartRunnerTransitionsStartingAndLegacyRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  Job
+	}{
+		{name: "starting", job: Job{ID: "starting-runner"}},
+		{name: "legacy running", job: Job{ID: "legacy-runner", Status: JobStatusRunning}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+			executable, err := exec.LookPath("true")
+			if err != nil {
+				t.Fatalf("find true: %v", err)
+			}
+			manager.Executable = executable
+			job, err := manager.Create(tc.job)
+			if err != nil {
+				t.Fatalf("create job: %v", err)
+			}
+			started, err := manager.StartRunner(context.Background(), job)
+			if err != nil {
+				t.Fatalf("start runner: %v", err)
+			}
+			if started.Status != JobStatusRunning || started.PID <= 0 || started.CreatorPID != 0 || started.RunnerToken == "" {
+				t.Fatalf("started job = %#v", started)
+			}
+			persisted, err := manager.loadRaw(job.ID)
+			if err != nil {
+				t.Fatalf("load persisted job: %v", err)
+			}
+			if persisted.Status != JobStatusRunning || persisted.PID != started.PID || persisted.CreatorPID != 0 {
+				t.Fatalf("persisted job = %#v", persisted)
+			}
+		})
 	}
 }
 
@@ -3909,6 +4011,7 @@ func TestJobManagerActiveReconcilesAndSorts(t *testing.T) {
 		{ID: "older", Status: JobStatusRunning, PID: 10, StartedAt: manager.Now().Add(-time.Hour)},
 		{ID: "dead", Status: JobStatusRunning, PID: 20, StartedAt: manager.Now().Add(-30 * time.Minute)},
 		{ID: "newer", Status: JobStatusRunning, PID: 30, StartedAt: manager.Now().Add(-time.Minute)},
+		{ID: "starting", Status: JobStatusStarting, CreatorPID: 40, StartedAt: manager.Now().Add(-30 * time.Second)},
 		{ID: "done", Status: JobStatusSuccess, StartedAt: manager.Now()},
 	} {
 		if _, err := manager.Create(job); err != nil {
@@ -3919,7 +4022,7 @@ func TestJobManagerActiveReconcilesAndSorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("active: %v", err)
 	}
-	if got := jobIDs(active); !reflect.DeepEqual(got, []string{"newer", "older"}) {
+	if got := jobIDs(active); !reflect.DeepEqual(got, []string{"starting", "newer", "older"}) {
 		t.Fatalf("active IDs = %#v", got)
 	}
 	dead, err := manager.Load("dead")
@@ -3928,6 +4031,25 @@ func TestJobManagerActiveReconcilesAndSorts(t *testing.T) {
 	}
 	if dead.Status != JobStatusInterrupted {
 		t.Fatalf("dead status = %s", dead.Status)
+	}
+}
+
+func TestJobManagerWaitAllIncludesStarting(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	manager.Now = func() time.Time { return now }
+	manager.IsRunning = func(pid int) bool { return pid == 77 }
+	manager.Sleep = func(context.Context, time.Duration) error {
+		now = now.Add(time.Second)
+		return nil
+	}
+	if _, err := manager.Create(Job{ID: "starting-wait", Status: JobStatusStarting, CreatorPID: 77, StartedAt: now}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	err := manager.WaitAll(context.Background(), time.Second, time.Second, nil)
+	var timeoutErr *WaitAllTimeoutError
+	if !errors.As(err, &timeoutErr) || !reflect.DeepEqual(jobIDs(timeoutErr.Active), []string{"starting-wait"}) {
+		t.Fatalf("wait error = %T %v", err, err)
 	}
 }
 
@@ -4318,6 +4440,24 @@ func TestAppJobWaitAllImmediateProgressAndTimeout(t *testing.T) {
 			t.Fatalf("wait-all timeout error = %q", text)
 		}
 	})
+}
+
+func TestAppJobWaitWaitsForStarting(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	app.JobManager.IsRunning = func(pid int) bool { return pid == os.Getpid() }
+	job, err := app.JobManager.Create(Job{ID: "starting-wait"})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := app.Run(ctx, []string{"job", "wait", job.ID}); code != 1 {
+		t.Fatalf("wait code = %d, out=%s err=%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "job wait canceled: context canceled") || strings.Contains(out.String(), "Status:") {
+		t.Fatalf("wait output=%q err=%q", out.String(), errOut.String())
+	}
 }
 
 func TestAppUsageIncludesJobActiveAndWaitAll(t *testing.T) {

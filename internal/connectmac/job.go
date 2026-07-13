@@ -24,6 +24,7 @@ const DefaultJobDir = "~/.connectmac/jobs"
 type JobStatus string
 
 const (
+	JobStatusStarting    JobStatus = "starting"
 	JobStatusRunning     JobStatus = "running"
 	JobStatusSuccess     JobStatus = "success"
 	JobStatusFailed      JobStatus = "failed"
@@ -43,6 +44,7 @@ type Job struct {
 	AppleEmail  string    `json:"apple_email,omitempty"`
 	Status      JobStatus `json:"status"`
 	PID         int       `json:"pid,omitempty"`
+	CreatorPID  int       `json:"creator_pid,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	FinishedAt  time.Time `json:"finished_at,omitempty"`
 	Log         string    `json:"log"`
@@ -118,7 +120,8 @@ func (m JobManager) Create(job Job) (Job, error) {
 		job.StartedAt = m.Now()
 	}
 	if job.Status == "" {
-		job.Status = JobStatusRunning
+		job.Status = JobStatusStarting
+		job.CreatorPID = os.Getpid()
 	}
 	if job.ID == "" {
 		job.ID = newJobID(job.Type, job.Profile, job.StartedAt)
@@ -284,7 +287,14 @@ func (m JobManager) reconcileID(id string) (*Job, error) {
 		if err != nil {
 			return err
 		}
-		if job.Status != JobStatusRunning || job.PID <= 0 || m.IsRunning(job.PID) {
+		interrupted := false
+		switch job.Status {
+		case JobStatusStarting:
+			interrupted = (job.CreatorPID > 0 && !m.IsRunning(job.CreatorPID)) || m.Now().Sub(job.StartedAt) >= time.Minute
+		case JobStatusRunning:
+			interrupted = job.PID > 0 && !m.IsRunning(job.PID)
+		}
+		if !interrupted {
 			return nil
 		}
 		job.Status = JobStatusInterrupted
@@ -310,7 +320,7 @@ func (m JobManager) Active() ([]Job, error) {
 	}
 	active := make([]Job, 0)
 	for _, job := range jobs {
-		if job.Status == JobStatusRunning {
+		if job.Status == JobStatusStarting || job.Status == JobStatusRunning {
 			active = append(active, job)
 		}
 	}
@@ -458,7 +468,7 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 		if err != nil {
 			return err
 		}
-		if current.Status != JobStatusRunning || current.PID != 0 || current.CompletedBy != 0 {
+		if (current.Status != JobStatusStarting && current.Status != JobStatusRunning) || current.PID != 0 || current.CompletedBy != 0 {
 			return fmt.Errorf("job %s is not eligible to start", job.ID)
 		}
 		current.RunnerToken = token
@@ -470,6 +480,7 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 			current.FinishedAt = m.Now()
 			current.LastError = err.Error()
 			current.RunnerToken = ""
+			current.CreatorPID = 0
 			if saveErr := m.Save(current); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
@@ -477,6 +488,8 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 			return err
 		}
 		current.PID = cmd.Process.Pid
+		current.Status = JobStatusRunning
+		current.CreatorPID = 0
 		if err := m.Save(current); err != nil {
 			current.Status = JobStatusFailed
 			current.FinishedAt = m.Now()
@@ -614,11 +627,12 @@ func (m JobManager) failRunnerStartup(id string, cause error) (Job, error) {
 		if err != nil {
 			return err
 		}
-		if job.Status == JobStatusRunning && job.PID == 0 {
+		if (job.Status == JobStatusStarting || job.Status == JobStatusRunning) && job.PID == 0 {
 			job.Status = JobStatusFailed
 			job.FinishedAt = m.Now()
 			job.LastError = cause.Error()
 			job.RunnerToken = ""
+			job.CreatorPID = 0
 			if err := m.Save(job); err != nil {
 				return err
 			}

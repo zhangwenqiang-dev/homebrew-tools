@@ -222,7 +222,7 @@ func (a App) runJobWait(ctx context.Context, id string) int {
 			fmt.Fprintf(a.Err, "job wait failed: %v\n", err)
 			return 1
 		}
-		if job.Status != JobStatusRunning {
+		if job.Status != JobStatusStarting && job.Status != JobStatusRunning {
 			printJobStatus(a.Out, job)
 			if job.Status == JobStatusSuccess || job.Status == JobStatusDeferred {
 				return 0
