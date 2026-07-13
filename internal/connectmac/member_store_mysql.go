@@ -28,6 +28,8 @@ const mysqlReleaseReminderInsertQuery = `INSERT INTO cm_release_reminders (profi
 
 const mysqlReleaseReminderUpdateQuery = `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 
+const mysqlOperationEventInsertQuery = `INSERT INTO cm_events (id, action, profile, apple_email, member_id, member_email, member_name, confirmed, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
 const mysqlProfileOwnerForUpdateQuery = `SELECT o.member_id, COALESCE(m.email, '') FROM cm_profile_owners o LEFT JOIN cm_members m ON m.id = o.member_id WHERE o.profile_name = ? FOR UPDATE`
 
 const mysqlDeleteMatchingProfileOwnerQuery = `DELETE FROM cm_profile_owners WHERE profile_name = ? AND member_id = ?`
@@ -55,6 +57,11 @@ var mysqlReleaseReminderMigrationStatements = []string{
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_attempts INT NOT NULL DEFAULT 0`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_last_error TEXT NULL`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_state VARCHAR(64) NULL`,
+}
+
+var mysqlOperationEventMigrationStatements = []string{
+	`ALTER TABLE cm_events ADD COLUMN member_email VARCHAR(255) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN member_name VARCHAR(255) NULL`,
 }
 
 type mysqlSchemaGuard struct {
@@ -248,6 +255,8 @@ func (s MySQLMemberStore) ensureSchema() error {
 			profile VARCHAR(255) NOT NULL,
 			apple_email VARCHAR(255) NULL,
 			member_id VARCHAR(128) NULL,
+			member_email VARCHAR(255) NULL,
+			member_name VARCHAR(255) NULL,
 			confirmed BOOLEAN NOT NULL DEFAULT FALSE,
 			status VARCHAR(64) NOT NULL,
 			message TEXT NULL,
@@ -266,6 +275,7 @@ func (s MySQLMemberStore) ensureSchema() error {
 		`ALTER TABLE cm_members ADD COLUMN api_token_at VARCHAR(64) NULL`,
 	}
 	migrations = append(migrations, mysqlReleaseReminderMigrationStatements...)
+	migrations = append(migrations, mysqlOperationEventMigrationStatements...)
 	for _, stmt := range migrations {
 		if _, err := db.Exec(stmt); err != nil && !mysqlColumnExistsError(err) {
 			return err
@@ -407,13 +417,13 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 	if err := rows.Close(); err != nil {
 		return MemberData{}, err
 	}
-	rows, err = db.Query(`SELECT id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), confirmed, status, COALESCE(message, ''), created_at FROM cm_events ORDER BY created_at ASC LIMIT 500`)
+	rows, err = db.Query(`SELECT id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), COALESCE(member_email, ''), COALESCE(member_name, ''), confirmed, status, COALESCE(message, ''), created_at FROM cm_events ORDER BY created_at ASC LIMIT 500`)
 	if err != nil {
 		return MemberData{}, err
 	}
 	for rows.Next() {
 		var event OperationEvent
-		if err := rows.Scan(&event.ID, &event.Action, &event.Profile, &event.AppleEmail, &event.MemberID, &event.Confirmed, &event.Status, &event.Message, &event.CreatedAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.Action, &event.Profile, &event.AppleEmail, &event.MemberID, &event.MemberEmail, &event.MemberName, &event.Confirmed, &event.Status, &event.Message, &event.CreatedAt); err != nil {
 			rows.Close()
 			return MemberData{}, err
 		}
@@ -504,8 +514,8 @@ func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
 		data.Events = data.Events[len(data.Events)-500:]
 	}
 	for _, event := range data.Events {
-		if _, err := tx.Exec(`INSERT INTO cm_events (id, action, profile, apple_email, member_id, confirmed, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			event.ID, event.Action, event.Profile, event.AppleEmail, event.MemberID, event.Confirmed, event.Status, event.Message, event.CreatedAt); err != nil {
+		if _, err := tx.Exec(mysqlOperationEventInsertQuery,
+			event.ID, event.Action, event.Profile, event.AppleEmail, event.MemberID, event.MemberEmail, event.MemberName, event.Confirmed, event.Status, event.Message, event.CreatedAt); err != nil {
 			return err
 		}
 	}
@@ -750,6 +760,30 @@ func (s MySQLMemberStore) UpdateReleaseReminder(profileName string, update func(
 	return result, nil
 }
 
+func (s MySQLMemberStore) UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error) {
+	defer s.lockMutation()()
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	if update == nil {
+		return ReleaseReminder{}, errors.New("release reminder update is required")
+	}
+	if err := s.EnsureSchema(); err != nil {
+		return ReleaseReminder{}, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	return updateReleaseReminderAndRecordEventInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, profileName, s.currentTime(), update, event)
+}
+
 func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {
 	defer s.lockMutation()()
 	if err := s.EnsureSchema(); err != nil {
@@ -932,6 +966,14 @@ func upsertReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 }
 
 func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName string, now time.Time, update func(ReleaseReminder) (ReleaseReminder, error)) (updated ReleaseReminder, err error) {
+	return updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx, profileName, now, update, nil)
+}
+
+func updateReleaseReminderAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName string, now time.Time, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (updated ReleaseReminder, err error) {
+	return updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx, profileName, now, update, &event)
+}
+
+func updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName string, now time.Time, update func(ReleaseReminder) (ReleaseReminder, error), event *OperationEvent) (updated ReleaseReminder, err error) {
 	committed := false
 	defer func() {
 		if committed {
@@ -960,6 +1002,18 @@ func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 	updated = normalizeReleaseReminderCallback(current, updated, now.Format(time.RFC3339))
 	if err = updateMySQLReleaseReminder(tx, profileName, updated); err != nil {
 		return ReleaseReminder{}, err
+	}
+	if event != nil {
+		event.Profile = updated.ProfileName
+		event.AppleEmail = updated.AppleEmail
+		data := MemberData{}
+		if err = appendOperationEvent(&data, *event, now.Format(time.RFC3339)); err != nil {
+			return ReleaseReminder{}, err
+		}
+		normalized := data.Events[0]
+		if err = tx.Exec(mysqlOperationEventInsertQuery, normalized.ID, normalized.Action, normalized.Profile, normalized.AppleEmail, normalized.MemberID, normalized.MemberEmail, normalized.MemberName, normalized.Confirmed, normalized.Status, normalized.Message, normalized.CreatedAt); err != nil {
+			return ReleaseReminder{}, err
+		}
 	}
 	if err = advanceMySQLStoreLock(tx); err != nil {
 		return ReleaseReminder{}, err

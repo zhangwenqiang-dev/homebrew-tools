@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -66,7 +67,7 @@ func TestAppWebAutoReleaseToggleAdminEnableDisable(t *testing.T) {
 			if test.enabled {
 				wantState = "enabled"
 			}
-			if len(events) != 1 || events[0].Action != "release-reminder.auto-release" || events[0].Profile != test.seed.ProfileName || events[0].AppleEmail != test.seed.AppleEmail || events[0].MemberID == "" || events[0].Status != "success" || !strings.Contains(events[0].Message, "admin@example.com") || !strings.Contains(events[0].Message, wantState) {
+			if len(events) != 1 || events[0].Action != "release-reminder.auto-release."+wantState || events[0].Profile != test.seed.ProfileName || events[0].AppleEmail != test.seed.AppleEmail || events[0].MemberID == "" || events[0].MemberEmail != "admin@example.com" || events[0].MemberName != "Test Admin" || events[0].Status != "success" || !strings.Contains(events[0].Message, "admin@example.com") || !strings.Contains(events[0].Message, wantState) {
 				t.Fatalf("events = %+v", events)
 			}
 		})
@@ -100,6 +101,46 @@ func TestAppWebAutoReleaseToggleRoleAndValidation(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
 	})
+
+	for _, body := range []string{
+		`{"profile":"xcode-vnc"}`,
+		`{"profile":"xcode-vnc","enabled":null}`,
+	} {
+		t.Run("enabled required "+body, func(t *testing.T) {
+			app := newWebAutoReleaseTestApp(t)
+			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusActive)
+			rec := postWebAutoReleaseBody(t, &app, "admin", body)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "enabled is required") {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAppWebAutoReleaseEnableSchedulesUnscheduledDueReminder(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	now := app.JobManager.Now().UTC()
+	seed := ReleaseReminder{
+		ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-1",
+		ReleaseDueAt: "2026-07-01T12:20:45Z", LastNotifiedAt: "2026-07-01T12:30:45Z",
+		Status: ReleaseReminderStatusDueNotified, AutoReleaseEnabled: false,
+		AutoReleaseStartedAt: "preserve-start", AutoReleaseLastAttemptAt: "preserve-attempt",
+		AutoReleaseAttempts: 2, AutoReleaseLastError: "preserve-error",
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(seed); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	rec := postWebAutoRelease(t, &app, "admin", seed.ProfileName, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := mustReleaseReminder(t, app, seed.ProfileName)
+	if !got.AutoReleaseEnabled || got.AutoReleaseAt != now.Add(AutoReleaseGracePeriod).Format(time.RFC3339) || got.AutoReleaseState != ReleaseReminderAutoReleaseStateScheduled {
+		t.Fatalf("due reminder was not scheduled: %+v", got)
+	}
+	if got.ReleaseDueAt != seed.ReleaseDueAt || got.LastNotifiedAt != seed.LastNotifiedAt || got.AutoReleaseStartedAt != seed.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != seed.AutoReleaseLastAttemptAt || got.AutoReleaseAttempts != seed.AutoReleaseAttempts || got.AutoReleaseLastError != seed.AutoReleaseLastError {
+		t.Fatalf("due cycle fields changed: got=%+v seed=%+v", got, seed)
+	}
 }
 
 func TestAppWebAutoReleaseEnablePreservesRunningCycleWithActiveDestroyJob(t *testing.T) {
@@ -331,6 +372,64 @@ func TestAppWebReleaseReminderAutoClaimWinsBeforeExtension(t *testing.T) {
 	}
 }
 
+func TestAppWebManualDestroyCreateWinsConcurrentReminderMutation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		post func(*testing.T, *App) *httptest.ResponseRecorder
+	}{
+		{
+			name: "disable",
+			post: func(t *testing.T, app *App) *httptest.ResponseRecorder {
+				return postWebAutoRelease(t, app, "admin", "xcode-vnc", false)
+			},
+		},
+		{
+			name: "extension",
+			post: func(t *testing.T, app *App) *httptest.ResponseRecorder {
+				return postWebExtension(t, app, "admin", app.JobManager.Now().Add(time.Hour))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := newWebAutoReleaseTestApp(t)
+			seeded := seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
+			seeded = mustReleaseReminder(t, app, seeded.ProfileName)
+			renameEntered := make(chan struct{})
+			releaseRename := make(chan struct{})
+			app.JobManager.Rename = func(oldPath, newPath string) error {
+				close(renameEntered)
+				<-releaseRename
+				return os.Rename(oldPath, newPath)
+			}
+			createDone := make(chan error, 1)
+			go func() {
+				_, err := app.JobManager.Create(Job{ID: "manual-destroy", Type: "aws-destroy", Profile: seeded.ProfileName, Status: JobStatusRunning, PID: 42})
+				createDone <- err
+			}()
+			<-renameEntered
+
+			response := make(chan *httptest.ResponseRecorder, 1)
+			go func() { response <- test.post(t, &app) }()
+			close(releaseRename)
+			if err := <-createDone; err != nil {
+				t.Fatalf("manual destroy create: %v", err)
+			}
+			rec := <-response
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "active aws-destroy") {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			got := mustReleaseReminder(t, app, seeded.ProfileName)
+			if !reflect.DeepEqual(got, seeded) {
+				t.Fatalf("handler modified reminder after destroy won:\n got: %+v\nwant: %+v", got, seeded)
+			}
+			events, err := app.MemberStore.RecentEvents(seeded.AppleEmail, 10)
+			if err != nil || len(events) != 0 {
+				t.Fatalf("failed handler recorded success event: events=%+v err=%v", events, err)
+			}
+		})
+	}
+}
+
 type firstUpdateGateRepository struct {
 	MemberRepository
 	mu      sync.Mutex
@@ -380,8 +479,14 @@ func seedWebAutoReleaseReminder(t *testing.T, app App, status string) ReleaseRem
 
 func postWebAutoRelease(t *testing.T, app *App, role, profile string, enabled bool) *httptest.ResponseRecorder {
 	t.Helper()
-	body := strings.NewReader(`{"profile":"` + profile + `","enabled":` + map[bool]string{true: "true", false: "false"}[enabled] + `}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/auto-release", body)
+	body := `{"profile":"` + profile + `","enabled":` + map[bool]string{true: "true", false: "false"}[enabled] + `}`
+	return postWebAutoReleaseBody(t, app, role, body)
+}
+
+func postWebAutoReleaseBody(t *testing.T, app *App, role, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	reader := strings.NewReader(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/auto-release", reader)
 	addWebAuth(t, app, req, role)
 	rec := httptest.NewRecorder()
 	app.newWebHandler("").ServeHTTP(rec, req)

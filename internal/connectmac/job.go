@@ -3,6 +3,7 @@ package connectmac
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -150,6 +151,33 @@ func (m JobManager) normalize() JobManager {
 }
 
 func (m JobManager) Create(job Job) (Job, error) {
+	if job.Type == "aws-destroy" {
+		return m.CreateUnique(job)
+	}
+	return m.create(job, false)
+}
+
+func (m JobManager) CreateUnique(job Job) (created Job, err error) {
+	if strings.TrimSpace(job.Profile) == "" {
+		return Job{}, errors.New("job profile is required for unique creation")
+	}
+	guardEntered := false
+	err = m.WithProfileOperation(job.Profile, func() error {
+		guardEntered = true
+		created, err = m.createUniqueLocked(job)
+		return err
+	})
+	if err != nil && !guardEntered {
+		_ = removeJobPaths(job.CleanupPaths)
+	}
+	return created, err
+}
+
+func (m JobManager) createUniqueLocked(job Job) (Job, error) {
+	return m.create(job, true)
+}
+
+func (m JobManager) create(job Job, unique bool) (Job, error) {
 	m = m.normalize()
 	if job.StartedAt.IsZero() {
 		job.StartedAt = m.Now()
@@ -168,7 +196,7 @@ func (m JobManager) Create(job Job) (Job, error) {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("check jobs drain marker: %w", err)
 		}
-		if job.Type == "aws-destroy" {
+		if unique {
 			jobs, err := m.listRaw()
 			if err != nil {
 				return err
@@ -203,6 +231,34 @@ func (m JobManager) Create(job Job) (Job, error) {
 		return Job{}, err
 	}
 	return created, nil
+}
+
+func (m JobManager) WithProfileOperation(profileName string, fn func() error) error {
+	if fn == nil {
+		return errors.New("profile operation is required")
+	}
+	path, err := m.profileOperationLockPath(profileName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create profile operation lock directory: %w", err)
+	}
+	return withFileLock(path, fn)
+}
+
+func (m JobManager) profileOperationLockPath(profileName string) (string, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return "", errors.New("profile is required")
+	}
+	m = m.normalize()
+	baseDir, err := ExpandPath(m.Dir)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(profileName))
+	return filepath.Join(baseDir, ".profile-locks", hex.EncodeToString(sum[:])+".lock"), nil
 }
 
 func (m JobManager) Save(job Job) error {
@@ -292,7 +348,7 @@ func (m JobManager) listRaw() ([]Job, error) {
 	}
 	jobs := []Job{}
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		job, err := m.loadRaw(entry.Name())

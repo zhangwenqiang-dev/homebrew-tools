@@ -24,6 +24,7 @@ const DefaultMemberDataPath = "~/.connectmac/members.json"
 type MemberStore struct {
 	Path          string
 	Now           func() time.Time
+	Rename        func(oldPath, newPath string) error
 	mutationGuard *storeMutationGuard
 }
 
@@ -71,6 +72,7 @@ type MemberRepository interface {
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
+	UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
@@ -188,18 +190,23 @@ type ReleaseReminderCycle struct {
 	OwnerEmail           string
 }
 
-var ErrReleaseReminderCycleChanged = errors.New("release reminder cycle changed")
+var (
+	ErrReleaseReminderCycleChanged = errors.New("release reminder cycle changed")
+	ErrReleaseReminderNotFound     = errors.New("release reminder not found")
+)
 
 type OperationEvent struct {
-	ID         string `json:"id"`
-	Action     string `json:"action"`
-	Profile    string `json:"profile"`
-	AppleEmail string `json:"apple_email,omitempty"`
-	MemberID   string `json:"member_id,omitempty"`
-	Confirmed  bool   `json:"confirmed"`
-	Status     string `json:"status"`
-	Message    string `json:"message,omitempty"`
-	CreatedAt  string `json:"created_at"`
+	ID          string `json:"id"`
+	Action      string `json:"action"`
+	Profile     string `json:"profile"`
+	AppleEmail  string `json:"apple_email,omitempty"`
+	MemberID    string `json:"member_id,omitempty"`
+	MemberEmail string `json:"member_email,omitempty"`
+	MemberName  string `json:"member_name,omitempty"`
+	Confirmed   bool   `json:"confirmed"`
+	Status      string `json:"status"`
+	Message     string `json:"message,omitempty"`
+	CreatedAt   string `json:"created_at"`
 }
 
 type WebSettings struct {
@@ -240,6 +247,9 @@ func (s MemberStore) normalize() MemberStore {
 	}
 	if s.Now == nil {
 		s.Now = time.Now
+	}
+	if s.Rename == nil {
+		s.Rename = os.Rename
 	}
 	if s.mutationGuard == nil {
 		path, err := ExpandPath(s.Path)
@@ -337,7 +347,8 @@ func (s MemberStore) saveUnlocked(db MemberData) error {
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	defer os.Remove(tmp)
+	if err := s.Rename(tmp, path); err != nil {
 		return err
 	}
 	return nil
@@ -807,6 +818,41 @@ func (s MemberStore) UpdateReleaseReminder(profileName string, update func(Relea
 	})
 }
 
+func (s MemberStore) UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer unlock()
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	if update == nil {
+		return ReleaseReminder{}, errors.New("release reminder update is required")
+	}
+	return s.mutateReleaseReminders(func(db *MemberData, now string) (ReleaseReminder, error) {
+		for i := range db.Reminders {
+			if db.Reminders[i].ProfileName != profileName {
+				continue
+			}
+			updated, err := update(db.Reminders[i])
+			if err != nil {
+				return ReleaseReminder{}, err
+			}
+			updated = normalizeReleaseReminderCallback(db.Reminders[i], updated, now)
+			event.Profile = updated.ProfileName
+			event.AppleEmail = updated.AppleEmail
+			if err := appendOperationEvent(db, event, now); err != nil {
+				return ReleaseReminder{}, err
+			}
+			db.Reminders[i] = updated
+			return updated, nil
+		}
+		return ReleaseReminder{}, releaseReminderNotFoundError(profileName)
+	})
+}
+
 func (s MemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {
 	if notifiedAt == "" {
 		notifiedAt = s.currentTime().Format(time.RFC3339)
@@ -971,7 +1017,21 @@ func (s MemberStore) RecordEvent(event OperationEvent) error {
 	if err != nil {
 		return err
 	}
-	now := s.normalize().Now().Format(time.RFC3339)
+	if err := appendOperationEvent(&db, event, s.normalize().Now().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	return s.saveUnlocked(db)
+}
+
+func appendOperationEvent(db *MemberData, event OperationEvent, now string) error {
+	event.Action = strings.TrimSpace(event.Action)
+	if event.Action == "" {
+		return errors.New("operation event action is required")
+	}
+	event.Profile = strings.TrimSpace(event.Profile)
+	event.AppleEmail = normalizeEmail(event.AppleEmail)
+	event.MemberEmail = normalizeEmail(event.MemberEmail)
+	event.MemberName = strings.TrimSpace(event.MemberName)
 	if event.ID == "" {
 		event.ID = "event-" + strings.ReplaceAll(now, ":", "") + "-" + slugPart(event.Action+"-"+event.Profile)
 	}
@@ -982,7 +1042,7 @@ func (s MemberStore) RecordEvent(event OperationEvent) error {
 	if len(db.Events) > 500 {
 		db.Events = db.Events[len(db.Events)-500:]
 	}
-	return s.saveUnlocked(db)
+	return nil
 }
 
 func (s MemberStore) RecentEvents(appleEmail string, limit int) ([]OperationEvent, error) {
@@ -1931,7 +1991,7 @@ func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) Re
 }
 
 func releaseReminderNotFoundError(profileName string) error {
-	return fmt.Errorf("release reminder for profile %s not found", profileName)
+	return fmt.Errorf("%w for profile %s", ErrReleaseReminderNotFound, profileName)
 }
 
 func memberHasProfileAccess(db MemberData, member Member, profileName string) bool {
@@ -1992,16 +2052,8 @@ func recordEventInStore(s memberDataStore, event OperationEvent) error {
 	if err != nil {
 		return err
 	}
-	now := s.currentTime().Format(time.RFC3339)
-	if event.ID == "" {
-		event.ID = "event-" + strings.ReplaceAll(now, ":", "") + "-" + slugPart(event.Action+"-"+event.Profile)
-	}
-	if event.CreatedAt == "" {
-		event.CreatedAt = now
-	}
-	db.Events = append(db.Events, event)
-	if len(db.Events) > 500 {
-		db.Events = db.Events[len(db.Events)-500:]
+	if err := appendOperationEvent(&db, event, s.currentTime().Format(time.RFC3339)); err != nil {
+		return err
 	}
 	return s.Save(db)
 }

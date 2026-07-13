@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -341,9 +342,82 @@ func TestMemberStoreUpdateReleaseReminderErrorsDoNotPersist(t *testing.T) {
 		if err == nil {
 			t.Fatalf("UpdateReleaseReminder(%q) error = nil", profileName)
 		}
+		if profileName == "missing" && !errors.Is(err, ErrReleaseReminderNotFound) {
+			t.Fatalf("UpdateReleaseReminder missing error = %v", err)
+		}
 		if called {
 			t.Fatalf("UpdateReleaseReminder(%q) invoked callback", profileName)
 		}
+	}
+}
+
+func TestMemberStoreUpdateReleaseReminderAndRecordEventIsAtomic(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	seed, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "apple-usw2", AppleEmail: "apple@example.com"})
+	if err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	_, err = store.UpdateReleaseReminderAndRecordEvent(seed.ProfileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseEnabled = true
+		return reminder, nil
+	}, OperationEvent{})
+	if err == nil || !strings.Contains(err.Error(), "event action") {
+		t.Fatalf("invalid event error = %v", err)
+	}
+	got, _, err := store.ReleaseReminder(seed.ProfileName)
+	if err != nil {
+		t.Fatalf("load reminder: %v", err)
+	}
+	if !reflect.DeepEqual(got, seed) {
+		t.Fatalf("failed event persisted reminder: got=%+v want=%+v", got, seed)
+	}
+	events, err := store.RecentEvents(seed.AppleEmail, 10)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("events after rollback = %+v err=%v", events, err)
+	}
+
+	updated, err := store.UpdateReleaseReminderAndRecordEvent(seed.ProfileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseEnabled = true
+		return reminder, nil
+	}, OperationEvent{Action: "release-reminder.auto-release.enabled", MemberID: "member-1", MemberEmail: " ADMIN@EXAMPLE.COM ", MemberName: " Admin ", Status: "success"})
+	if err != nil {
+		t.Fatalf("atomic update: %v", err)
+	}
+	events, err = store.RecentEvents(seed.AppleEmail, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events after success = %+v err=%v", events, err)
+	}
+	event := events[0]
+	if !updated.AutoReleaseEnabled || event.Profile != seed.ProfileName || event.AppleEmail != seed.AppleEmail || event.MemberID != "member-1" || event.MemberEmail != "admin@example.com" || event.MemberName != "Admin" || event.Action != "release-reminder.auto-release.enabled" {
+		t.Fatalf("atomic result reminder=%+v event=%+v", updated, event)
+	}
+}
+
+func TestMemberStoreUpdateReleaseReminderAndRecordEventRollsBackSaveFailure(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	seed, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "apple-usw2", AppleEmail: "apple@example.com"})
+	if err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	wantErr := errors.New("replace failed")
+	store.Rename = func(string, string) error { return wantErr }
+	_, err = store.UpdateReleaseReminderAndRecordEvent(seed.ProfileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseEnabled = true
+		return reminder, nil
+	}, OperationEvent{Action: "release-reminder.auto-release.enabled", Status: "success"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("save failure = %v, want %v", err, wantErr)
+	}
+	got, _, err := store.ReleaseReminder(seed.ProfileName)
+	if err != nil {
+		t.Fatalf("load reminder: %v", err)
+	}
+	if !reflect.DeepEqual(got, seed) {
+		t.Fatalf("failed save persisted reminder: got=%+v want=%+v", got, seed)
+	}
+	events, err := store.RecentEvents(seed.AppleEmail, 10)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("events after failed save = %+v err=%v", events, err)
 	}
 }
 

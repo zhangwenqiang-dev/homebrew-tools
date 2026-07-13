@@ -102,6 +102,7 @@ type fakeMySQLReleaseReminderTransaction struct {
 	execArgs     []any
 	written      ReleaseReminder
 	execErr      error
+	eventExecErr error
 	commitErr    error
 	rollbackErr  error
 	committed    bool
@@ -133,6 +134,9 @@ func (tx *fakeMySQLReleaseReminderTransaction) Query(query string, args ...any) 
 
 func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) error {
 	tx.operations = append(tx.operations, "exec:"+query)
+	if query == mysqlOperationEventInsertQuery && tx.eventExecErr != nil {
+		return tx.eventExecErr
+	}
 	if query == mysqlReleaseReminderInsertQuery || query == mysqlReleaseReminderUpdateQuery {
 		tx.execQuery = query
 		tx.execArgs = args
@@ -224,6 +228,18 @@ func TestMySQLReleaseReminderAutoReleaseSchemaMigrations(t *testing.T) {
 	}
 	if strings.Contains(strings.ToUpper(joined), "DROP ") || strings.Contains(strings.ToUpper(joined), "DELETE ") {
 		t.Fatalf("release reminder migrations are destructive: %s", joined)
+	}
+}
+
+func TestMySQLOperationEventActorSchemaMigrations(t *testing.T) {
+	joined := strings.Join(mysqlOperationEventMigrationStatements, "\n")
+	for _, column := range []string{"member_email", "member_name"} {
+		if !strings.Contains(joined, "ADD COLUMN "+column) {
+			t.Errorf("operation event migration missing %s", column)
+		}
+	}
+	if strings.Contains(strings.ToUpper(joined), "DROP ") || strings.Contains(strings.ToUpper(joined), "DELETE ") {
+		t.Fatalf("operation event migrations are destructive: %s", joined)
 	}
 }
 
@@ -614,7 +630,7 @@ func TestMySQLUpdateReleaseReminderMissingRollsBack(t *testing.T) {
 		called = true
 		return reminder, nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "release reminder for profile missing not found") {
+	if !errors.Is(err, ErrReleaseReminderNotFound) {
 		t.Fatalf("missing reminder error = %v", err)
 	}
 	if called || tx.committed || !tx.rolledBack || tx.execQuery != "" {
@@ -666,5 +682,33 @@ func TestMySQLUpdateReleaseReminderWriteAndCommitErrorsRollBack(t *testing.T) {
 				t.Fatal("failed transaction was not rolled back")
 			}
 		})
+	}
+}
+
+func TestMySQLUpdateReleaseReminderAndRecordEventRollsBackEventFailure(t *testing.T) {
+	wantErr := errors.New("event insert failed")
+	current := ReleaseReminder{ProfileName: "apple-usw2", AppleEmail: "apple@example.com", AutoReleaseEnabled: false}
+	tx := &fakeMySQLReleaseReminderTransaction{
+		row:          fakeMySQLReleaseReminderRow{reminder: current},
+		eventExecErr: wantErr,
+	}
+	_, err := updateReleaseReminderAndRecordEventInMySQLTransaction(tx, current.ProfileName, time.Date(2026, 7, 2, 8, 3, 0, 0, time.UTC), func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseEnabled = true
+		return reminder, nil
+	}, OperationEvent{Action: "release-reminder.auto-release.enabled", MemberID: "member-1", MemberEmail: "admin@example.com", MemberName: "Admin", Status: "success"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("event failure = %v, want %v", err, wantErr)
+	}
+	if tx.committed || !tx.rolledBack {
+		t.Fatalf("event failure committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
+	}
+	wantOperations := []string{
+		"query-row:" + mysqlStoreLockForUpdateQuery,
+		"query-row:" + mysqlReleaseReminderSelectForUpdate,
+		"exec:" + mysqlReleaseReminderUpdateQuery,
+		"exec:" + mysqlOperationEventInsertQuery,
+	}
+	if !reflect.DeepEqual(tx.operations, wantOperations) {
+		t.Fatalf("event failure operations = %v, want %v", tx.operations, wantOperations)
 	}
 }

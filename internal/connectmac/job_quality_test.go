@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,6 +80,73 @@ func TestJobManagerCreatePreventsConcurrentAWSDestroyAcrossManagers(t *testing.T
 	}
 	if len(jobs) != 1 || jobs[0].Type != "aws-destroy" || jobs[0].Profile != "mac" {
 		t.Fatalf("jobs = %+v", jobs)
+	}
+}
+
+func TestJobManagerProfileOperationGuardSerializesAcrossManagers(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "jobs")
+	first := NewJobManager(dir)
+	second := NewJobManager(dir)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.WithProfileOperation("../mac/unsafe", func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- second.WithProfileOperation("../mac/unsafe", func() error { return nil })
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second profile operation bypassed guard: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first profile operation: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second profile operation: %v", err)
+	}
+	lockPath, err := first.profileOperationLockPath("../mac/unsafe")
+	if err != nil {
+		t.Fatalf("profile lock path: %v", err)
+	}
+	if filepath.Dir(lockPath) != filepath.Join(dir, ".profile-locks") || strings.Contains(filepath.Base(lockPath), "mac") || filepath.Ext(lockPath) != ".lock" {
+		t.Fatalf("unsafe profile lock path = %q", lockPath)
+	}
+}
+
+func TestJobManagerAWSDestroyCreateUsesProfileOperationGuard(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "jobs")
+	guard := NewJobManager(dir)
+	creator := NewJobManager(dir)
+	createDone := make(chan error, 1)
+	err := guard.WithProfileOperation("mac", func() error {
+		go func() {
+			_, err := creator.Create(Job{Type: "aws-destroy", Profile: "mac"})
+			createDone <- err
+		}()
+		select {
+		case err := <-createDone:
+			t.Fatalf("destroy create bypassed profile guard: %v", err)
+		case <-time.After(100 * time.Millisecond):
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("hold profile guard: %v", err)
+	}
+	if err := <-createDone; err != nil {
+		t.Fatalf("create destroy after guard: %v", err)
 	}
 }
 
