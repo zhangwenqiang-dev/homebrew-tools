@@ -3568,14 +3568,16 @@ func TestJobManagerRunJobMarksDeferred(t *testing.T) {
 	}
 	manager.Notify = func(title, message string) error { return nil }
 	job, err := manager.Create(Job{
-		Type:    "aws-destroy",
-		Profile: "xcode-vnc",
-		Command: []string{"/bin/echo", "Need rerun: true"},
-		Notify:  true,
+		Type:        "aws-destroy",
+		Profile:     "xcode-vnc",
+		Command:     []string{"/bin/echo", "Need rerun: true"},
+		Notify:      true,
+		RunnerToken: "test-runner-token",
 	})
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
+	t.Setenv(jobRunnerTokenEnv, "test-runner-token")
 	job, err = manager.RunJob(context.Background(), job.ID)
 	if err != nil {
 		t.Fatalf("run job: %v", err)
@@ -3605,8 +3607,12 @@ func TestJobManagerReconcilePersistsInterruptedDeadRunningJob(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	if err := manager.Reconcile(); err != nil {
+	changed, err := manager.Reconcile()
+	if err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+	if !reflect.DeepEqual(jobIDs(changed), []string{job.ID}) {
+		t.Fatalf("changed jobs = %#v", jobIDs(changed))
 	}
 	got, err := manager.Load(job.ID)
 	if err != nil {
@@ -3627,6 +3633,13 @@ func TestJobManagerReconcilePersistsInterruptedDeadRunningJob(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte(`"status": "interrupted"`)) {
 		t.Fatalf("persisted job was not interrupted: %s", data)
+	}
+	lockInfo, err := os.Stat(filepath.Join(filepath.Dir(mustJobPath(t, manager, job.ID)), ".lock"))
+	if err != nil {
+		t.Fatalf("stat job lock: %v", err)
+	}
+	if lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("job lock mode = %o, want 600", lockInfo.Mode().Perm())
 	}
 }
 
@@ -3649,8 +3662,12 @@ func TestJobManagerReconcileLeavesLiveAndTerminalJobsUnchanged(t *testing.T) {
 			t.Fatalf("create %s: %v", job.ID, err)
 		}
 	}
-	if err := manager.Reconcile(); err != nil {
+	changed, err := manager.Reconcile()
+	if err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("changed jobs = %#v", changed)
 	}
 	for _, want := range tests {
 		got, err := manager.Load(want.ID)
@@ -3660,6 +3677,155 @@ func TestJobManagerReconcileLeavesLiveAndTerminalJobsUnchanged(t *testing.T) {
 		if got.Status != want.Status || !got.FinishedAt.IsZero() || got.LastError != "" {
 			t.Fatalf("job %s changed: %#v", want.ID, got)
 		}
+	}
+}
+
+func TestJobManagerLoadAndListReconcileDeadRunningJobs(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	manager.IsRunning = func(int) bool { return false }
+	for _, id := range []string{"load-dead", "list-dead"} {
+		if _, err := manager.Create(Job{ID: id, Status: JobStatusRunning, PID: 100}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	loaded, err := manager.Load("load-dead")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.Status != JobStatusInterrupted {
+		t.Fatalf("loaded status = %s", loaded.Status)
+	}
+	jobs, err := manager.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, job := range jobs {
+		if job.Status == JobStatusRunning && job.PID > 0 {
+			t.Fatalf("list returned stale running job: %#v", job)
+		}
+	}
+}
+
+func TestJobManagerReconcileRereadsUnderJobLock(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	manager.IsRunning = func(int) bool { return false }
+	if _, err := manager.Create(Job{ID: "race-job", Status: JobStatusRunning, PID: 123}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	terminalSaved := make(chan error, 1)
+	go func() {
+		terminalSaved <- manager.withJobLock("race-job", func() error {
+			close(locked)
+			<-release
+			job, err := manager.loadRaw("race-job")
+			if err != nil {
+				return err
+			}
+			job.Status = JobStatusSuccess
+			job.FinishedAt = manager.Now()
+			return manager.Save(job)
+		})
+	}()
+	<-locked
+	reconciled := make(chan error, 1)
+	go func() {
+		_, err := manager.Reconcile()
+		reconciled <- err
+	}()
+	close(release)
+	if err := <-terminalSaved; err != nil {
+		t.Fatalf("save terminal: %v", err)
+	}
+	if err := <-reconciled; err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	job, err := manager.loadRaw("race-job")
+	if err != nil {
+		t.Fatalf("load final: %v", err)
+	}
+	if job.Status != JobStatusSuccess {
+		t.Fatalf("terminal status overwritten: %#v", job)
+	}
+}
+
+func TestJobManagerRunJobRequiresOneTimeRunnerTokenAndRejectsTerminal(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	output := filepath.Join(t.TempDir(), "ran")
+	job, err := manager.Create(Job{
+		ID:          "token-job",
+		Status:      JobStatusRunning,
+		Command:     []string{"/usr/bin/touch", output},
+		RunnerToken: "one-time-token",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := manager.RunJob(context.Background(), job.ID); err == nil {
+		t.Fatal("manual run error = nil")
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("manual run executed command: %v", err)
+	}
+	t.Setenv(jobRunnerTokenEnv, "one-time-token")
+	completed, err := manager.RunJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("internal run: %v", err)
+	}
+	if completed.Status != JobStatusSuccess {
+		t.Fatalf("completed status = %s", completed.Status)
+	}
+	if _, err := manager.RunJob(context.Background(), job.ID); err == nil {
+		t.Fatal("terminal rerun error = nil")
+	}
+}
+
+func TestJobManagerStartRunnerFailureMarksJobFailed(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	manager.Executable = filepath.Join(t.TempDir(), "missing-cm")
+	finished := time.Date(2026, 7, 3, 8, 0, 0, 0, time.UTC)
+	manager.Now = func() time.Time { return finished }
+	job, err := manager.Create(Job{ID: "startup-failure", Status: JobStatusRunning})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := manager.StartRunner(context.Background(), job); err == nil {
+		t.Fatal("start runner error = nil")
+	}
+	got, err := manager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load failed job: %v", err)
+	}
+	if got.Status != JobStatusFailed || !got.FinishedAt.Equal(finished) || got.LastError == "" {
+		t.Fatalf("failed job = %#v", got)
+	}
+}
+
+func TestJobManagerRejectsUnsafeAndMismatchedJobIDs(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	for _, id := range []string{"", ".", "..", "a/b", `a\b`} {
+		if _, err := manager.JobPath(id); err == nil {
+			t.Fatalf("JobPath(%q) error = nil", id)
+		}
+	}
+	if _, err := manager.Create(Job{ID: "requested", Status: JobStatusSuccess}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	path := mustJobPath(t, manager, "requested")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read job: %v", err)
+	}
+	data = bytes.Replace(data, []byte(`"id": "requested"`), []byte(`"id": "../escaped"`), 1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("corrupt ID: %v", err)
+	}
+	if _, err := manager.Load("requested"); err == nil {
+		t.Fatal("mismatched ID load error = nil")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(path)), "escaped", "job.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected escaped write: %v", err)
 	}
 }
 
@@ -3782,17 +3948,11 @@ func TestJobManagerActiveReturnsReadError(t *testing.T) {
 func TestJobManagerActiveReturnsReconcileSaveError(t *testing.T) {
 	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
 	manager.IsRunning = func(int) bool { return false }
-	job, err := manager.Create(Job{ID: "bad-save", Status: JobStatusRunning, PID: 77})
-	if err != nil {
+	if _, err := manager.Create(Job{ID: "bad-save", Status: JobStatusRunning, PID: 77}); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	job.ID = "invalid/id"
-	data, err := json.Marshal(job)
-	if err != nil {
-		t.Fatalf("marshal invalid job: %v", err)
-	}
-	if err := os.WriteFile(mustJobPath(t, manager, "bad-save"), data, 0o600); err != nil {
-		t.Fatalf("write invalid job: %v", err)
+	manager.Rename = func(string, string) error {
+		return errors.New("injected reconcile rename failure")
 	}
 	if _, err := manager.Active(); err == nil || !strings.Contains(err.Error(), "save reconciled job") {
 		t.Fatalf("active save error = %v", err)
@@ -3842,6 +4002,35 @@ func TestJobManagerWaitAllImmediateAndEventual(t *testing.T) {
 		}
 		if progressCalls != 0 {
 			t.Fatalf("progress calls = %d, want 0 after completion", progressCalls)
+		}
+	})
+
+	t.Run("progress follows sleep", func(t *testing.T) {
+		manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+		now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+		nowCalls := 0
+		manager.Now = func() time.Time {
+			nowCalls++
+			return now.Add(time.Duration(nowCalls) * time.Millisecond)
+		}
+		manager.IsRunning = func(int) bool { return true }
+		sleepCalls := 0
+		manager.Sleep = func(context.Context, time.Duration) error {
+			sleepCalls++
+			now = now.Add(time.Second)
+			return nil
+		}
+		if _, err := manager.Create(Job{ID: "progress-order", Status: JobStatusRunning, PID: 55}); err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		err := manager.WaitAll(context.Background(), time.Second, time.Second, func(time.Duration, []Job) {
+			if sleepCalls == 0 {
+				t.Error("progress called before first sleep")
+			}
+		})
+		var timeoutErr *WaitAllTimeoutError
+		if !errors.As(err, &timeoutErr) {
+			t.Fatalf("error = %v, want timeout", err)
 		}
 	})
 }
@@ -3920,6 +4109,62 @@ func TestJobManagerWaitAllTimeoutInvalidAndCanceled(t *testing.T) {
 			t.Fatalf("error = %v, want context canceled", err)
 		}
 	})
+}
+
+func TestJobManagerBeginDrainBlocksCreateAndEndDrainReopens(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	if err := manager.BeginDrain(); err != nil {
+		t.Fatalf("begin drain: %v", err)
+	}
+	lockInfo, err := os.Stat(filepath.Join(manager.Dir, ".lock"))
+	if err != nil {
+		t.Fatalf("stat global lock: %v", err)
+	}
+	if lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("global lock mode = %o, want 600", lockInfo.Mode().Perm())
+	}
+	if _, err := manager.Create(Job{ID: "blocked", Status: JobStatusRunning}); !errors.Is(err, ErrJobsDraining) {
+		t.Fatalf("create error = %v, want ErrJobsDraining", err)
+	}
+	if _, err := os.Stat(mustJobPath(t, manager, "blocked")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("blocked job was written: %v", err)
+	}
+	if err := manager.EndDrain(); err != nil {
+		t.Fatalf("end drain: %v", err)
+	}
+	if _, err := manager.Create(Job{ID: "allowed", Status: JobStatusRunning}); err != nil {
+		t.Fatalf("create after drain: %v", err)
+	}
+}
+
+func TestJobManagerCreateAndBeginDrainAreAtomic(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+		start := make(chan struct{})
+		createResult := make(chan error, 1)
+		drainResult := make(chan error, 1)
+		go func() {
+			<-start
+			_, err := manager.Create(Job{ID: "racing", Status: JobStatusRunning})
+			createResult <- err
+		}()
+		go func() {
+			<-start
+			drainResult <- manager.BeginDrain()
+		}()
+		close(start)
+		createErr := <-createResult
+		if err := <-drainResult; err != nil {
+			t.Fatalf("begin drain: %v", err)
+		}
+		_, statErr := os.Stat(mustJobPath(t, manager, "racing"))
+		switch {
+		case createErr == nil && statErr == nil:
+		case errors.Is(createErr, ErrJobsDraining) && errors.Is(statErr, os.ErrNotExist):
+		default:
+			t.Fatalf("inconsistent race result: create=%v stat=%v", createErr, statErr)
+		}
+	}
 }
 
 func mustJobPath(t *testing.T, manager JobManager, id string) string {
@@ -4084,11 +4329,14 @@ func TestAppUsageIncludesJobActiveAndWaitAll(t *testing.T) {
 	for _, want := range []string{
 		"cm job active\n",
 		"cm job active --json\n",
-		"cm job wait-all [--timeout 2h] [--interval 10s]\n",
+		"cm job wait-all [--timeout 2h] [--interval 10s] [--drain]\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("usage missing %q:\n%s", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "cm job run") {
+		t.Fatalf("usage exposes internal job run:\n%s", out.String())
 	}
 }
 
@@ -4102,6 +4350,7 @@ func TestAppJobWaitAllStrictArgumentsAndCancellation(t *testing.T) {
 		{"job", "wait-all", "--timeout", "nope"},
 		{"job", "wait-all", "--interval", "0s"},
 		{"job", "wait-all", "--timeout", "-1s"},
+		{"job", "wait-all", "--drain", "--drain"},
 	}
 	for _, args := range invalid {
 		t.Run(strings.Join(args[2:], "_"), func(t *testing.T) {
@@ -4131,16 +4380,106 @@ func TestAppJobWaitAllStrictArgumentsAndCancellation(t *testing.T) {
 	}
 }
 
+func TestAppJobWaitAllDrainCleanupAndSuccessMarker(t *testing.T) {
+	t.Run("success retains marker", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		if code := app.Run(context.Background(), []string{"job", "wait-all", "--drain"}); code != 0 {
+			t.Fatalf("wait-all drain code = %d, err = %s", code, errOut.String())
+		}
+		if _, err := app.JobManager.Create(Job{ID: "blocked-after-success"}); !errors.Is(err, ErrJobsDraining) {
+			t.Fatalf("create error = %v, want draining", err)
+		}
+		if err := app.JobManager.EndDrain(); err != nil {
+			t.Fatalf("end drain: %v", err)
+		}
+	})
+
+	t.Run("timeout clears marker", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		now := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+		app.JobManager.Now = func() time.Time { return now }
+		app.JobManager.Sleep = func(_ context.Context, duration time.Duration) error {
+			now = now.Add(duration)
+			return nil
+		}
+		if _, err := app.JobManager.Create(Job{ID: "active-timeout", Status: JobStatusRunning}); err != nil {
+			t.Fatalf("create active job: %v", err)
+		}
+		if code := app.Run(context.Background(), []string{"job", "wait-all", "--drain", "--timeout", "10s", "--interval", "10s"}); code != 1 {
+			t.Fatalf("timeout code = %d, err = %s", code, errOut.String())
+		}
+		if _, err := app.JobManager.Create(Job{ID: "after-timeout"}); err != nil {
+			t.Fatalf("marker retained after timeout: %v", err)
+		}
+	})
+
+	t.Run("cancel clears marker", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		if _, err := app.JobManager.Create(Job{ID: "active-cancel", Status: JobStatusRunning}); err != nil {
+			t.Fatalf("create active job: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		app.JobManager.Sleep = func(context.Context, time.Duration) error {
+			cancel()
+			return ctx.Err()
+		}
+		if code := app.Run(ctx, []string{"job", "wait-all", "--drain"}); code != 1 {
+			t.Fatalf("cancel code = %d, err = %s", code, errOut.String())
+		}
+		if _, err := app.JobManager.Create(Job{ID: "after-cancel"}); err != nil {
+			t.Fatalf("marker retained after cancel: %v", err)
+		}
+	})
+
+	t.Run("error clears marker", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		if _, err := app.JobManager.Create(Job{ID: "corrupt", Status: JobStatusRunning}); err != nil {
+			t.Fatalf("create corrupt job: %v", err)
+		}
+		if err := os.WriteFile(mustJobPath(t, app.JobManager, "corrupt"), []byte("{"), 0o600); err != nil {
+			t.Fatalf("corrupt job: %v", err)
+		}
+		if code := app.Run(context.Background(), []string{"job", "wait-all", "--drain"}); code != 1 {
+			t.Fatalf("error code = %d, err = %s", code, errOut.String())
+		}
+		if _, err := app.JobManager.Create(Job{ID: "after-error"}); err != nil {
+			t.Fatalf("marker retained after error: %v", err)
+		}
+	})
+}
+
+func TestAppJobRunIsInternalOnly(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	job, err := app.JobManager.Create(Job{ID: "manual-run", Status: JobStatusRunning, RunnerToken: "secret"})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if code := app.Run(context.Background(), []string{"job", "run", job.ID}); code != 1 {
+		t.Fatalf("manual run code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "restricted to the internal background runner") {
+		t.Fatalf("manual run error = %q", errOut.String())
+	}
+}
+
 func TestAppJobCompletionCommandsAndOptions(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
 	if code := app.Run(context.Background(), []string{"completion", "job-commands"}); code != 0 {
 		t.Fatalf("job commands code = %d, err = %s", code, errOut.String())
 	}
-	for _, want := range []string{"list", "status", "log", "wait", "run", "active", "wait-all"} {
+	for _, want := range []string{"list", "status", "log", "wait", "active", "wait-all"} {
 		if !strings.Contains(out.String(), want+"\n") {
 			t.Fatalf("job commands missing %q: %q", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "run\n") {
+		t.Fatalf("job completion exposes internal run: %q", out.String())
 	}
 	for _, shell := range []string{"zsh", "bash", "fish"} {
 		out.Reset()
@@ -4148,7 +4487,7 @@ func TestAppJobCompletionCommandsAndOptions(t *testing.T) {
 		if code := app.Run(context.Background(), []string{"completion", shell}); code != 0 {
 			t.Fatalf("%s completion code = %d, err = %s", shell, code, errOut.String())
 		}
-		for _, want := range []string{"active", "wait-all", "--json", "--timeout", "--interval"} {
+		for _, want := range []string{"active", "wait-all", "--json", "--timeout", "--interval", "--drain"} {
 			if !strings.Contains(out.String(), want) {
 				t.Fatalf("%s completion missing %q", shell, want)
 			}

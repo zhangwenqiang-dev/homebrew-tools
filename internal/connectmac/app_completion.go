@@ -121,7 +121,7 @@ func completionCommands() []string {
 	}
 }
 func completionJobCommands() []string {
-	return []string{"list", "status", "log", "wait", "run", "active", "wait-all"}
+	return []string{"list", "status", "log", "wait", "active", "wait-all"}
 }
 func completionProfileCommands() []string {
 	return []string{"accounts", "find", "show", "add", "wizard", "remove", "rename", "edit", "export", "import", "import-dir"}
@@ -293,7 +293,7 @@ _cm() {
 	  elif [[ "${words[3]}" == "active" ]]; then
 		_values 'job active option' --json
 	  elif [[ "${words[3]}" == "wait-all" ]]; then
-		_values 'job wait-all option' --timeout --interval
+		_values 'job wait-all option' --timeout --interval --drain
       fi
       ;;
     logs)
@@ -433,7 +433,7 @@ func bashCompletionScript() string {
 	  elif [[ "${COMP_WORDS[2]}" == "active" ]]; then
 		COMPREPLY=( $(compgen -W "--json" -- "$cur") )
 	  elif [[ "${COMP_WORDS[2]}" == "wait-all" ]]; then
-		COMPREPLY=( $(compgen -W "--timeout --interval" -- "$cur") )
+		COMPREPLY=( $(compgen -W "--timeout --interval --drain" -- "$cur") )
       fi
       ;;
     logs)
@@ -495,7 +495,7 @@ complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_f
 complete -c cm -n "__fish_seen_subcommand_from aws; and __fish_seen_subcommand_from destroy" -a "--background --notify"
 complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcommand_from (cm completion job-commands)" -a "(cm completion job-commands)"
 complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from active" -a "--json"
-complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from wait-all" -a "--timeout --interval"
+complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from wait-all" -a "--timeout --interval --drain"
 complete -c cm -n "__fish_seen_subcommand_from logs; and not __fish_seen_subcommand_from (cm completion logs-commands)" -a "(cm completion logs-commands)"
 complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_from export" -a "--output"
 complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"

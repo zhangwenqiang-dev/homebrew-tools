@@ -2,6 +2,8 @@ package connectmac
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const DefaultJobDir = "~/.connectmac/jobs"
@@ -30,6 +34,8 @@ const (
 
 const interruptedJobError = "background process exited before recording completion"
 
+const jobRunnerTokenEnv = "CM_JOB_RUNNER_TOKEN"
+
 type Job struct {
 	ID          string    `json:"id"`
 	Type        string    `json:"type"`
@@ -45,7 +51,14 @@ type Job struct {
 	ExitCode    *int      `json:"exit_code,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
 	CompletedBy int       `json:"completed_by,omitempty"`
+	RunnerToken string    `json:"runner_token,omitempty"`
 }
+
+type JobsDrainingError struct{}
+
+func (*JobsDrainingError) Error() string { return "background jobs are draining" }
+
+var ErrJobsDraining = &JobsDrainingError{}
 
 type JobManager struct {
 	Dir        string
@@ -110,21 +123,36 @@ func (m JobManager) Create(job Job) (Job, error) {
 	if job.ID == "" {
 		job.ID = newJobID(job.Type, job.Profile, job.StartedAt)
 	}
-	path, err := m.JobPath(job.ID)
+	var created Job
+	err := m.withGlobalLock(func(baseDir string) error {
+		if _, err := os.Stat(filepath.Join(baseDir, ".draining")); err == nil {
+			return ErrJobsDraining
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("check jobs drain marker: %w", err)
+		}
+		path, err := m.JobPath(job.ID)
+		if err != nil {
+			return err
+		}
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create job dir %s: %w", dir, err)
+		}
+		if job.Log == "" {
+			job.Log = filepath.Join(dir, "run.log")
+		}
+		return m.withJobLock(job.ID, func() error {
+			if err := m.Save(job); err != nil {
+				return err
+			}
+			created = job
+			return nil
+		})
+	})
 	if err != nil {
 		return Job{}, err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return Job{}, fmt.Errorf("create job dir %s: %w", dir, err)
-	}
-	if job.Log == "" {
-		job.Log = filepath.Join(dir, "run.log")
-	}
-	if err := m.Save(job); err != nil {
-		return Job{}, err
-	}
-	return job, nil
+	return created, nil
 }
 
 func (m JobManager) Save(job Job) error {
@@ -164,6 +192,16 @@ func (m JobManager) Save(job Job) error {
 }
 
 func (m JobManager) Load(id string) (Job, error) {
+	if _, err := m.loadRaw(id); err != nil {
+		return Job{}, err
+	}
+	if _, err := m.reconcileID(id); err != nil {
+		return Job{}, err
+	}
+	return m.loadRaw(id)
+}
+
+func (m JobManager) loadRaw(id string) (Job, error) {
 	path, err := m.JobPath(id)
 	if err != nil {
 		return Job{}, err
@@ -176,10 +214,20 @@ func (m JobManager) Load(id string) (Job, error) {
 	if err := json.Unmarshal(data, &job); err != nil {
 		return Job{}, err
 	}
+	if job.ID != id {
+		return Job{}, fmt.Errorf("job ID mismatch: requested %q, file contains %q", id, job.ID)
+	}
 	return job, nil
 }
 
 func (m JobManager) List() ([]Job, error) {
+	if _, err := m.Reconcile(); err != nil {
+		return nil, err
+	}
+	return m.listRaw()
+}
+
+func (m JobManager) listRaw() ([]Job, error) {
 	m = m.normalize()
 	dir, err := ExpandPath(m.Dir)
 	if err != nil {
@@ -197,7 +245,7 @@ func (m JobManager) List() ([]Job, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		job, err := m.Load(entry.Name())
+		job, err := m.loadRaw(entry.Name())
 		if err != nil {
 			return nil, fmt.Errorf("load job %s: %w", entry.Name(), err)
 		}
@@ -209,32 +257,54 @@ func (m JobManager) List() ([]Job, error) {
 	return jobs, nil
 }
 
-func (m JobManager) Reconcile() error {
+func (m JobManager) Reconcile() ([]Job, error) {
 	m = m.normalize()
-	jobs, err := m.List()
+	jobs, err := m.listRaw()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	changed := make([]Job, 0)
 	for _, job := range jobs {
+		updated, err := m.reconcileID(job.ID)
+		if err != nil {
+			return nil, err
+		}
+		if updated != nil {
+			changed = append(changed, *updated)
+		}
+	}
+	return changed, nil
+}
+
+func (m JobManager) reconcileID(id string) (*Job, error) {
+	m = m.normalize()
+	var changed *Job
+	err := m.withJobLock(id, func() error {
+		job, err := m.loadRaw(id)
+		if err != nil {
+			return err
+		}
 		if job.Status != JobStatusRunning || job.PID <= 0 || m.IsRunning(job.PID) {
-			continue
+			return nil
 		}
 		job.Status = JobStatusInterrupted
 		job.FinishedAt = m.Now()
 		job.LastError = interruptedJobError
 		if err := m.Save(job); err != nil {
-			return fmt.Errorf("save reconciled job %s: %w", job.ID, err)
+			return fmt.Errorf("save reconciled job %s: %w", id, err)
 		}
-	}
-	return nil
+		changed = &job
+		return nil
+	})
+	return changed, err
 }
 
 func (m JobManager) Active() ([]Job, error) {
 	m = m.normalize()
-	if err := m.Reconcile(); err != nil {
+	if _, err := m.Reconcile(); err != nil {
 		return nil, err
 	}
-	jobs, err := m.List()
+	jobs, err := m.listRaw()
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +326,7 @@ func (m JobManager) WaitAll(ctx context.Context, timeout, interval time.Duration
 		return fmt.Errorf("interval must be positive")
 	}
 	started := m.Now()
+	slept := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -268,7 +339,7 @@ func (m JobManager) WaitAll(ctx context.Context, timeout, interval time.Duration
 			return nil
 		}
 		elapsed := m.Now().Sub(started)
-		if elapsed > 0 && progress != nil {
+		if slept && progress != nil {
 			progress(elapsed, active)
 		}
 		if elapsed >= timeout {
@@ -281,7 +352,81 @@ func (m JobManager) WaitAll(ctx context.Context, timeout, interval time.Duration
 		if err := m.Sleep(ctx, wait); err != nil {
 			return err
 		}
+		slept = true
 	}
+}
+
+func (m JobManager) BeginDrain() error {
+	m = m.normalize()
+	return m.withGlobalLock(func(baseDir string) error {
+		path := filepath.Join(baseDir, ".draining")
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("create jobs drain marker: %w", err)
+		}
+		if err := file.Chmod(0o600); err != nil {
+			file.Close()
+			return fmt.Errorf("chmod jobs drain marker: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close jobs drain marker: %w", err)
+		}
+		return nil
+	})
+}
+
+func (m JobManager) EndDrain() error {
+	m = m.normalize()
+	return m.withGlobalLock(func(baseDir string) error {
+		if err := os.Remove(filepath.Join(baseDir, ".draining")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove jobs drain marker: %w", err)
+		}
+		return nil
+	})
+}
+
+func (m JobManager) withGlobalLock(fn func(baseDir string) error) error {
+	m = m.normalize()
+	baseDir, err := ExpandPath(m.Dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		return fmt.Errorf("create jobs dir %s: %w", baseDir, err)
+	}
+	return withFileLock(filepath.Join(baseDir, ".lock"), func() error { return fn(baseDir) })
+}
+
+func (m JobManager) withJobLock(id string, fn func() error) error {
+	path, err := m.JobPath(id)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create job dir %s: %w", dir, err)
+	}
+	return withFileLock(filepath.Join(dir, ".lock"), fn)
+}
+
+func withFileLock(path string, fn func() error) (err error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open lock file %s: %w", path, err)
+	}
+	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod lock file %s: %w", path, err)
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("lock %s: %w", path, err)
+	}
+	defer func() {
+		if unlockErr := unix.Flock(int(file.Fd()), unix.LOCK_UN); err == nil && unlockErr != nil {
+			err = fmt.Errorf("unlock %s: %w", path, unlockErr)
+		}
+	}()
+	return fn()
 }
 
 func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
@@ -291,51 +436,120 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 		var err error
 		executable, err = os.Executable()
 		if err != nil {
-			return Job{}, err
+			return m.failRunnerStartup(job.ID, err)
 		}
 	}
-	cmd := exec.CommandContext(ctx, executable, "job", "run", job.ID)
 	logFile, err := os.OpenFile(job.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return Job{}, err
+		return m.failRunnerStartup(job.ID, err)
 	}
 	defer logFile.Close()
+	token, err := newRunnerToken()
+	if err != nil {
+		return m.failRunnerStartup(job.ID, err)
+	}
+	cmd := exec.CommandContext(ctx, executable, "job", "run", job.ID)
+	cmd.Env = append(environmentWithout(jobRunnerTokenEnv), jobRunnerTokenEnv+"="+token)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		return Job{}, err
+	var started Job
+	err = m.withJobLock(job.ID, func() error {
+		current, err := m.loadRaw(job.ID)
+		if err != nil {
+			return err
+		}
+		if current.Status != JobStatusRunning || current.PID != 0 || current.CompletedBy != 0 {
+			return fmt.Errorf("job %s is not eligible to start", job.ID)
+		}
+		current.RunnerToken = token
+		if err := m.Save(current); err != nil {
+			return err
+		}
+		if err := cmd.Start(); err != nil {
+			current.Status = JobStatusFailed
+			current.FinishedAt = m.Now()
+			current.LastError = err.Error()
+			current.RunnerToken = ""
+			if saveErr := m.Save(current); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
+			started = current
+			return err
+		}
+		current.PID = cmd.Process.Pid
+		if err := m.Save(current); err != nil {
+			current.Status = JobStatusFailed
+			current.FinishedAt = m.Now()
+			current.LastError = err.Error()
+			current.RunnerToken = ""
+			_ = m.Save(current)
+			return err
+		}
+		if err := cmd.Process.Release(); err != nil {
+			current.Status = JobStatusFailed
+			current.FinishedAt = m.Now()
+			current.LastError = err.Error()
+			current.RunnerToken = ""
+			if saveErr := m.Save(current); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
+			return err
+		}
+		started = current
+		return nil
+	})
+	if err != nil {
+		if started.ID != "" {
+			return started, err
+		}
+		return m.failRunnerStartup(job.ID, err)
 	}
-	job.PID = cmd.Process.Pid
-	if err := cmd.Process.Release(); err != nil {
-		return Job{}, err
-	}
-	if err := m.Save(job); err != nil {
-		return Job{}, err
-	}
-	return job, nil
+	return started, nil
 }
 
 func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 	m = m.normalize()
-	job, err := m.Load(id)
+	token := os.Getenv(jobRunnerTokenEnv)
+	if token == "" {
+		return Job{}, errors.New("job run is restricted to the internal background runner")
+	}
+	var job Job
+	err := m.withJobLock(id, func() error {
+		current, err := m.loadRaw(id)
+		if err != nil {
+			return err
+		}
+		if current.Status != JobStatusRunning {
+			return fmt.Errorf("job %s cannot run with status %s", id, current.Status)
+		}
+		if current.RunnerToken == "" || current.RunnerToken != token {
+			return errors.New("invalid or already consumed background runner token")
+		}
+		if current.PID != 0 && current.CompletedBy != 0 {
+			return fmt.Errorf("job %s has already been claimed", id)
+		}
+		current.RunnerToken = ""
+		current.CompletedBy = os.Getpid()
+		if err := m.Save(current); err != nil {
+			return err
+		}
+		job = current
+		return nil
+	})
 	if err != nil {
 		return Job{}, err
 	}
 	if len(job.Command) == 0 {
-		job.Status = JobStatusFailed
-		job.LastError = "job command is empty"
-		finished := m.Now()
-		job.FinishedAt = finished
-		_ = m.Save(job)
-		return job, errors.New(job.LastError)
+		return m.finishRunJob(id, JobStatusFailed, nil, errors.New("job command is empty"))
 	}
 	logFile, err := os.OpenFile(job.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return Job{}, err
+		return m.finishRunJob(id, JobStatusFailed, nil, err)
 	}
 	defer logFile.Close()
 	fmt.Fprintf(logFile, "cm job %s started at %s\n", job.ID, m.Now().Format(time.RFC3339))
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
+	cmd.Env = environmentWithout(jobRunnerTokenEnv)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	err = cmd.Run()
@@ -348,14 +562,12 @@ func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 		}
 		job.LastError = err.Error()
 	}
-	job.ExitCode = &exitCode
-	job.CompletedBy = os.Getpid()
-	job.FinishedAt = m.Now()
-	job.Status = inferJobStatus(exitCode, readJobLog(job.Log))
-	fmt.Fprintf(logFile, "cm job %s finished with status %s at %s\n", job.ID, job.Status, job.FinishedAt.Format(time.RFC3339))
-	if saveErr := m.Save(job); saveErr != nil && err == nil {
-		err = saveErr
+	status := inferJobStatus(exitCode, readJobLog(job.Log))
+	job, finishErr := m.finishRunJob(id, status, &exitCode, err)
+	if finishErr != nil {
+		err = finishErr
 	}
+	fmt.Fprintf(logFile, "cm job %s finished with status %s at %s\n", job.ID, job.Status, job.FinishedAt.Format(time.RFC3339))
 	if job.Notify {
 		message := fmt.Sprintf("%s %s", job.Type, job.Status)
 		if job.Profile != "" {
@@ -366,9 +578,79 @@ func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 	return job, err
 }
 
+func (m JobManager) finishRunJob(id string, status JobStatus, exitCode *int, runErr error) (Job, error) {
+	var finished Job
+	err := m.withJobLock(id, func() error {
+		job, err := m.loadRaw(id)
+		if err != nil {
+			return err
+		}
+		if job.Status != JobStatusRunning {
+			finished = job
+			return fmt.Errorf("job %s changed to terminal status %s before runner completion", id, job.Status)
+		}
+		job.Status = status
+		job.ExitCode = exitCode
+		job.FinishedAt = m.Now()
+		if runErr != nil {
+			job.LastError = runErr.Error()
+		}
+		if err := m.Save(job); err != nil {
+			return err
+		}
+		finished = job
+		return nil
+	})
+	if err != nil {
+		return finished, errors.Join(runErr, err)
+	}
+	return finished, runErr
+}
+
+func (m JobManager) failRunnerStartup(id string, cause error) (Job, error) {
+	var failed Job
+	saveErr := m.withJobLock(id, func() error {
+		job, err := m.loadRaw(id)
+		if err != nil {
+			return err
+		}
+		if job.Status == JobStatusRunning && job.PID == 0 {
+			job.Status = JobStatusFailed
+			job.FinishedAt = m.Now()
+			job.LastError = cause.Error()
+			job.RunnerToken = ""
+			if err := m.Save(job); err != nil {
+				return err
+			}
+		}
+		failed = job
+		return nil
+	})
+	return failed, errors.Join(cause, saveErr)
+}
+
+func newRunnerToken() (string, error) {
+	data := make([]byte, 32)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate background runner token: %w", err)
+	}
+	return hex.EncodeToString(data), nil
+}
+
+func environmentWithout(key string) []string {
+	prefix := key + "="
+	environment := make([]string, 0, len(os.Environ()))
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, prefix) {
+			environment = append(environment, value)
+		}
+	}
+	return environment
+}
+
 func (m JobManager) JobPath(id string) (string, error) {
 	m = m.normalize()
-	if id == "" || strings.Contains(id, "/") || strings.Contains(id, string(os.PathSeparator)) {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) || strings.Contains(id, string(os.PathSeparator)) {
 		return "", fmt.Errorf("invalid job id %q", id)
 	}
 	dir, err := ExpandPath(m.Dir)

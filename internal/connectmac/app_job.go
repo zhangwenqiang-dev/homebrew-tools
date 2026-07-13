@@ -16,7 +16,7 @@ const (
 
 func (a App) runJob(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.Err, "usage: cm job <list|status|log|wait|run|active|wait-all>")
+		fmt.Fprintln(a.Err, "usage: cm job <list|status|log|wait|active|wait-all>")
 		return 2
 	}
 	switch args[0] {
@@ -121,11 +121,17 @@ func (a App) runJobActive(args []string) int {
 }
 
 func (a App) runJobWaitAll(ctx context.Context, args []string) int {
-	timeout, interval, err := parseJobWaitAllArgs(args)
+	timeout, interval, drain, err := parseJobWaitAllArgs(args)
 	if err != nil {
 		fmt.Fprintf(a.Err, "job wait-all: %v\n", err)
-		fmt.Fprintln(a.Err, "usage: cm job wait-all [--timeout 2h] [--interval 10s]")
+		fmt.Fprintln(a.Err, "usage: cm job wait-all [--timeout 2h] [--interval 10s] [--drain]")
 		return 2
+	}
+	if drain {
+		if err := a.JobManager.BeginDrain(); err != nil {
+			fmt.Fprintf(a.Err, "job wait-all failed to begin drain: %v\n", err)
+			return 1
+		}
 	}
 	err = a.JobManager.WaitAll(ctx, timeout, interval, func(elapsed time.Duration, active []Job) {
 		fmt.Fprintf(a.Out, "Waiting for background jobs: elapsed=%s active=%s\n", elapsed, strings.Join(jobIDsForOutput(active), ","))
@@ -133,6 +139,11 @@ func (a App) runJobWaitAll(ctx context.Context, args []string) int {
 	if err == nil {
 		fmt.Fprintln(a.Out, "All background jobs completed.")
 		return 0
+	}
+	if drain {
+		if cleanupErr := a.JobManager.EndDrain(); cleanupErr != nil {
+			fmt.Fprintf(a.Err, "job wait-all failed to end drain: %v\n", cleanupErr)
+		}
 	}
 	var timeoutErr *WaitAllTimeoutError
 	if errors.As(err, &timeoutErr) {
@@ -143,43 +154,51 @@ func (a App) runJobWaitAll(ctx context.Context, args []string) int {
 	return 1
 }
 
-func parseJobWaitAllArgs(args []string) (time.Duration, time.Duration, error) {
+func parseJobWaitAllArgs(args []string) (time.Duration, time.Duration, bool, error) {
 	timeout := defaultJobWaitAllTimeout
 	interval := defaultJobWaitAllInterval
+	drain := false
 	seenTimeout := false
 	seenInterval := false
 	for i := 0; i < len(args); i++ {
 		flag := args[i]
+		if flag == "--drain" {
+			if drain {
+				return 0, 0, false, errors.New("--drain may only be specified once")
+			}
+			drain = true
+			continue
+		}
 		if flag != "--timeout" && flag != "--interval" {
-			return 0, 0, fmt.Errorf("unknown argument %q", flag)
+			return 0, 0, false, fmt.Errorf("unknown argument %q", flag)
 		}
 		if i+1 >= len(args) {
-			return 0, 0, fmt.Errorf("%s requires a duration", flag)
+			return 0, 0, false, fmt.Errorf("%s requires a duration", flag)
 		}
 		i++
 		duration, err := time.ParseDuration(args[i])
 		if err != nil {
-			return 0, 0, fmt.Errorf("invalid %s duration %q: %w", strings.TrimPrefix(flag, "--"), args[i], err)
+			return 0, 0, false, fmt.Errorf("invalid %s duration %q: %w", strings.TrimPrefix(flag, "--"), args[i], err)
 		}
 		if duration <= 0 {
-			return 0, 0, fmt.Errorf("%s must be positive", strings.TrimPrefix(flag, "--"))
+			return 0, 0, false, fmt.Errorf("%s must be positive", strings.TrimPrefix(flag, "--"))
 		}
 		switch flag {
 		case "--timeout":
 			if seenTimeout {
-				return 0, 0, errors.New("--timeout may only be specified once")
+				return 0, 0, false, errors.New("--timeout may only be specified once")
 			}
 			seenTimeout = true
 			timeout = duration
 		case "--interval":
 			if seenInterval {
-				return 0, 0, errors.New("--interval may only be specified once")
+				return 0, 0, false, errors.New("--interval may only be specified once")
 			}
 			seenInterval = true
 			interval = duration
 		}
 	}
-	return timeout, interval, nil
+	return timeout, interval, drain, nil
 }
 
 func jobIDsForOutput(jobs []Job) []string {
@@ -194,6 +213,10 @@ func (a App) runJobWait(ctx context.Context, id string) int {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
+		if _, err := a.JobManager.Reconcile(); err != nil {
+			fmt.Fprintf(a.Err, "job wait failed: %v\n", err)
+			return 1
+		}
 		job, err := a.JobManager.Load(id)
 		if err != nil {
 			fmt.Fprintf(a.Err, "job wait failed: %v\n", err)
