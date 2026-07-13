@@ -41,6 +41,7 @@ type AutoReleaseStore interface {
 	ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error)
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
+	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 }
 
 type AutoReleaseJobs interface {
@@ -49,15 +50,14 @@ type AutoReleaseJobs interface {
 }
 
 type AutoReleaseCoordinator struct {
-	Now             func() time.Time
-	Store           AutoReleaseStore
-	Jobs            AutoReleaseJobs
-	ResolveProfile  func(context.Context, ReleaseReminder) (Profile, error)
-	Status          func(context.Context, Profile) (AWSStatus, error)
-	StartDestroy    func(context.Context, Profile) (Job, error)
-	CleanupReleased func(profileName, reason string, at time.Time) error
-	Notify          func(AutoReleaseNotification) error
-	Emit            func(AutoReleaseEvent)
+	Now            func() time.Time
+	Store          AutoReleaseStore
+	Jobs           AutoReleaseJobs
+	ResolveProfile func(context.Context, ReleaseReminder) (Profile, error)
+	Status         func(context.Context, Profile) (AWSStatus, error)
+	StartDestroy   func(context.Context, Profile) (Job, error)
+	Notify         func(AutoReleaseNotification) error
+	Emit           func(AutoReleaseEvent)
 }
 
 type autoReleaseErrorCategory uint8
@@ -133,7 +133,7 @@ func (c *AutoReleaseCoordinator) Scan(ctx context.Context) error {
 }
 
 func (c *AutoReleaseCoordinator) validate() error {
-	if c.Now == nil || c.Store == nil || c.Jobs == nil || c.ResolveProfile == nil || c.Status == nil || c.StartDestroy == nil || c.CleanupReleased == nil {
+	if c.Now == nil || c.Store == nil || c.Jobs == nil || c.ResolveProfile == nil || c.Status == nil || c.StartDestroy == nil {
 		return errors.New("automatic release coordinator dependencies are incomplete")
 	}
 	return nil
@@ -317,8 +317,15 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 		detail = fmt.Sprintf("destroy job %s completed as %s while managed resources remain", job.ID, job.Status)
 	}
 	cause := error(errors.New(detail))
-	if job.Status == JobStatusDeferred || job.Status == JobStatusSuccess {
+	switch job.ErrorCategory {
+	case JobErrorCategoryTerminal:
+		cause = TerminalAutoReleaseError(cause)
+	case JobErrorCategoryRecoverable:
 		cause = RecoverableAutoReleaseError(cause)
+	default:
+		if job.Status == JobStatusDeferred || job.Status == JobStatusSuccess {
+			cause = RecoverableAutoReleaseError(cause)
+		}
 	}
 	return c.recordAttemptFailure(reminder, now, cause, true)
 }
@@ -392,27 +399,26 @@ func (c *AutoReleaseCoordinator) completeRelease(reminder ReleaseReminder, profi
 	if err != nil {
 		return err
 	}
-	if err := c.CleanupReleased(reminder.ProfileName, "automatic release", now); err != nil {
-		return c.recordAttemptFailure(checked, now, RecoverableAutoReleaseError(fmt.Errorf("cleanup released profile records: %w", err)), true)
-	}
-	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
-		if !sameAutoReleaseClaim(current, checked) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
-			return current, errAutoReleaseCycleChanged
-		}
-		current.Status = ReleaseReminderStatusReleased
-		current.ReleasedAt = now.Format(time.RFC3339)
-		current.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
-		current.AutoReleaseLastError = ""
-		return current, nil
-	})
+	updated, err := c.Store.CompleteAutoRelease(releaseReminderCycleFromReminder(checked), now.Format(time.RFC3339))
 	if err != nil {
-		return err
+		return c.recordAttemptFailure(checked, now, RecoverableAutoReleaseError(fmt.Errorf("cleanup released profile records: %w", err)), true)
 	}
 	c.emit("released", updated, updated.AutoReleaseAttempts, "eip_retained=true")
 	if c.Notify != nil {
 		return c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationSuccess, Reminder: updated})
 	}
 	return nil
+}
+
+func releaseReminderCycleFromReminder(reminder ReleaseReminder) ReleaseReminderCycle {
+	return ReleaseReminderCycle{
+		ProfileName:          reminder.ProfileName,
+		AutoReleaseAt:        reminder.AutoReleaseAt,
+		AutoReleaseStartedAt: reminder.AutoReleaseStartedAt,
+		HostID:               reminder.HostID,
+		AppleEmail:           reminder.AppleEmail,
+		OwnerEmail:           reminder.OwnerEmail,
+	}
 }
 
 func (c *AutoReleaseCoordinator) emit(action string, reminder ReleaseReminder, attempt int, message string) {
@@ -523,6 +529,10 @@ func classifyAWSAutoReleaseError(err error) error {
 	if errors.As(err, &partial) {
 		return RecoverableAutoReleaseError(err)
 	}
+	var safety AWSSafetyError
+	if errors.As(err, &safety) {
+		return TerminalAutoReleaseError(err)
+	}
 	var apiError autoReleaseAPIError
 	if !errors.As(err, &apiError) {
 		return err
@@ -535,4 +545,33 @@ func classifyAWSAutoReleaseError(err error) error {
 	default:
 		return err
 	}
+}
+
+func autoReleaseJobOutcome(err error, safetyChecked bool, code string) JobOutcome {
+	if err == nil {
+		return JobOutcome{}
+	}
+	err = classifyAWSAutoReleaseError(err)
+	category := autoReleaseErrorCategoryOf(err)
+	if category == autoReleaseErrorUnknown && !safetyChecked {
+		category = autoReleaseErrorTerminal
+	}
+	jobCategory := JobErrorCategoryUnknown
+	switch category {
+	case autoReleaseErrorRecoverable:
+		jobCategory = JobErrorCategoryRecoverable
+	case autoReleaseErrorTerminal:
+		jobCategory = JobErrorCategoryTerminal
+	}
+	if code == "" {
+		var apiError autoReleaseAPIError
+		if errors.As(err, &apiError) {
+			code = apiError.ErrorCode()
+		}
+		var safety AWSSafetyError
+		if errors.As(err, &safety) {
+			code = "resource_safety"
+		}
+	}
+	return JobOutcome{ErrorCategory: jobCategory, ErrorCode: code, Reason: redactWechatWebhookURL(err.Error())}
 }

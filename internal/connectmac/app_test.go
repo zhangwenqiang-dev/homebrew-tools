@@ -3892,7 +3892,7 @@ func TestAppJobListStatusAndLog(t *testing.T) {
 	}
 }
 
-func TestJobManagerRunJobMarksDeferred(t *testing.T) {
+func TestJobManagerRunJobMarksStructuredDeferred(t *testing.T) {
 	dir := t.TempDir()
 	manager := NewJobManager(filepath.Join(dir, "jobs"))
 	manager.Now = func() time.Time {
@@ -3900,10 +3900,11 @@ func TestJobManagerRunJobMarksDeferred(t *testing.T) {
 	}
 	manager.Notify = func(title, message string) error { return nil }
 	job, err := manager.Create(Job{
-		Type:        "aws-destroy",
-		Profile:     "xcode-vnc",
-		Status:      JobStatusRunning,
-		Command:     []string{"/bin/echo", "Need rerun: true"},
+		Type:    "aws-destroy",
+		Profile: "xcode-vnc",
+		Status:  JobStatusRunning,
+		Command: []string{"/bin/sh", "-c",
+			`printf '%s' '{"error_category":"recoverable","error_code":"host_transition","reason":"host is pending","deferred":true}' > "$CM_JOB_OUTCOME_PATH"`},
 		Notify:      true,
 		RunnerToken: "test-runner-token",
 	})
@@ -3917,6 +3918,9 @@ func TestJobManagerRunJobMarksDeferred(t *testing.T) {
 	}
 	if job.Status != JobStatusDeferred {
 		t.Fatalf("status = %s", job.Status)
+	}
+	if job.ErrorCategory != JobErrorCategoryRecoverable || job.ErrorCode != "host_transition" || job.LastError != "host is pending" {
+		t.Fatalf("structured outcome = %+v", job)
 	}
 	if job.ExitCode == nil || *job.ExitCode != 0 {
 		t.Fatalf("exit code = %#v", job.ExitCode)

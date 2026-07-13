@@ -28,6 +28,10 @@ const mysqlReleaseReminderInsertQuery = `INSERT INTO cm_release_reminders (profi
 
 const mysqlReleaseReminderUpdateQuery = `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 
+const mysqlProfileOwnerForUpdateQuery = `SELECT o.member_id, COALESCE(m.email, '') FROM cm_profile_owners o LEFT JOIN cm_members m ON m.id = o.member_id WHERE o.profile_name = ? FOR UPDATE`
+
+const mysqlDeleteMatchingProfileOwnerQuery = `DELETE FROM cm_profile_owners WHERE profile_name = ? AND member_id = ?`
+
 const mysqlStoreLockName = "member_store"
 
 const mysqlStoreLockForUpdateQuery = `SELECT version FROM cm_store_locks WHERE lock_name = ? FOR UPDATE`
@@ -746,6 +750,31 @@ func (s MySQLMemberStore) UpdateReleaseReminder(profileName string, update func(
 	return result, nil
 }
 
+func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {
+	defer s.lockMutation()()
+	if err := s.EnsureSchema(); err != nil {
+		return ReleaseReminder{}, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	if releasedAt == "" {
+		releasedAt = s.currentTime().Format(time.RFC3339)
+	}
+	releasedTime, err := time.Parse(time.RFC3339, releasedAt)
+	if err != nil {
+		_ = tx.Rollback()
+		return ReleaseReminder{}, err
+	}
+	return completeAutoReleaseInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, cycle, releasedTime)
+}
+
 type mysqlReleaseReminderExecer interface {
 	Exec(query string, args ...any) error
 }
@@ -940,6 +969,61 @@ func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 	}
 	committed = true
 	return updated, nil
+}
+
+func completeAutoReleaseInMySQLTransaction(tx mysqlReleaseReminderTransaction, cycle ReleaseReminderCycle, releasedAt time.Time) (updated ReleaseReminder, err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
+	var current ReleaseReminder
+	if err = scanMySQLReleaseReminder(tx.QueryRow(mysqlReleaseReminderSelectForUpdate, cycle.ProfileName), &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ReleaseReminder{}, releaseReminderNotFoundError(cycle.ProfileName)
+		}
+		return ReleaseReminder{}, err
+	}
+	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || !current.AutoReleaseEnabled {
+		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+	}
+	ownerMemberID := ""
+	ownerEmail := ""
+	ownerErr := tx.QueryRow(mysqlProfileOwnerForUpdateQuery, cycle.ProfileName).Scan(&ownerMemberID, &ownerEmail)
+	if ownerErr != nil && !errors.Is(ownerErr, sql.ErrNoRows) {
+		return ReleaseReminder{}, ownerErr
+	}
+	if ownerErr == nil && normalizeEmail(ownerEmail) != normalizeEmail(cycle.OwnerEmail) {
+		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+	}
+	current.Status = ReleaseReminderStatusReleased
+	current.ReleasedAt = releasedAt.Format(time.RFC3339)
+	current.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	current.AutoReleaseLastError = ""
+	current.UpdatedAt = releasedAt.Format(time.RFC3339)
+	if err = updateMySQLReleaseReminder(tx, cycle.ProfileName, current); err != nil {
+		return ReleaseReminder{}, err
+	}
+	if ownerErr == nil {
+		if err = tx.Exec(mysqlDeleteMatchingProfileOwnerQuery, cycle.ProfileName, ownerMemberID); err != nil {
+			return ReleaseReminder{}, err
+		}
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ReleaseReminder{}, err
+	}
+	committed = true
+	return current, nil
 }
 
 func (s MySQLMemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {

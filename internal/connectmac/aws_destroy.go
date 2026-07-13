@@ -26,7 +26,7 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 			continue
 		}
 		if !managedTagsMatch(instance.Tags, plan) {
-			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to terminate instance %s because required safety tags do not match: %s", instance.InstanceID, managedTagsMismatch(instance.Tags, plan))
+			return MacPlan{}, AWSDestroyResult{}, AWSSafetyError{Cause: fmt.Errorf("refuse to terminate instance %s because required safety tags do not match: %s", instance.InstanceID, managedTagsMismatch(instance.Tags, plan))}
 		}
 		if status.ElasticIP.AssociationID != "" && status.ElasticIP.InstanceID == instance.InstanceID {
 			s.progress("Disassociating Elastic IP %s from instance %s", status.ElasticIP.AssociationID, instance.InstanceID)
@@ -51,7 +51,7 @@ func (s AWSService) Destroy(ctx context.Context, profile Profile) (MacPlan, AWSD
 			continue
 		}
 		if !managedTagsMatch(host.Tags, plan) {
-			return MacPlan{}, AWSDestroyResult{}, fmt.Errorf("refuse to release host %s because required safety tags do not match: %s", host.HostID, managedTagsMismatch(host.Tags, plan))
+			return MacPlan{}, AWSDestroyResult{}, AWSSafetyError{Cause: fmt.Errorf("refuse to release host %s because required safety tags do not match: %s", host.HostID, managedTagsMismatch(host.Tags, plan))}
 		}
 		released, reason, err := s.releaseHostWithRetry(ctx, client, host)
 		if err != nil {

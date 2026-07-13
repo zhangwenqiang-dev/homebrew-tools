@@ -119,6 +119,17 @@ type AWSDestroyPartialError struct {
 	Cause  error
 }
 
+type AWSSafetyError struct{ Cause error }
+
+func (e AWSSafetyError) Error() string {
+	if e.Cause == nil {
+		return "AWS resource safety validation failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e AWSSafetyError) Unwrap() error { return e.Cause }
+
 func (e AWSDestroyPartialError) Error() string {
 	if e.Cause == nil {
 		return "aws destroy partially completed"

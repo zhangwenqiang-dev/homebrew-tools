@@ -97,6 +97,7 @@ func readInputLine(r io.Reader) (string, error) {
 func (a App) loadConfig(path string) (Config, int) {
 	cfg, err := LoadConfig(path)
 	if err != nil {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(TerminalAutoReleaseError(err), false, "config"))
 		fmt.Fprintln(a.Err, err)
 		return Config{}, 1
 	}
@@ -113,6 +114,7 @@ func (a App) loadCommandConfig(ctx context.Context, configPath string) (Config, 
 	}
 	remoteCfg, err := a.loadRemoteListConfig(ctx, configPath, cfg)
 	if err != nil {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(err, false, "remote_config"))
 		fmt.Fprintln(a.Err, err)
 		return Config{}, 1
 	}

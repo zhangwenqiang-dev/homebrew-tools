@@ -36,24 +36,44 @@ const (
 const interruptedJobError = "background process exited before recording completion"
 
 const jobRunnerTokenEnv = "CM_JOB_RUNNER_TOKEN"
+const jobOutcomePathEnv = "CM_JOB_OUTCOME_PATH"
+
+type JobErrorCategory string
+
+const (
+	JobErrorCategoryRecoverable JobErrorCategory = "recoverable"
+	JobErrorCategoryTerminal    JobErrorCategory = "terminal"
+	JobErrorCategoryUnknown     JobErrorCategory = "unknown"
+)
+
+type JobOutcome struct {
+	ErrorCategory JobErrorCategory `json:"error_category,omitempty"`
+	ErrorCode     string           `json:"error_code,omitempty"`
+	Reason        string           `json:"reason,omitempty"`
+	Deferred      bool             `json:"deferred,omitempty"`
+}
 
 type Job struct {
-	ID          string    `json:"id"`
-	Type        string    `json:"type"`
-	Profile     string    `json:"profile"`
-	AppleEmail  string    `json:"apple_email,omitempty"`
-	Status      JobStatus `json:"status"`
-	PID         int       `json:"pid,omitempty"`
-	CreatorPID  int       `json:"creator_pid,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	FinishedAt  time.Time `json:"finished_at,omitempty"`
-	Log         string    `json:"log"`
-	Command     []string  `json:"command"`
-	Notify      bool      `json:"notify"`
-	ExitCode    *int      `json:"exit_code,omitempty"`
-	LastError   string    `json:"last_error,omitempty"`
-	CompletedBy int       `json:"completed_by,omitempty"`
-	RunnerToken string    `json:"runner_token,omitempty"`
+	ID            string           `json:"id"`
+	Type          string           `json:"type"`
+	Profile       string           `json:"profile"`
+	AppleEmail    string           `json:"apple_email,omitempty"`
+	Status        JobStatus        `json:"status"`
+	PID           int              `json:"pid,omitempty"`
+	CreatorPID    int              `json:"creator_pid,omitempty"`
+	StartedAt     time.Time        `json:"started_at"`
+	FinishedAt    time.Time        `json:"finished_at,omitempty"`
+	Log           string           `json:"log"`
+	Command       []string         `json:"command"`
+	Notify        bool             `json:"notify"`
+	ExitCode      *int             `json:"exit_code,omitempty"`
+	LastError     string           `json:"last_error,omitempty"`
+	ErrorCategory JobErrorCategory `json:"error_category,omitempty"`
+	ErrorCode     string           `json:"error_code,omitempty"`
+	OutcomePath   string           `json:"outcome_path,omitempty"`
+	CleanupPaths  []string         `json:"cleanup_paths,omitempty"`
+	CompletedBy   int              `json:"completed_by,omitempty"`
+	RunnerToken   string           `json:"runner_token,omitempty"`
 }
 
 type JobsDrainingError struct{}
@@ -61,6 +81,21 @@ type JobsDrainingError struct{}
 func (*JobsDrainingError) Error() string { return "background jobs are draining" }
 
 var ErrJobsDraining = &JobsDrainingError{}
+
+type DuplicateActiveJobError struct {
+	Type     string
+	Profile  string
+	Existing Job
+}
+
+func (e *DuplicateActiveJobError) Error() string {
+	return fmt.Sprintf("active %s job already exists for profile %s: %s", e.Type, e.Profile, e.Existing.ID)
+}
+
+func IsDuplicateActiveJob(err error, jobType, profile string) bool {
+	var duplicate *DuplicateActiveJobError
+	return errors.As(err, &duplicate) && duplicate.Type == jobType && duplicate.Profile == profile
+}
 
 type JobManager struct {
 	Dir        string
@@ -133,6 +168,17 @@ func (m JobManager) Create(job Job) (Job, error) {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("check jobs drain marker: %w", err)
 		}
+		if job.Type == "aws-destroy" {
+			jobs, err := m.listRaw()
+			if err != nil {
+				return err
+			}
+			for _, existing := range jobs {
+				if existing.Type == job.Type && existing.Profile == job.Profile && (existing.Status == JobStatusStarting || existing.Status == JobStatusRunning) {
+					return &DuplicateActiveJobError{Type: job.Type, Profile: job.Profile, Existing: existing}
+				}
+			}
+		}
 		path, err := m.JobPath(job.ID)
 		if err != nil {
 			return err
@@ -153,6 +199,7 @@ func (m JobManager) Create(job Job) (Job, error) {
 		})
 	})
 	if err != nil {
+		_ = removeJobPaths(job.CleanupPaths)
 		return Job{}, err
 	}
 	return created, nil
@@ -300,6 +347,8 @@ func (m JobManager) reconcileID(id string) (*Job, error) {
 		job.Status = JobStatusInterrupted
 		job.FinishedAt = m.Now()
 		job.LastError = interruptedJobError
+		m.applyPersistedOutcome(&job)
+		m.cleanupFinishedJob(&job)
 		if err := m.Save(job); err != nil {
 			return fmt.Errorf("save reconciled job %s: %w", id, err)
 		}
@@ -481,6 +530,7 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 			current.LastError = err.Error()
 			current.RunnerToken = ""
 			current.CreatorPID = 0
+			m.cleanupFinishedJob(&current)
 			if saveErr := m.Save(current); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
@@ -495,6 +545,7 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 			current.FinishedAt = m.Now()
 			current.LastError = err.Error()
 			current.RunnerToken = ""
+			m.cleanupFinishedJob(&current)
 			_ = m.Save(current)
 			return err
 		}
@@ -503,6 +554,7 @@ func (m JobManager) StartRunner(ctx context.Context, job Job) (Job, error) {
 			current.FinishedAt = m.Now()
 			current.LastError = err.Error()
 			current.RunnerToken = ""
+			m.cleanupFinishedJob(&current)
 			if saveErr := m.Save(current); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
@@ -543,6 +595,10 @@ func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 		}
 		current.RunnerToken = ""
 		current.CompletedBy = os.Getpid()
+		current.OutcomePath = filepath.Join(filepath.Dir(current.Log), "outcome.json")
+		if err := os.Remove(current.OutcomePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		if err := m.Save(current); err != nil {
 			return err
 		}
@@ -553,16 +609,16 @@ func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 		return Job{}, err
 	}
 	if len(job.Command) == 0 {
-		return m.finishRunJob(id, JobStatusFailed, nil, errors.New("job command is empty"))
+		return m.finishRunJob(id, JobStatusFailed, nil, errors.New("job command is empty"), nil)
 	}
 	logFile, err := os.OpenFile(job.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return m.finishRunJob(id, JobStatusFailed, nil, err)
+		return m.finishRunJob(id, JobStatusFailed, nil, err, nil)
 	}
 	defer logFile.Close()
 	fmt.Fprintf(logFile, "cm job %s started at %s\n", job.ID, m.Now().Format(time.RFC3339))
 	cmd := exec.CommandContext(ctx, job.Command[0], job.Command[1:]...)
-	cmd.Env = environmentWithout(jobRunnerTokenEnv)
+	cmd.Env = append(environmentWithout(jobRunnerTokenEnv, jobOutcomePathEnv), jobOutcomePathEnv+"="+job.OutcomePath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	err = cmd.Run()
@@ -575,8 +631,19 @@ func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 		}
 		job.LastError = err.Error()
 	}
-	status := inferJobStatus(exitCode, readJobLog(job.Log))
-	job, finishErr := m.finishRunJob(id, status, &exitCode, err)
+	outcome, outcomeErr := readJobOutcome(job.OutcomePath)
+	if outcomeErr != nil && !errors.Is(outcomeErr, os.ErrNotExist) {
+		if err == nil {
+			err = outcomeErr
+		}
+	}
+	status := JobStatusSuccess
+	if exitCode != 0 {
+		status = JobStatusFailed
+	} else if outcome != nil && outcome.Deferred {
+		status = JobStatusDeferred
+	}
+	job, finishErr := m.finishRunJob(id, status, &exitCode, err, outcome)
 	if finishErr != nil {
 		err = finishErr
 	}
@@ -591,7 +658,7 @@ func (m JobManager) RunJob(ctx context.Context, id string) (Job, error) {
 	return job, err
 }
 
-func (m JobManager) finishRunJob(id string, status JobStatus, exitCode *int, runErr error) (Job, error) {
+func (m JobManager) finishRunJob(id string, status JobStatus, exitCode *int, runErr error, outcome *JobOutcome) (Job, error) {
 	var finished Job
 	err := m.withJobLock(id, func() error {
 		job, err := m.loadRaw(id)
@@ -608,6 +675,14 @@ func (m JobManager) finishRunJob(id string, status JobStatus, exitCode *int, run
 		if runErr != nil {
 			job.LastError = runErr.Error()
 		}
+		if outcome != nil {
+			job.ErrorCategory = outcome.ErrorCategory
+			job.ErrorCode = outcome.ErrorCode
+			if outcome.Reason != "" {
+				job.LastError = outcome.Reason
+			}
+		}
+		m.cleanupFinishedJob(&job)
 		if err := m.Save(job); err != nil {
 			return err
 		}
@@ -633,6 +708,7 @@ func (m JobManager) failRunnerStartup(id string, cause error) (Job, error) {
 			job.LastError = cause.Error()
 			job.RunnerToken = ""
 			job.CreatorPID = 0
+			m.cleanupFinishedJob(&job)
 			if err := m.Save(job); err != nil {
 				return err
 			}
@@ -651,11 +727,108 @@ func newRunnerToken() (string, error) {
 	return hex.EncodeToString(data), nil
 }
 
-func environmentWithout(key string) []string {
-	prefix := key + "="
+func readJobOutcome(path string) (*JobOutcome, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, os.ErrNotExist
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var outcome JobOutcome
+	if err := json.Unmarshal(data, &outcome); err != nil {
+		return nil, fmt.Errorf("read structured job outcome: %w", err)
+	}
+	return &outcome, nil
+}
+
+func writeCurrentJobOutcome(outcome JobOutcome) error {
+	path := strings.TrimSpace(os.Getenv(jobOutcomePathEnv))
+	if path == "" {
+		return nil
+	}
+	data, err := json.Marshal(outcome)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".outcome-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+func (m JobManager) applyPersistedOutcome(job *Job) {
+	outcome, err := readJobOutcome(job.OutcomePath)
+	if err != nil || outcome == nil {
+		return
+	}
+	job.ErrorCategory = outcome.ErrorCategory
+	job.ErrorCode = outcome.ErrorCode
+	if outcome.Reason != "" {
+		job.LastError = outcome.Reason
+	}
+	if outcome.Deferred {
+		job.Status = JobStatusDeferred
+	}
+}
+
+func (m JobManager) cleanupFinishedJob(job *Job) {
+	if job.OutcomePath != "" {
+		if err := os.Remove(job.OutcomePath); err == nil || errors.Is(err, os.ErrNotExist) {
+			job.OutcomePath = ""
+		}
+	}
+	remaining := job.CleanupPaths[:0]
+	for _, path := range job.CleanupPaths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			remaining = append(remaining, path)
+		}
+	}
+	job.CleanupPaths = remaining
+}
+
+func removeJobPaths(paths []string) error {
+	var result error
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
+}
+
+func environmentWithout(keys ...string) []string {
+	prefixes := make([]string, len(keys))
+	for i, key := range keys {
+		prefixes[i] = key + "="
+	}
 	environment := make([]string, 0, len(os.Environ()))
 	for _, value := range os.Environ() {
-		if !strings.HasPrefix(value, prefix) {
+		keep := true
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(value, prefix) {
+				keep = false
+				break
+			}
+		}
+		if keep {
 			environment = append(environment, value)
 		}
 	}
@@ -715,25 +888,6 @@ func slugPart(value string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
-}
-
-func inferJobStatus(exitCode int, logText string) JobStatus {
-	if exitCode != 0 {
-		return JobStatusFailed
-	}
-	lower := strings.ToLower(logText)
-	if strings.Contains(lower, "need rerun: true") || strings.Contains(lower, "deferred") {
-		return JobStatusDeferred
-	}
-	return JobStatusSuccess
-}
-
-func readJobLog(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(data)
 }
 
 func formatJobsTable(jobs []Job) string {

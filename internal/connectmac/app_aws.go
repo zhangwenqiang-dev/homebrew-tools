@@ -74,6 +74,7 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string, configPath s
 	}
 	profile, err := resolveProfileRef(cfg, profileRef)
 	if err != nil {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(TerminalAutoReleaseError(err), false, "profile"))
 		fmt.Fprintln(a.Err, err)
 		return 2
 	}
@@ -90,11 +91,13 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string, configPath s
 	}
 	errs := a.Validator.ValidateAWSProfile(profile)
 	if len(errs) > 0 {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(TerminalAutoReleaseError(errors.Join(errs...)), false, "validation"))
 		printErrors(a.Err, errs)
 		return 1
 	}
 	plan, err := a.AWSService.Plan(profile)
 	if err != nil {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(TerminalAutoReleaseError(err), false, "plan"))
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
@@ -267,6 +270,7 @@ func (a App) startAWSDestroyJob(ctx context.Context, profile Profile, plan MacPl
 func (a App) runAWSDestroy(ctx context.Context, profile Profile, plan MacPlan, confirm bool) int {
 	_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
 	if err != nil {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(err, false, "status"))
 		fmt.Fprintf(a.Err, "aws destroy preview failed: %v\n", err)
 		return 1
 	}
@@ -278,6 +282,7 @@ func (a App) runAWSDestroy(ctx context.Context, profile Profile, plan MacPlan, c
 	service := a.awsServiceWithProgress()
 	_, result, err := service.Destroy(ctx, profile)
 	if err != nil {
+		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(err, true, "destroy"))
 		var partial AWSDestroyPartialError
 		if errors.As(err, &partial) {
 			fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, partial.Result))
@@ -290,6 +295,12 @@ func (a App) runAWSDestroy(ctx context.Context, profile Profile, plan MacPlan, c
 	}
 	fmt.Fprint(a.Out, FormatAWSDestroyResult(plan, result))
 	a.printAWSDestroyFinalStatus(ctx, profile)
+	if len(result.DeferredHosts) > 0 {
+		reason := fmt.Sprintf("AWS destroy deferred for %d dedicated host transition(s)", len(result.DeferredHosts))
+		_ = writeCurrentJobOutcome(JobOutcome{ErrorCategory: JobErrorCategoryRecoverable, ErrorCode: "host_transition", Reason: reason, Deferred: true})
+	} else {
+		_ = writeCurrentJobOutcome(JobOutcome{})
+	}
 	return 0
 }
 func (a App) printAWSDestroyFinalStatus(ctx context.Context, profile Profile) {

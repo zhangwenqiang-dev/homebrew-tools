@@ -95,6 +95,7 @@ func (r fakeMySQLReleaseReminderRow) Scan(dest ...any) error {
 
 type fakeMySQLReleaseReminderTransaction struct {
 	row          mysqlReleaseReminderScanner
+	ownerRow     mysqlReleaseReminderScanner
 	query        string
 	queryArgs    []any
 	execQuery    string
@@ -109,12 +110,16 @@ type fakeMySQLReleaseReminderTransaction struct {
 	queryRows    []ReleaseReminder
 	queryRowsErr error
 	operations   []string
+	ownerDeleted bool
 }
 
 func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...any) mysqlReleaseReminderScanner {
 	tx.operations = append(tx.operations, "query-row:"+query)
 	if query == mysqlStoreLockForUpdateQuery {
 		return fakeMySQLStoreLockRow{version: tx.lockVersion}
+	}
+	if query == mysqlProfileOwnerForUpdateQuery {
+		return tx.ownerRow
 	}
 	tx.query = query
 	tx.queryArgs = args
@@ -131,6 +136,9 @@ func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) e
 	if query == mysqlReleaseReminderInsertQuery || query == mysqlReleaseReminderUpdateQuery {
 		tx.execQuery = query
 		tx.execArgs = args
+	}
+	if query == mysqlDeleteMatchingProfileOwnerQuery {
+		tx.ownerDeleted = true
 	}
 	if tx.execErr == nil && len(args) == 22 {
 		tx.written = ReleaseReminder{

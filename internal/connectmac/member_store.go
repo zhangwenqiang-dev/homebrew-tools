@@ -71,6 +71,7 @@ type MemberRepository interface {
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
+	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
 	WebSettings() (WebSettings, error)
@@ -177,6 +178,17 @@ type ReleaseReminder struct {
 	CreatedAt                string `json:"created_at"`
 	UpdatedAt                string `json:"updated_at"`
 }
+
+type ReleaseReminderCycle struct {
+	ProfileName          string
+	AutoReleaseAt        string
+	AutoReleaseStartedAt string
+	HostID               string
+	AppleEmail           string
+	OwnerEmail           string
+}
+
+var ErrReleaseReminderCycleChanged = errors.New("release reminder cycle changed")
 
 type OperationEvent struct {
 	ID         string `json:"id"`
@@ -815,6 +827,74 @@ func (s MemberStore) MarkReleaseReminderReleased(profileName, releasedAt string)
 		reminder.ReleasedAt = releasedAt
 		return reminder, nil
 	})
+}
+
+func (s MemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer unlock()
+	if releasedAt == "" {
+		releasedAt = s.currentTime().Format(time.RFC3339)
+	}
+	s = s.normalize()
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	completed, err := completeAutoReleaseInData(&db, cycle, releasedAt, s.currentTime().Format(time.RFC3339))
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err := s.saveUnlocked(db); err != nil {
+		return ReleaseReminder{}, err
+	}
+	return completed, nil
+}
+
+func completeAutoReleaseInData(db *MemberData, cycle ReleaseReminderCycle, releasedAt, updatedAt string) (ReleaseReminder, error) {
+	for i := range db.Reminders {
+		current := db.Reminders[i]
+		if current.ProfileName != cycle.ProfileName {
+			continue
+		}
+		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || !current.AutoReleaseEnabled {
+			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+		}
+		ownerIndex := -1
+		for j, owner := range db.ProfileOwners {
+			if owner.ProfileName != cycle.ProfileName {
+				continue
+			}
+			member, ok := findMemberByID(*db, owner.MemberID)
+			if !ok || normalizeEmail(member.Email) != normalizeEmail(cycle.OwnerEmail) {
+				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+			}
+			ownerIndex = j
+			break
+		}
+		if ownerIndex >= 0 {
+			db.ProfileOwners = append(db.ProfileOwners[:ownerIndex], db.ProfileOwners[ownerIndex+1:]...)
+		}
+		current.Status = ReleaseReminderStatusReleased
+		current.ReleasedAt = releasedAt
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+		current.AutoReleaseLastError = ""
+		current.UpdatedAt = updatedAt
+		db.Reminders[i] = current
+		return current, nil
+	}
+	return ReleaseReminder{}, releaseReminderNotFoundError(cycle.ProfileName)
+}
+
+func releaseReminderMatchesCycle(reminder ReleaseReminder, cycle ReleaseReminderCycle) bool {
+	return reminder.ProfileName == cycle.ProfileName &&
+		reminder.AutoReleaseAt == cycle.AutoReleaseAt &&
+		reminder.AutoReleaseStartedAt == cycle.AutoReleaseStartedAt &&
+		reminder.HostID == cycle.HostID &&
+		reminder.AppleEmail == cycle.AppleEmail &&
+		normalizeEmail(reminder.OwnerEmail) == normalizeEmail(cycle.OwnerEmail)
 }
 
 func (s MemberStore) mutateReleaseReminders(mutate func(*MemberData, string) (ReleaseReminder, error)) (ReleaseReminder, error) {

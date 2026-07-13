@@ -255,15 +255,8 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 			if err != nil {
 				return Job{}, TerminalAutoReleaseError(err)
 			}
-			job, _, err := a.startAWSJobForResolvedProfile(ctx, runConfigPath, "destroy", profile, true)
+			job, _, err := a.startAWSJobForResolvedProfile(ctx, runConfigPath, "destroy", profile, true, runConfigPath)
 			return job, err
-		},
-		CleanupReleased: func(profileName, reason string, _ time.Time) error {
-			if err := a.clearProfileOwnerForCleanup(profileName); err != nil {
-				return err
-			}
-			_ = a.MemberStore.RecordEvent(OperationEvent{Action: "cleanup-records", Profile: profileName, Confirmed: true, Status: "success", Message: "cleared profile owner (" + reason + ")"})
-			return nil
 		},
 		Notify: func(notification AutoReleaseNotification) error {
 			description := "Mac 释放提醒已到期"
@@ -1814,8 +1807,13 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef str
 	return webAPIResponse{OK: true, Code: 0, Output: out.String(), Data: map[string]interface{}{"job": job}}
 }
 
-func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, command string, profile Profile, notify bool) (Job, MacPlan, error) {
-	plan, err := a.AWSService.Plan(profile)
+func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, command string, profile Profile, notify bool, cleanupPaths ...string) (job Job, plan MacPlan, err error) {
+	defer func() {
+		if err != nil {
+			_ = removeJobPaths(cleanupPaths)
+		}
+	}()
+	plan, err = a.AWSService.Plan(profile)
 	if err != nil {
 		return Job{}, MacPlan{}, err
 	}
@@ -1823,12 +1821,13 @@ func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, comm
 	if err != nil {
 		return Job{}, MacPlan{}, err
 	}
-	job, err := a.JobManager.Create(Job{
-		Type:       "aws-" + command,
-		Profile:    profile.Name,
-		AppleEmail: plan.AccountEmail,
-		Command:    []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath},
-		Notify:     notify,
+	job, err = a.JobManager.Create(Job{
+		Type:         "aws-" + command,
+		Profile:      profile.Name,
+		AppleEmail:   plan.AccountEmail,
+		Command:      []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath},
+		Notify:       notify,
+		CleanupPaths: append([]string(nil), cleanupPaths...),
 	})
 	if err != nil {
 		return Job{}, MacPlan{}, err

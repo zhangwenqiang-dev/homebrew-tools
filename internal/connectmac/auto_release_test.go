@@ -569,7 +569,7 @@ func (s *autoReleaseTestStore) UpdateReleaseReminder(profile string, update func
 	return updated, nil
 }
 
-func (s *autoReleaseTestStore) CleanupReleased(_ string, _ string, _ time.Time) error {
+func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupCalls++
@@ -577,10 +577,19 @@ func (s *autoReleaseTestStore) CleanupReleased(_ string, _ string, _ time.Time) 
 		err := s.cleanupErrors[0]
 		s.cleanupErrors = s.cleanupErrors[1:]
 		if err != nil {
-			return err
+			return ReleaseReminder{}, err
 		}
 	}
-	return nil
+	reminder := s.reminders[cycle.ProfileName]
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
+		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+	}
+	reminder.Status = ReleaseReminderStatusReleased
+	reminder.ReleasedAt = releasedAt
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	reminder.AutoReleaseLastError = ""
+	s.reminders[cycle.ProfileName] = reminder
+	return reminder, nil
 }
 
 func (s *autoReleaseTestStore) mutate(profile string, mutate func(*ReleaseReminder)) {
@@ -629,7 +638,6 @@ func newAutoReleaseTestCoordinator(now time.Time, store *autoReleaseTestStore) (
 			notifications = append(notifications, notification)
 			return nil
 		},
-		CleanupReleased: store.CleanupReleased,
 	}
 	return coordinator, &notifications, &starts
 }
