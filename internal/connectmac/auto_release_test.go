@@ -79,6 +79,59 @@ func TestAutoReleaseAtomicClaimLosesToExtension(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseRechecksPersistedCycleAfterStatusBeforeDestroy(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		mutate func(*ReleaseReminder)
+	}{
+		{name: "disabled", mutate: func(r *ReleaseReminder) { r.AutoReleaseEnabled = false }},
+		{name: "extended", mutate: func(r *ReleaseReminder) {
+			r.Status = ReleaseReminderStatusActive
+			r.ReleaseDueAt = now.Add(time.Hour).Format(time.RFC3339)
+			r.AutoReleaseAt = ""
+			r.AutoReleaseState = ""
+		}},
+		{name: "schedule changed", mutate: func(r *ReleaseReminder) { r.AutoReleaseAt = now.Add(time.Minute).Format(time.RFC3339) }},
+		{name: "apple changed", mutate: func(r *ReleaseReminder) { r.AppleEmail = "replacement@example.com" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+			coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
+			coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+				store.mutate("mac", test.mutate)
+				return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}}, nil
+			}
+
+			if err := coordinator.Scan(context.Background()); err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if len(*starts) != 0 {
+				t.Fatalf("StartDestroy called after %s mutation", test.name)
+			}
+		})
+	}
+}
+
+func TestAutoReleaseRechecksDuplicateJobAfterStatus(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+	jobs := &autoReleaseTestJobs{}
+	coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = jobs
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		jobs.jobs = append(jobs.jobs, Job{ID: "racing", Type: "aws-destroy", Profile: "mac", Status: JobStatusRunning})
+		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}}, nil
+	}
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(*starts) != 0 {
+		t.Fatalf("StartDestroy calls = %d", len(*starts))
+	}
+}
+
 func TestAutoReleasePreventsDuplicateDestroyJobs(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
@@ -228,7 +281,7 @@ func TestAutoReleaseRecoverableFailureRetriesAndNotifiesOnlyFirstFailure(t *test
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
 	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
 	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
-		return AWSStatus{}, errors.New("throttling: try again")
+		return AWSStatus{}, RecoverableAutoReleaseError(errors.New("throttling: try again"))
 	}
 
 	if err := coordinator.Scan(context.Background()); err != nil {
@@ -249,6 +302,137 @@ func TestAutoReleaseRecoverableFailureRetriesAndNotifiesOnlyFirstFailure(t *test
 	}
 }
 
+func TestAutoReleaseFailSafeErrorClassification(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		statusErr error
+		startErr  error
+		wantState string
+	}{
+		{name: "tag mismatch terminal", statusErr: TerminalAutoReleaseError(errors.New("required safety tags do not match")), wantState: ReleaseReminderAutoReleaseStateFailed},
+		{name: "ownership terminal", statusErr: TerminalAutoReleaseError(errors.New("ambiguous resource ownership")), wantState: ReleaseReminderAutoReleaseStateFailed},
+		{name: "unknown status fails safe", statusErr: errors.New("unclassified status failure"), wantState: ReleaseReminderAutoReleaseStateFailed},
+		{name: "explicit network retries", statusErr: RecoverableAutoReleaseError(errors.New("temporary network failure")), wantState: ReleaseReminderAutoReleaseStateRetrying},
+		{name: "unknown destroy retries after safety check", startErr: errors.New("unclassified destroy failure"), wantState: ReleaseReminderAutoReleaseStateRetrying},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+			coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
+			coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+				if test.statusErr != nil {
+					return AWSStatus{}, test.statusErr
+				}
+				return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}}, nil
+			}
+			coordinator.StartDestroy = func(context.Context, Profile) (Job, error) {
+				return Job{}, test.startErr
+			}
+
+			if err := coordinator.Scan(context.Background()); err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if got := store.get("mac"); got.AutoReleaseState != test.wantState {
+				t.Fatalf("state = %q, want %q; reminder=%+v", got.AutoReleaseState, test.wantState, got)
+			}
+		})
+	}
+}
+
+func TestAutoReleaseOwnershipSafetyErrorsAreTerminal(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		status AWSStatus
+	}{
+		{name: "tag mismatch", status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: []AWSTagConfig{{Key: "cm-managed", Value: "true"}}}}}},
+		{name: "ambiguous hosts", status: AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available"), {HostID: "h-2", State: "available", Tags: autoReleaseTestManagedTags()}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+			coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
+			coordinator.Status = func(context.Context, Profile) (AWSStatus, error) { return test.status, nil }
+
+			if err := coordinator.Scan(context.Background()); err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if got := store.get("mac"); got.AutoReleaseState != ReleaseReminderAutoReleaseStateFailed || len(*starts) != 0 {
+				t.Fatalf("safety failure starts=%d reminder=%+v", len(*starts), got)
+			}
+		})
+	}
+}
+
+func TestClassifyAWSAutoReleaseErrorUsesTypedCategories(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want autoReleaseErrorCategory
+	}{
+		{name: "throttle", err: autoReleaseTestAPIError{code: "Throttling", message: "opaque"}, want: autoReleaseErrorRecoverable},
+		{name: "authorization", err: autoReleaseTestAPIError{code: "AccessDenied", message: "opaque"}, want: autoReleaseErrorTerminal},
+		{name: "unknown API code", err: autoReleaseTestAPIError{code: "FutureError", message: "throttling words do not classify"}, want: autoReleaseErrorUnknown},
+		{name: "partial destroy", err: AWSDestroyPartialError{Cause: errors.New("opaque")}, want: autoReleaseErrorRecoverable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := autoReleaseErrorCategoryOf(classifyAWSAutoReleaseError(test.err)); got != test.want {
+				t.Fatalf("category = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+type autoReleaseTestAPIError struct {
+	code    string
+	message string
+}
+
+func (e autoReleaseTestAPIError) Error() string     { return e.message }
+func (e autoReleaseTestAPIError) ErrorCode() string { return e.code }
+
+func TestAutoReleaseCleanupFailureRetriesThenSucceeds(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+	store.cleanupErrors = []error{errors.New("local store temporarily unavailable"), nil}
+	coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-1"}}, nil
+	}
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || store.cleanupCalls != 1 || len(*starts) != 0 {
+		t.Fatalf("failed cleanup persisted terminal state: reminder=%+v cleanup=%d starts=%d", got, store.cleanupCalls, len(*starts))
+	}
+	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryInterval) }
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || store.cleanupCalls != 2 {
+		t.Fatalf("cleanup retry did not complete: reminder=%+v cleanup=%d", got, store.cleanupCalls)
+	}
+}
+
+func TestAutoReleaseCleanupFailureStopsAtRetryWindow(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+	store.cleanupErrors = []error{errors.New("local cleanup failed")}
+	coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) { return AWSStatus{}, nil }
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryWindow) }
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("timeout Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateFailed || store.cleanupCalls != 1 {
+		t.Fatalf("cleanup timeout reminder=%+v cleanup=%d", got, store.cleanupCalls)
+	}
+}
+
 func TestAutoReleaseObservesSuccessfulJobAndRetainsEIPAllocation(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
@@ -256,7 +440,7 @@ func TestAutoReleaseObservesSuccessfulJobAndRetainsEIPAllocation(t *testing.T) {
 	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
 	coordinator.Jobs = jobs
 	statuses := []AWSStatus{
-		{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "available"}}, Instances: []InstanceStatus{{InstanceID: "i-1", State: "running"}}, ElasticIP: ElasticIP{AllocationID: "eipalloc-1", AssociationID: "eipassoc-1", InstanceID: "i-1"}},
+		{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}, Instances: []InstanceStatus{autoReleaseTestInstance("running")}, ElasticIP: ElasticIP{AllocationID: "eipalloc-1", AssociationID: "eipassoc-1", InstanceID: "i-1"}},
 		{ElasticIP: ElasticIP{AllocationID: "eipalloc-1"}},
 	}
 	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
@@ -298,7 +482,7 @@ func TestAutoReleaseDeferredJobWithResourcesRetries(t *testing.T) {
 	coordinator, _, _ := newAutoReleaseTestCoordinator(now.Add(time.Minute), store)
 	coordinator.Jobs = &autoReleaseTestJobs{jobs: []Job{{ID: "destroy-1", Type: "aws-destroy", Profile: "mac", AppleEmail: "apple@example.com", Status: JobStatusDeferred, StartedAt: now, LastError: "host pending"}}}
 	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
-		return AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "pending"}}, ElasticIP: ElasticIP{AllocationID: "eipalloc-1"}}, nil
+		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}, ElasticIP: ElasticIP{AllocationID: "eipalloc-1"}}, nil
 	}
 
 	if err := coordinator.Scan(context.Background()); err != nil {
@@ -317,11 +501,28 @@ func autoReleaseTestProfile() Profile {
 	return Profile{Name: "mac", AWS: AWSConfig{AccountEmail: "apple@example.com", Profile: "aws-test", Region: "us-west-2"}}
 }
 
+func autoReleaseTestManagedTags() []AWSTagConfig {
+	return []AWSTagConfig{
+		{Key: "cm-managed", Value: "true"},
+		{Key: "cm-profile", Value: "mac"},
+		{Key: "cm-account-email", Value: "apple@example.com"},
+	}
+}
+
+func autoReleaseTestHost(state string) DedicatedHostStatus {
+	return DedicatedHostStatus{HostID: "h-1", State: state, Tags: autoReleaseTestManagedTags()}
+}
+
+func autoReleaseTestInstance(state string) InstanceStatus {
+	return InstanceStatus{InstanceID: "i-1", HostID: "h-1", State: state, Tags: autoReleaseTestManagedTags()}
+}
+
 type autoReleaseTestStore struct {
-	mu           sync.Mutex
-	reminders    map[string]ReleaseReminder
-	beforeUpdate func(*ReleaseReminder)
-	cleanupCalls int
+	mu            sync.Mutex
+	reminders     map[string]ReleaseReminder
+	beforeUpdate  func(*ReleaseReminder)
+	cleanupCalls  int
+	cleanupErrors []error
 }
 
 func newAutoReleaseTestStore(reminders ...ReleaseReminder) *autoReleaseTestStore {
@@ -368,16 +569,26 @@ func (s *autoReleaseTestStore) UpdateReleaseReminder(profile string, update func
 	return updated, nil
 }
 
-func (s *autoReleaseTestStore) CleanupReleased(profile, _ string, at time.Time) (ReleaseReminder, error) {
+func (s *autoReleaseTestStore) CleanupReleased(_ string, _ string, _ time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupCalls++
+	if len(s.cleanupErrors) > 0 {
+		err := s.cleanupErrors[0]
+		s.cleanupErrors = s.cleanupErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *autoReleaseTestStore) mutate(profile string, mutate func(*ReleaseReminder)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	reminder := s.reminders[profile]
-	reminder.Status = ReleaseReminderStatusReleased
-	reminder.ReleasedAt = at.Format(time.RFC3339)
-	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	mutate(&reminder)
 	s.reminders[profile] = reminder
-	return reminder, nil
 }
 
 func (s *autoReleaseTestStore) get(profile string) ReleaseReminder {
@@ -408,7 +619,7 @@ func newAutoReleaseTestCoordinator(now time.Time, store *autoReleaseTestStore) (
 		Jobs:           &autoReleaseTestJobs{},
 		ResolveProfile: func(context.Context, ReleaseReminder) (Profile, error) { return autoReleaseTestProfile(), nil },
 		Status: func(context.Context, Profile) (AWSStatus, error) {
-			return AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "available"}}}, nil
+			return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}}, nil
 		},
 		StartDestroy: func(_ context.Context, profile Profile) (Job, error) {
 			starts = append(starts, profile)

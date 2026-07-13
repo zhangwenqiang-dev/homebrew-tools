@@ -248,7 +248,7 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 		},
 		Status: func(ctx context.Context, profile Profile) (AWSStatus, error) {
 			_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
-			return status, err
+			return status, classifyAWSAutoReleaseError(err)
 		},
 		StartDestroy: func(ctx context.Context, profile Profile) (Job, error) {
 			runConfigPath, err := writeAutoReleaseProfileConfig(profile)
@@ -258,8 +258,12 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 			job, _, err := a.startAWSJobForResolvedProfile(ctx, runConfigPath, "destroy", profile, true)
 			return job, err
 		},
-		CleanupReleased: func(profileName, reason string, _ time.Time) (ReleaseReminder, error) {
-			return a.cleanupProfileLocalRecords(profileName, reason)
+		CleanupReleased: func(profileName, reason string, _ time.Time) error {
+			if err := a.clearProfileOwnerForCleanup(profileName); err != nil {
+				return err
+			}
+			_ = a.MemberStore.RecordEvent(OperationEvent{Action: "cleanup-records", Profile: profileName, Confirmed: true, Status: "success", Message: "cleared profile owner (" + reason + ")"})
+			return nil
 		},
 		Notify: func(notification AutoReleaseNotification) error {
 			description := "Mac 释放提醒已到期"
@@ -1659,7 +1663,7 @@ func (a App) cleanupProfileLocalRecords(profileName, reason string) (ReleaseRemi
 	if profileName == "" {
 		return ReleaseReminder{}, errors.New("profile is required")
 	}
-	if err := a.MemberStore.ClearProfileOwner(profileName); err != nil {
+	if err := a.clearProfileOwnerForCleanup(profileName); err != nil {
 		return ReleaseReminder{}, err
 	}
 	reminder, ok, err := a.MemberStore.ReleaseReminder(profileName)
@@ -1691,6 +1695,14 @@ func (a App) cleanupProfileLocalRecords(profileName, reason string) (ReleaseRemi
 		Message:    "cleared profile owner and marked release reminder released (" + reason + ")",
 	})
 	return reminder, nil
+}
+
+func (a App) clearProfileOwnerForCleanup(profileName string) error {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return errors.New("profile is required")
+	}
+	return a.MemberStore.ClearProfileOwner(profileName)
 }
 
 func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) {
