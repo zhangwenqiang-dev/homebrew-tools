@@ -203,6 +203,22 @@
       padding: 12px;
       border-bottom: 1px solid var(--line);
     }
+    .auto-release-strip {
+      min-height: 58px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfe;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .auto-release-copy { min-width: 0; display: grid; gap: 2px; }
+    .auto-release-copy span { color: var(--muted); font-size: 12px; }
+    .auto-release-copy strong, .auto-release-copy small { overflow-wrap: anywhere; }
+    .auto-release-copy small { color: var(--muted); }
+    .auto-release-copy small.error { color: var(--danger); }
+    .auto-release-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
     .metric {
       min-height: 58px;
       border: 1px solid var(--line);
@@ -396,6 +412,9 @@
       }
       .row-actions button { flex: 1 1 86px; }
       .local-action { display: none !important; }
+      .auto-release-strip { align-items: stretch; flex-direction: column; }
+      .auto-release-actions { width: 100%; }
+      .auto-release-actions button { width: 100%; }
       .profile-admin { grid-template-columns: 1fr; padding: 8px; }
       .profile-form-grid, .settings-form, .account-form { grid-template-columns: 1fr; }
     }
@@ -523,6 +542,22 @@
       <div class="picker-actions">
         <button id="cancelReleaseReminderBtn">取消</button>
         <button id="saveReleaseReminderBtn" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+  <div id="autoReleaseLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="autoReleaseTitle">
+    <div class="picker-card">
+      <div class="section-head">
+        <h2 id="autoReleaseTitle">自动释放</h2>
+        <button id="autoReleaseCloseBtn">关闭</button>
+      </div>
+      <div class="profile-form-grid">
+        <div id="autoReleaseDialogCopy" class="wide"></div>
+        <div class="wide muted">永久保留弹性IP，不会释放 Elastic IP allocation。</div>
+      </div>
+      <div class="picker-actions">
+        <button id="autoReleaseCancelBtn">取消</button>
+        <button id="autoReleaseConfirmBtn" class="primary">确认</button>
       </div>
     </div>
   </div>
@@ -688,6 +723,17 @@
             <div class="metric admin-only">
               <span>确认打开负责人</span>
               <select id="assignMemberSelect" class="inline-select"></select>
+            </div>
+          </div>
+          <div class="auto-release-strip">
+            <div class="auto-release-copy">
+              <span>自动释放</span>
+              <strong id="autoReleaseSummary">-</strong>
+              <small id="autoReleaseTime" class="hidden"></small>
+              <small id="autoReleaseError" class="error hidden"></small>
+            </div>
+            <div class="auto-release-actions">
+              <button id="autoReleaseToggleBtn" class="admin-only" aria-pressed="false">开启自动释放</button>
             </div>
           </div>
           <div class="output">
@@ -872,7 +918,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoReleaseEnabled: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -881,7 +927,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -953,7 +999,9 @@
           state.auth = { authenticated: false, setup_required: false };
           showAuth();
         }
-        throw new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+        const err = new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+        err.status = res.status;
+        throw err;
       }
       return body;
     }
@@ -1613,13 +1661,14 @@
       const openDisabled = disabled || state.busy || !statusKnown || isReady;
       const destroyDisabled = disabled || state.busy || !statusKnown || !isReady;
       const reminder = p ? state.reminders[p.name] : null;
+      const releaseActive = !!(p && autoReleaseActive(reminder, p.name));
       const syncJobsLoading = !!(p && state.syncJobsLoading[p.name]);
       for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
       }
       $("openMacBtn").disabled = openDisabled;
       $("releaseMacBtn").disabled = destroyDisabled;
-      $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released";
+      $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released" || releaseActive;
       $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
       $("syncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobActive(syncJob(p?.name, "push"));
@@ -1643,6 +1692,7 @@
       $("hostCreatedValue").textContent = reminder?.host_created_at ? formatTime(reminder.host_created_at) : "-";
       $("reminderDueValue").textContent = reminder?.release_due_at ? formatTime(reminder.release_due_at) : "-";
       $("reminderStatusValue").textContent = reminder ? reminderStatusText(reminder) : "-";
+      renderAutoRelease(reminder, p);
       renderAssignMemberOptions();
       applyRoleVisibility();
       renderUserPage();
@@ -1654,6 +1704,41 @@
       if (reminder.status === "due_notified") return "已到期并通知";
       if (reminder.release_due_at && new Date(reminder.release_due_at).getTime() <= Date.now()) return "已到期";
       return "提醒中";
+    }
+
+    function autoReleaseActive(reminder, profileName) {
+      if (reminder?.auto_release_state === "running") return true;
+      return state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"));
+    }
+
+    function autoReleaseStateText(reminder) {
+      if (!reminder) return "未开启自动释放";
+      if (reminder.status === "released" || reminder.auto_release_state === "released") return "已释放";
+      if (!reminder.auto_release_enabled) return "未开启自动释放";
+      if (reminder.auto_release_state === "scheduled" && reminder.auto_release_at) return `将在 ${formatTime(reminder.auto_release_at)} 自动释放`;
+      if (reminder.auto_release_state === "running") return "正在自动释放";
+      if (reminder.auto_release_state === "retrying") {
+        const attempts = Math.max(1, Number(reminder.auto_release_attempts) || 0);
+        return `释放重试中（第 ${attempts} 次）`;
+      }
+      if (reminder.auto_release_state === "failed") return "自动释放失败";
+      return "等待提醒";
+    }
+
+    function renderAutoRelease(reminder, profile) {
+      const active = !!(profile && autoReleaseActive(reminder, profile.name));
+      const released = reminder?.status === "released" || reminder?.auto_release_state === "released";
+      const enabled = !!reminder?.auto_release_enabled;
+      $("autoReleaseSummary").textContent = autoReleaseStateText(reminder);
+      $("autoReleaseTime").textContent = reminder?.auto_release_at ? "自动释放时间：" + formatTime(reminder.auto_release_at) : "";
+      $("autoReleaseTime").classList.toggle("hidden", !reminder?.auto_release_at || reminder?.auto_release_state === "scheduled");
+      const showError = !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");
+      $("autoReleaseError").textContent = showError ? "上次错误：" + reminder.auto_release_last_error : "";
+      $("autoReleaseError").classList.toggle("hidden", !showError);
+      $("autoReleaseToggleBtn").textContent = enabled ? "关闭自动释放" : "开启自动释放";
+      $("autoReleaseToggleBtn").setAttribute("aria-pressed", String(enabled));
+      $("autoReleaseToggleBtn").disabled = !profile || !reminder || state.busy || state.autoReleaseSubmitting || active || released;
+      $("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());
     }
 
     function renderUserPage() {
@@ -1825,6 +1910,68 @@
 
     function closeReleaseReminderEditor() {
       $("releaseReminderLayer").classList.add("hidden");
+    }
+
+    function openAutoReleaseDialog() {
+      const p = selectedProfile();
+      const reminder = p ? state.reminders[p.name] : null;
+      if (!p || !reminder || !isAdmin() || state.autoReleaseSubmitting) return;
+      if (autoReleaseActive(reminder, p.name)) {
+        setStatus("自动释放正在执行，当前不能更改设置。");
+        return;
+      }
+      const enabled = !reminder.auto_release_enabled;
+      state.pendingAutoReleaseEnabled = enabled;
+      $("autoReleaseTitle").textContent = enabled ? "开启自动释放" : "关闭自动释放";
+      $("autoReleaseDialogCopy").textContent = enabled
+        ? "开启后，到期提醒后等待10分钟再自动释放；失败每5分钟重试，最多1小时。"
+        : "关闭后将取消已安排或正在重试的自动释放周期。自动释放已经开始时无法撤回，也不会回滚已经执行的释放操作。";
+      $("autoReleaseConfirmBtn").textContent = enabled ? "确认开启" : "确认关闭";
+      $("autoReleaseConfirmBtn").classList.toggle("danger", !enabled);
+      $("autoReleaseConfirmBtn").classList.toggle("primary", enabled);
+      renderAutoReleaseDialog();
+      $("autoReleaseLayer").classList.remove("hidden");
+    }
+
+    function renderAutoReleaseDialog() {
+      $("autoReleaseConfirmBtn").disabled = state.autoReleaseSubmitting;
+      $("autoReleaseCancelBtn").disabled = state.autoReleaseSubmitting;
+      $("autoReleaseCloseBtn").disabled = state.autoReleaseSubmitting;
+      $("autoReleaseConfirmBtn").textContent = state.autoReleaseSubmitting ? "保存中..." : (state.pendingAutoReleaseEnabled ? "确认开启" : "确认关闭");
+    }
+
+    function closeAutoReleaseDialog() {
+      if (state.autoReleaseSubmitting) return;
+      state.pendingAutoReleaseEnabled = null;
+      $("autoReleaseLayer").classList.add("hidden");
+    }
+
+    async function submitAutoRelease() {
+      const p = selectedProfile();
+      const enabled = state.pendingAutoReleaseEnabled;
+      if (!p || !isAdmin() || state.autoReleaseSubmitting) return;
+      if (typeof enabled !== "boolean") return;
+      state.autoReleaseSubmitting = true;
+      renderAutoReleaseDialog();
+      try {
+        await api("/api/release-reminder/auto-release", {
+          method: "POST",
+          body: JSON.stringify({ profile: p.name, enabled })
+        });
+        await loadReleaseReminders();
+        state.autoReleaseSubmitting = false;
+        closeAutoReleaseDialog();
+        setStatus(enabled ? "自动释放已开启。" : "自动释放已关闭，已取消等待或重试周期。");
+      } catch (err) {
+        await loadReleaseReminders().catch(() => {});
+        const detail = String(err.message || err || "未知错误");
+        setOutput(detail);
+        setStatus(err.status === 409 ? "自动释放状态已变化，数据已刷新：" + detail : "自动释放设置失败：" + detail);
+      } finally {
+        state.autoReleaseSubmitting = false;
+        renderAutoReleaseDialog();
+        renderSelected();
+      }
     }
 
     async function saveReleaseReminder() {
@@ -3253,6 +3400,7 @@
     async function loadJobs() {
       const body = await api("/api/jobs");
       const jobs = body.data.jobs || [];
+      state.jobs = jobs;
       $("jobs").innerHTML = jobs.length ? jobs.map((job) =>
         "<tr>" +
           "<td data-label=\"Job\">" + escapeHTML(job.id || "-") + "</td>" +
@@ -3268,6 +3416,7 @@
       if (jobs.some((job) => job.status === "starting" || job.status === "running")) {
         scheduleJobRefresh();
       }
+      renderSelected();
     }
 
     let jobRefreshTimer = null;
@@ -3456,6 +3605,13 @@
       renderSelected();
     });
     $("extendReminderBtn").addEventListener("click", openReleaseReminderEditor);
+    $("autoReleaseToggleBtn").addEventListener("click", openAutoReleaseDialog);
+    $("autoReleaseConfirmBtn").addEventListener("click", submitAutoRelease);
+    $("autoReleaseCancelBtn").addEventListener("click", closeAutoReleaseDialog);
+    $("autoReleaseCloseBtn").addEventListener("click", closeAutoReleaseDialog);
+    $("autoReleaseLayer").addEventListener("click", (event) => {
+      if (event.target === $("autoReleaseLayer")) closeAutoReleaseDialog();
+    });
     $("cleanupRecordsBtn").addEventListener("click", cleanupLocalRecords);
     $("saveReleaseReminderBtn").addEventListener("click", saveReleaseReminder);
     $("cancelReleaseReminderBtn").addEventListener("click", closeReleaseReminderEditor);

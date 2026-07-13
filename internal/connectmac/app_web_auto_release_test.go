@@ -7,12 +7,91 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestWebAutoReleaseUIContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+
+	for _, want := range []string{
+		`id="autoReleaseSummary"`,
+		`id="autoReleaseError"`,
+		`id="autoReleaseToggleBtn" class="admin-only"`,
+		`/api/release-reminder/auto-release`,
+		`JSON.stringify({ profile: p.name, enabled })`,
+		`未开启自动释放`,
+		`等待提醒`,
+		`将在 ${formatTime(reminder.auto_release_at)} 自动释放`,
+		`正在自动释放`,
+		`释放重试中（第 ${attempts} 次）`,
+		`自动释放失败`,
+		`已释放`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web auto release UI missing %q", want)
+		}
+	}
+}
+
+func TestWebAutoReleaseDialogAndSubmissionContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+
+	for _, want := range []string{
+		`到期提醒后等待10分钟`,
+		`失败每5分钟重试`,
+		`最多1小时`,
+		`永久保留弹性IP`,
+		`取消已安排或正在重试的自动释放周期`,
+		`自动释放已经开始时无法撤回`,
+		`if (!p || !isAdmin() || state.autoReleaseSubmitting) return;`,
+		`state.autoReleaseSubmitting = true;`,
+		`$("autoReleaseConfirmBtn").disabled = state.autoReleaseSubmitting;`,
+		`await loadReleaseReminders();`,
+		`closeAutoReleaseDialog();`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web auto release dialog missing %q", want)
+		}
+	}
+}
+
+func TestWebAutoReleaseMobileAndRoleContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+
+	for _, want := range []string{
+		`class="auto-release-strip"`,
+		`@media (max-width: 720px)`,
+		`.auto-release-strip { align-items: stretch; flex-direction: column; }`,
+		`.auto-release-actions { width: 100%; }`,
+		`$("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());`,
+		`$("autoReleaseSummary").textContent = autoReleaseStateText(reminder);`,
+		`$("extendReminderBtn").disabled =`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web auto release role/mobile contract missing %q", want)
+		}
+	}
+	if strings.Contains(html, `class="auto-release-strip local-action"`) {
+		t.Fatal("auto release strip must not depend on the local agent")
+	}
+}
 
 func TestAppWebAutoReleaseToggleAdminEnableDisable(t *testing.T) {
 	for _, test := range []struct {
