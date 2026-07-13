@@ -1038,6 +1038,10 @@ func (a App) webReleaseReminderAutoReleaseHandler() http.HandlerFunc {
 		}
 
 		reminder, err := a.MemberStore.UpdateReleaseReminder(profileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if req.Enabled {
+				current.AutoReleaseEnabled = true
+				return current, nil
+			}
 			if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
 				return current, errAutomaticReleaseRunning
 			}
@@ -1048,7 +1052,7 @@ func (a App) webReleaseReminderAutoReleaseHandler() http.HandlerFunc {
 			if hasActiveDestroyJob(active, profileName) {
 				return current, errActiveDestroyJob
 			}
-			current.AutoReleaseEnabled = req.Enabled
+			current.AutoReleaseEnabled = false
 			return clearReleaseReminderAutoCycle(current), nil
 		})
 		if err != nil {

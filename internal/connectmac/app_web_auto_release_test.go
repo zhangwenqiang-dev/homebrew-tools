@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,37 @@ func TestAppWebAutoReleaseToggleRoleAndValidation(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func TestAppWebAutoReleaseEnablePreservesRunningCycleWithActiveDestroyJob(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	seed := ReleaseReminder{
+		ProfileName: "xcode-vnc", AppleEmail: "user@example.com", Status: ReleaseReminderStatusDueNotified,
+		AutoReleaseEnabled: false, AutoReleaseAt: "2026-07-01T12:40:45Z",
+		AutoReleaseStartedAt: "2026-07-01T12:30:45Z", AutoReleaseLastAttemptAt: "2026-07-01T12:35:45Z",
+		AutoReleaseAttempts: 3, AutoReleaseLastError: "destroy in progress", AutoReleaseState: ReleaseReminderAutoReleaseStateRunning,
+	}
+	saved, err := app.MemberStore.UpsertReleaseReminder(seed)
+	if err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	if _, err := app.JobManager.Create(Job{ID: "active-destroy", Type: "aws-destroy", Profile: seed.ProfileName, Status: JobStatusRunning, PID: 42}); err != nil {
+		t.Fatalf("create active job: %v", err)
+	}
+
+	rec := postWebAutoRelease(t, &app, "admin", seed.ProfileName, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := mustReleaseReminder(t, app, seed.ProfileName)
+	if !got.AutoReleaseEnabled {
+		t.Fatal("auto release was not enabled")
+	}
+	got.AutoReleaseEnabled = saved.AutoReleaseEnabled
+	got.UpdatedAt = saved.UpdatedAt
+	if !reflect.DeepEqual(got, saved) {
+		t.Fatalf("enable changed fields beyond flag:\n got: %+v\nwant: %+v", got, saved)
+	}
 }
 
 func TestAppWebAutoReleaseToggleRejectsRunningRelease(t *testing.T) {
@@ -262,6 +294,40 @@ func TestAppWebReleaseReminderExtensionWinsAtomicRaceWithAutoClaim(t *testing.T)
 	got := mustReleaseReminder(t, app, "xcode-vnc")
 	if got.Status != ReleaseReminderStatusActive || got.AutoReleaseState != "" {
 		t.Fatalf("unsafe race result: reminder=%+v", got)
+	}
+}
+
+func TestAppWebReleaseReminderAutoClaimWinsBeforeExtension(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	now := app.JobManager.Now()
+	reminder := seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
+	var err error
+	reminder, err = app.MemberStore.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		current.ReleaseDueAt = now.Add(-AutoReleaseGracePeriod).Format(time.RFC3339)
+		current.AutoReleaseAt = now.Format(time.RFC3339)
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateScheduled
+		return current, nil
+	})
+	if err != nil {
+		t.Fatalf("update reminder: %v", err)
+	}
+
+	coordinator := AutoReleaseCoordinator{Store: app.MemberStore}
+	claimed, err := coordinator.claim(reminder, now)
+	if err != nil {
+		t.Fatalf("claim reminder: %v", err)
+	}
+	if claimed.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
+		t.Fatalf("claim state = %q", claimed.AutoReleaseState)
+	}
+
+	rec := postWebExtension(t, &app, "admin", now.Add(time.Hour))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("extension status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := mustReleaseReminder(t, app, reminder.ProfileName)
+	if !reflect.DeepEqual(got, claimed) {
+		t.Fatalf("extension modified claimed reminder:\n got: %+v\nwant: %+v", got, claimed)
 	}
 }
 
