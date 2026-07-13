@@ -1,8 +1,11 @@
 package connectmac
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -228,5 +231,154 @@ func TestMemberStoreReleaseReminders(t *testing.T) {
 	}
 	if released.Status != ReleaseReminderStatusReleased || released.ReleasedAt != "2026-07-02T09:00:00Z" {
 		t.Fatalf("released reminder = %+v", released)
+	}
+}
+
+func TestMemberStoreReleaseReminderLegacyJSONDefaultsAutoRelease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "members.json")
+	legacy := `{"release_reminders":[{"profile_name":"apple-usw2","status":"active","created_at":"2026-07-01T08:00:00Z","updated_at":"2026-07-01T08:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy data: %v", err)
+	}
+
+	reminder, ok, err := NewMemberStore(path).ReleaseReminder("apple-usw2")
+	if err != nil {
+		t.Fatalf("load legacy reminder: %v", err)
+	}
+	if !ok {
+		t.Fatal("legacy reminder not found")
+	}
+	if reminder.AutoReleaseEnabled || reminder.AutoReleaseAt != "" || reminder.AutoReleaseAttempts != 0 || reminder.AutoReleaseState != "" {
+		t.Fatalf("legacy auto-release defaults = %+v", reminder)
+	}
+}
+
+func TestMemberStoreReleaseReminderAutoReleaseRoundTrip(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	want := ReleaseReminder{
+		ProfileName:              "apple-usw2",
+		Status:                   ReleaseReminderStatusActive,
+		AutoReleaseEnabled:       true,
+		AutoReleaseAt:            "2026-07-02T08:00:00Z",
+		AutoReleaseStartedAt:     "2026-07-02T08:01:00Z",
+		AutoReleaseLastAttemptAt: "2026-07-02T08:02:00Z",
+		AutoReleaseAttempts:      2,
+		AutoReleaseLastError:     "host is pending",
+		AutoReleaseState:         ReleaseReminderAutoReleaseStateRetrying,
+	}
+	if _, err := store.UpsertReleaseReminder(want); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	got, ok, err := store.ReleaseReminder(want.ProfileName)
+	if err != nil {
+		t.Fatalf("load reminder: %v", err)
+	}
+	if !ok {
+		t.Fatal("saved reminder not found")
+	}
+	if !got.AutoReleaseEnabled || got.AutoReleaseAt != want.AutoReleaseAt || got.AutoReleaseStartedAt != want.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != want.AutoReleaseLastAttemptAt || got.AutoReleaseAttempts != want.AutoReleaseAttempts || got.AutoReleaseLastError != want.AutoReleaseLastError || got.AutoReleaseState != want.AutoReleaseState {
+		t.Fatalf("auto-release round trip = %+v", got)
+	}
+}
+
+func TestMemberStoreUpdateReleaseReminderPreservesFields(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	store.Now = func() time.Time { return time.Date(2026, 7, 2, 8, 0, 0, 0, time.UTC) }
+	original, err := store.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName: "apple-usw2",
+		AppleEmail:  "apple@example.com",
+		HostID:      "h-123",
+		OwnerEmail:  "owner@example.com",
+		Status:      ReleaseReminderStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+
+	updated, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseEnabled = true
+		reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateScheduled
+		return reminder, nil
+	})
+	if err != nil {
+		t.Fatalf("update reminder: %v", err)
+	}
+	if updated.HostID != original.HostID || updated.AppleEmail != original.AppleEmail || updated.OwnerEmail != original.OwnerEmail || updated.Status != original.Status || updated.CreatedAt != original.CreatedAt {
+		t.Fatalf("unrelated fields changed: before=%+v after=%+v", original, updated)
+	}
+	if !updated.AutoReleaseEnabled || updated.AutoReleaseState != ReleaseReminderAutoReleaseStateScheduled {
+		t.Fatalf("auto-release fields not updated: %+v", updated)
+	}
+}
+
+func TestMemberStoreUpdateReleaseReminderErrorsDoNotPersist(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	if _, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "apple-usw2"}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	wantErr := errors.New("stop update")
+	_, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		reminder.AutoReleaseAttempts = 99
+		return reminder, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("update error = %v, want %v", err, wantErr)
+	}
+	reminder, _, err := store.ReleaseReminder("apple-usw2")
+	if err != nil {
+		t.Fatalf("load reminder: %v", err)
+	}
+	if reminder.AutoReleaseAttempts != 0 {
+		t.Fatalf("failed update persisted: %+v", reminder)
+	}
+
+	for _, profileName := range []string{"", "missing"} {
+		called := false
+		_, err := store.UpdateReleaseReminder(profileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+			called = true
+			return reminder, nil
+		})
+		if err == nil {
+			t.Fatalf("UpdateReleaseReminder(%q) error = nil", profileName)
+		}
+		if called {
+			t.Fatalf("UpdateReleaseReminder(%q) invoked callback", profileName)
+		}
+	}
+}
+
+func TestMemberStoreUpdateReleaseReminderSerializesConcurrentUpdates(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	if _, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "apple-usw2"}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+
+	const updates = 10
+	errs := make(chan error, updates)
+	var wg sync.WaitGroup
+	for range updates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.UpdateReleaseReminder("apple-usw2", func(reminder ReleaseReminder) (ReleaseReminder, error) {
+				reminder.AutoReleaseAttempts++
+				return reminder, nil
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent update: %v", err)
+		}
+	}
+	reminder, _, err := store.ReleaseReminder("apple-usw2")
+	if err != nil {
+		t.Fatalf("load reminder: %v", err)
+	}
+	if reminder.AutoReleaseAttempts != updates {
+		t.Fatalf("auto-release attempts = %d, want %d", reminder.AutoReleaseAttempts, updates)
 	}
 }

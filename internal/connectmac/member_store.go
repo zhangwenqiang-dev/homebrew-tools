@@ -53,6 +53,7 @@ type MemberRepository interface {
 	ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error)
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error)
+	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
 	WebSettings() (WebSettings, error)
@@ -126,24 +127,37 @@ const (
 	ReleaseReminderStatusActive      = "active"
 	ReleaseReminderStatusDueNotified = "due_notified"
 	ReleaseReminderStatusReleased    = "released"
+
+	ReleaseReminderAutoReleaseStateScheduled = "scheduled"
+	ReleaseReminderAutoReleaseStateRunning   = "running"
+	ReleaseReminderAutoReleaseStateRetrying  = "retrying"
+	ReleaseReminderAutoReleaseStateFailed    = "failed"
+	ReleaseReminderAutoReleaseStateReleased  = "released"
 )
 
 type ReleaseReminder struct {
-	ProfileName         string `json:"profile_name"`
-	AppleEmail          string `json:"apple_email,omitempty"`
-	HostID              string `json:"host_id,omitempty"`
-	HostCreatedAt       string `json:"host_created_at,omitempty"`
-	ReleaseDueAt        string `json:"release_due_at,omitempty"`
-	OwnerEmail          string `json:"owner_email,omitempty"`
-	OwnerName           string `json:"owner_name,omitempty"`
-	LastExtendedByEmail string `json:"last_extended_by_email,omitempty"`
-	LastExtendedByName  string `json:"last_extended_by_name,omitempty"`
-	LastExtendedAt      string `json:"last_extended_at,omitempty"`
-	LastNotifiedAt      string `json:"last_notified_at,omitempty"`
-	ReleasedAt          string `json:"released_at,omitempty"`
-	Status              string `json:"status"`
-	CreatedAt           string `json:"created_at"`
-	UpdatedAt           string `json:"updated_at"`
+	ProfileName              string `json:"profile_name"`
+	AppleEmail               string `json:"apple_email,omitempty"`
+	HostID                   string `json:"host_id,omitempty"`
+	HostCreatedAt            string `json:"host_created_at,omitempty"`
+	ReleaseDueAt             string `json:"release_due_at,omitempty"`
+	OwnerEmail               string `json:"owner_email,omitempty"`
+	OwnerName                string `json:"owner_name,omitempty"`
+	LastExtendedByEmail      string `json:"last_extended_by_email,omitempty"`
+	LastExtendedByName       string `json:"last_extended_by_name,omitempty"`
+	LastExtendedAt           string `json:"last_extended_at,omitempty"`
+	LastNotifiedAt           string `json:"last_notified_at,omitempty"`
+	ReleasedAt               string `json:"released_at,omitempty"`
+	Status                   string `json:"status"`
+	AutoReleaseEnabled       bool   `json:"auto_release_enabled"`
+	AutoReleaseAt            string `json:"auto_release_at,omitempty"`
+	AutoReleaseStartedAt     string `json:"auto_release_started_at,omitempty"`
+	AutoReleaseLastAttemptAt string `json:"auto_release_last_attempt_at,omitempty"`
+	AutoReleaseAttempts      int    `json:"auto_release_attempts,omitempty"`
+	AutoReleaseLastError     string `json:"auto_release_last_error,omitempty"`
+	AutoReleaseState         string `json:"auto_release_state,omitempty"`
+	CreatedAt                string `json:"created_at"`
+	UpdatedAt                string `json:"updated_at"`
 }
 
 type OperationEvent struct {
@@ -615,6 +629,50 @@ func (s MemberStore) ReleaseReminder(profileName string) (ReleaseReminder, bool,
 
 func (s MemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {
 	return upsertReleaseReminderInStore(s, reminder)
+}
+
+func (s MemberStore) UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, errors.New("profile is required")
+	}
+	if update == nil {
+		return ReleaseReminder{}, errors.New("release reminder update is required")
+	}
+	s = s.normalize()
+	path, err := ExpandPath(s.Path)
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return ReleaseReminder{}, err
+	}
+	var updated ReleaseReminder
+	err = withFileLock(path+".lock", func() error {
+		db, err := s.Load()
+		if err != nil {
+			return err
+		}
+		for i := range db.Reminders {
+			if db.Reminders[i].ProfileName != profileName {
+				continue
+			}
+			updated, err = update(db.Reminders[i])
+			if err != nil {
+				return err
+			}
+			updated.ProfileName = profileName
+			updated.CreatedAt = db.Reminders[i].CreatedAt
+			updated.UpdatedAt = s.currentTime().Format(time.RFC3339)
+			db.Reminders[i] = updated
+			return s.Save(db)
+		}
+		return releaseReminderNotFoundError(profileName)
+	})
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	return updated, nil
 }
 
 func (s MemberStore) MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error) {
@@ -1646,7 +1704,11 @@ func updateReleaseReminderStatusInStore(s memberDataStore, profileName, status, 
 		}
 		return db.Reminders[i], s.Save(db)
 	}
-	return ReleaseReminder{}, fmt.Errorf("release reminder for profile %s not found", profileName)
+	return ReleaseReminder{}, releaseReminderNotFoundError(profileName)
+}
+
+func releaseReminderNotFoundError(profileName string) error {
+	return fmt.Errorf("release reminder for profile %s not found", profileName)
 }
 
 func memberHasProfileAccess(db MemberData, member Member, profileName string) bool {
