@@ -36,6 +36,8 @@ func (r fakeMySQLStoreLockRow) Scan(dest ...any) error {
 type fakeMySQLReleaseReminderRows struct {
 	reminders []ReleaseReminder
 	index     int
+	err       error
+	closeErr  error
 }
 
 func (r *fakeMySQLReleaseReminderRows) Next() bool {
@@ -52,7 +54,11 @@ func (r *fakeMySQLReleaseReminderRows) Scan(dest ...any) error {
 }
 
 func (r *fakeMySQLReleaseReminderRows) Close() error {
-	return nil
+	return r.closeErr
+}
+
+func (r *fakeMySQLReleaseReminderRows) Err() error {
+	return r.err
 }
 
 func (r fakeMySQLReleaseReminderRow) Scan(dest ...any) error {
@@ -88,20 +94,21 @@ func (r fakeMySQLReleaseReminderRow) Scan(dest ...any) error {
 }
 
 type fakeMySQLReleaseReminderTransaction struct {
-	row         mysqlReleaseReminderScanner
-	query       string
-	queryArgs   []any
-	execQuery   string
-	execArgs    []any
-	written     ReleaseReminder
-	execErr     error
-	commitErr   error
-	rollbackErr error
-	committed   bool
-	rolledBack  bool
-	lockVersion uint64
-	queryRows   []ReleaseReminder
-	operations  []string
+	row          mysqlReleaseReminderScanner
+	query        string
+	queryArgs    []any
+	execQuery    string
+	execArgs     []any
+	written      ReleaseReminder
+	execErr      error
+	commitErr    error
+	rollbackErr  error
+	committed    bool
+	rolledBack   bool
+	lockVersion  uint64
+	queryRows    []ReleaseReminder
+	queryRowsErr error
+	operations   []string
 }
 
 func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...any) mysqlReleaseReminderScanner {
@@ -116,7 +123,7 @@ func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...an
 
 func (tx *fakeMySQLReleaseReminderTransaction) Query(query string, args ...any) (mysqlRows, error) {
 	tx.operations = append(tx.operations, "query:"+query)
-	return &fakeMySQLReleaseReminderRows{reminders: tx.queryRows}, nil
+	return &fakeMySQLReleaseReminderRows{reminders: tx.queryRows, err: tx.queryRowsErr}, nil
 }
 
 func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) error {
@@ -390,6 +397,30 @@ func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testin
 	}
 	if tx.operations[2] != "exec:DELETE FROM cm_events" {
 		t.Fatalf("first delete operation = %q", tx.operations[2])
+	}
+}
+
+func TestMySQLWholeStoreSaveIterationErrorRollsBackBeforeDeletes(t *testing.T) {
+	wantErr := errors.New("rows iteration failed")
+	tx := &fakeMySQLReleaseReminderTransaction{
+		lockVersion: 2,
+		queryRows: []ReleaseReminder{{
+			ProfileName:        "apple-usw2",
+			AutoReleaseEnabled: true,
+		}},
+		queryRowsErr: wantErr,
+	}
+	_, err := prepareMySQLWholeStoreSave(tx, MemberData{mutationRevision: 1})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("iteration error = %v, want %v", err, wantErr)
+	}
+	if !tx.rolledBack {
+		t.Fatal("iteration error did not roll back transaction")
+	}
+	for _, operation := range tx.operations {
+		if strings.HasPrefix(operation, "exec:DELETE ") || strings.HasPrefix(operation, "exec:INSERT ") {
+			t.Fatalf("destructive operation after iteration error: %v", tx.operations)
+		}
 	}
 }
 

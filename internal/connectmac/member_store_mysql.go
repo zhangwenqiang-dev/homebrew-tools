@@ -760,6 +760,7 @@ type mysqlReleaseReminderTransaction interface {
 type mysqlRows interface {
 	Next() bool
 	Scan(dest ...any) error
+	Err() error
 	Close() error
 }
 
@@ -805,7 +806,12 @@ func advanceMySQLStoreLock(tx mysqlReleaseReminderExecer) error {
 	return tx.Exec(mysqlStoreLockAdvanceQuery, mysqlStoreLockName)
 }
 
-func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (MemberData, error) {
+func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (result MemberData, err error) {
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
 	version, err := lockMySQLStore(tx)
 	if err != nil {
 		return MemberData{}, err
@@ -824,8 +830,13 @@ func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (Memb
 			}
 			reminders = append(reminders, reminder)
 		}
-		if err := rows.Close(); err != nil {
-			return MemberData{}, err
+		iterationErr := rows.Err()
+		closeErr := rows.Close()
+		if iterationErr != nil {
+			return MemberData{}, iterationErr
+		}
+		if closeErr != nil {
+			return MemberData{}, closeErr
 		}
 		data.Reminders = reminders
 	}
