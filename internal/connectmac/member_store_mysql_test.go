@@ -69,7 +69,32 @@ func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...an
 func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) error {
 	tx.execQuery = query
 	tx.execArgs = args
-	if tx.execErr == nil && len(args) == 21 {
+	if tx.execErr == nil && len(args) == 22 {
+		tx.written = ReleaseReminder{
+			ProfileName:              args[0].(string),
+			AppleEmail:               args[1].(string),
+			HostID:                   args[2].(string),
+			HostCreatedAt:            args[3].(string),
+			ReleaseDueAt:             args[4].(string),
+			OwnerEmail:               args[5].(string),
+			OwnerName:                args[6].(string),
+			LastExtendedByEmail:      args[7].(string),
+			LastExtendedByName:       args[8].(string),
+			LastExtendedAt:           args[9].(string),
+			LastNotifiedAt:           args[10].(string),
+			ReleasedAt:               args[11].(string),
+			Status:                   args[12].(string),
+			AutoReleaseEnabled:       args[13].(bool),
+			AutoReleaseAt:            args[14].(string),
+			AutoReleaseStartedAt:     args[15].(string),
+			AutoReleaseLastAttemptAt: args[16].(string),
+			AutoReleaseAttempts:      args[17].(int),
+			AutoReleaseLastError:     args[18].(string),
+			AutoReleaseState:         args[19].(string),
+			CreatedAt:                args[20].(string),
+			UpdatedAt:                args[21].(string),
+		}
+	} else if tx.execErr == nil && len(args) == 21 {
 		tx.written = ReleaseReminder{
 			ProfileName:              args[20].(string),
 			AppleEmail:               args[0].(string),
@@ -148,6 +173,51 @@ func TestMySQLReleaseReminderSelectColumnsIncludeAutoReleaseState(t *testing.T) 
 	}
 	if !strings.Contains(mysqlReleaseReminderSelectForUpdate, "WHERE profile_name = ? FOR UPDATE") {
 		t.Fatalf("release reminder update query does not lock one profile row: %s", mysqlReleaseReminderSelectForUpdate)
+	}
+}
+
+func TestMySQLSaveReleaseReminderInsertRoundTripsThroughScan(t *testing.T) {
+	want := ReleaseReminder{
+		ProfileName:              "apple-usw2",
+		AppleEmail:               "apple@example.com",
+		HostID:                   "h-123",
+		HostCreatedAt:            "2026-07-01T08:00:00Z",
+		ReleaseDueAt:             "2026-07-02T08:00:00Z",
+		OwnerEmail:               "owner@example.com",
+		OwnerName:                "Owner",
+		LastExtendedByEmail:      "admin@example.com",
+		LastExtendedByName:       "Admin",
+		LastExtendedAt:           "2026-07-01T09:00:00Z",
+		LastNotifiedAt:           "2026-07-01T10:00:00Z",
+		ReleasedAt:               "2026-07-02T09:00:00Z",
+		Status:                   ReleaseReminderStatusReleased,
+		AutoReleaseEnabled:       true,
+		AutoReleaseAt:            "2026-07-02T08:00:00Z",
+		AutoReleaseStartedAt:     "2026-07-02T08:01:00Z",
+		AutoReleaseLastAttemptAt: "2026-07-02T08:02:00Z",
+		AutoReleaseAttempts:      3,
+		AutoReleaseLastError:     "previous failure",
+		AutoReleaseState:         ReleaseReminderAutoReleaseStateReleased,
+		CreatedAt:                "2026-07-01T08:00:00Z",
+		UpdatedAt:                "2026-07-02T09:00:00Z",
+	}
+	tx := &fakeMySQLReleaseReminderTransaction{}
+	if err := insertMySQLReleaseReminder(tx, want); err != nil {
+		t.Fatalf("insert reminder: %v", err)
+	}
+	wantQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if tx.execQuery != wantQuery {
+		t.Fatalf("INSERT query = %q, want %q", tx.execQuery, wantQuery)
+	}
+	if len(tx.execArgs) != 22 {
+		t.Fatalf("INSERT arg count = %d, want 22", len(tx.execArgs))
+	}
+	var got ReleaseReminder
+	if err := scanMySQLReleaseReminder(fakeMySQLReleaseReminderRow{reminder: tx.written}, &got); err != nil {
+		t.Fatalf("scan inserted reminder: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("inserted reminder round trip = %+v, want %+v", got, want)
 	}
 }
 

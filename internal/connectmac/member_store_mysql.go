@@ -401,8 +401,7 @@ func (s MySQLMemberStore) Save(data MemberData) error {
 		}
 	}
 	for _, reminder := range data.Reminders {
-		if _, err := tx.Exec(`INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt); err != nil {
+		if err := insertMySQLReleaseReminder(sqlMySQLReleaseReminderTransaction{tx: tx}, reminder); err != nil {
 			return err
 		}
 	}
@@ -600,9 +599,13 @@ func (s MySQLMemberStore) UpdateReleaseReminder(profileName string, update func(
 	return updateReleaseReminderInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, profileName, s.currentTime(), update)
 }
 
-type mysqlReleaseReminderTransaction interface {
-	QueryRow(query string, args ...any) mysqlReleaseReminderScanner
+type mysqlReleaseReminderExecer interface {
 	Exec(query string, args ...any) error
+}
+
+type mysqlReleaseReminderTransaction interface {
+	mysqlReleaseReminderExecer
+	QueryRow(query string, args ...any) mysqlReleaseReminderScanner
 	Commit() error
 	Rollback() error
 }
@@ -626,6 +629,11 @@ func (tx sqlMySQLReleaseReminderTransaction) Commit() error {
 
 func (tx sqlMySQLReleaseReminderTransaction) Rollback() error {
 	return tx.tx.Rollback()
+}
+
+func insertMySQLReleaseReminder(execer mysqlReleaseReminderExecer, reminder ReleaseReminder) error {
+	return execer.Exec(`INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt)
 }
 
 func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName string, now time.Time, update func(ReleaseReminder) (ReleaseReminder, error)) (updated ReleaseReminder, err error) {
