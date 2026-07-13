@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2737,6 +2738,112 @@ func TestAppWebShutdownTimeoutForcesClose(t *testing.T) {
 	close(unblockRequest)
 	<-requestDone
 }
+
+func TestAppWebServeErrorShutsDownAcceptedConnections(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	serverConn, clientConn := net.Pipe()
+	serveFailure := errors.New("injected serve failure")
+	requestStarted := make(chan struct{})
+	unblockRequest := make(chan struct{})
+	listener := &singleConnErrorListener{
+		conn:       serverConn,
+		afterFirst: requestStarted,
+		err:        serveFailure,
+	}
+	app.Listen = func(string, string) (net.Listener, error) { return listener, nil }
+	app.WebHandler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(requestStarted)
+		<-unblockRequest
+	})
+	app.WebShutdownTimeout = 20 * time.Millisecond
+	clientDone := make(chan error, 1)
+	go func() {
+		if _, err := io.WriteString(clientConn, "GET / HTTP/1.1\r\nHost: test\r\n\r\n"); err != nil {
+			clientDone <- err
+			return
+		}
+		_, err := io.ReadAll(clientConn)
+		clientDone <- err
+	}()
+	if code := app.runWeb(context.Background(), DefaultConfigPath, nil); code != 1 {
+		t.Fatalf("runWeb code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), serveFailure.Error()) {
+		t.Fatalf("error = %q, want original Serve error", errOut.String())
+	}
+	select {
+	case <-clientDone:
+	case <-time.After(time.Second):
+		t.Fatal("accepted connection remained open after Serve failure")
+	}
+	close(unblockRequest)
+	clientConn.Close()
+}
+
+func TestAppWebWorkerShutdownTimeoutWarnsAndReturns(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	listeners := injectEphemeralWebListener(&app)
+	workerStarted := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	workerExited := make(chan struct{})
+	app.WebReminderWorker = func(context.Context) {
+		close(workerStarted)
+		<-releaseWorker
+		close(workerExited)
+	}
+	app.WebWorkerShutdownTimeout = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	codes := make(chan int, 1)
+	go func() { codes <- app.runWeb(ctx, DefaultConfigPath, nil) }()
+	listener := <-listeners
+	waitForTCP(t, listener.Addr().String())
+	<-workerStarted
+	started := time.Now()
+	cancel()
+	if code := <-codes; code != 0 {
+		t.Fatalf("runWeb code = %d, err = %s", code, errOut.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("worker shutdown timeout took %s", elapsed)
+	}
+	if !strings.Contains(errOut.String(), "warning: reminder worker did not stop") {
+		t.Fatalf("error = %q, want worker shutdown warning", errOut.String())
+	}
+	close(releaseWorker)
+	select {
+	case <-workerExited:
+	case <-time.After(time.Second):
+		t.Fatal("released reminder worker did not exit")
+	}
+}
+
+type singleConnErrorListener struct {
+	conn       net.Conn
+	afterFirst <-chan struct{}
+	err        error
+	accepted   bool
+}
+
+func (l *singleConnErrorListener) Accept() (net.Conn, error) {
+	if !l.accepted {
+		l.accepted = true
+		return l.conn, nil
+	}
+	<-l.afterFirst
+	return nil, l.err
+}
+
+func (l *singleConnErrorListener) Close() error   { return nil }
+func (l *singleConnErrorListener) Addr() net.Addr { return testNetAddr("injected:0") }
+
+type testNetAddr string
+
+func (a testNetAddr) Network() string { return "tcp" }
+func (a testNetAddr) String() string  { return string(a) }
 
 func injectEphemeralWebListener(app *App) <-chan net.Listener {
 	listeners := make(chan net.Listener, 1)

@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -130,8 +129,8 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 		fmt.Fprintf(a.Err, "web server failed: %v\n", err)
 		return 1
 	}
-	defer listener.Close()
 	if err := a.JobManager.EndDrain(); err != nil {
+		_ = listener.Close()
 		fmt.Fprintf(a.Err, "job drain cleanup failed: %v\n", err)
 		return 1
 	}
@@ -146,10 +145,9 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 		worker = a.runReleaseReminderWorker
 	}
 	workerCtx, cancelWorker := context.WithCancel(ctx)
-	var workerWG sync.WaitGroup
-	workerWG.Add(1)
+	workerDone := make(chan struct{})
 	go func() {
-		defer workerWG.Done()
+		defer close(workerDone)
 		worker(workerCtx)
 	}()
 	if opts.Open {
@@ -165,28 +163,53 @@ func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 		serveResult <- server.Serve(listener)
 	}()
 	var serveErr error
+	serveFinished := false
 	select {
 	case serveErr = <-serveResult:
+		serveFinished = true
 	case <-ctx.Done():
-		shutdownTimeout := a.WebShutdownTimeout
-		if shutdownTimeout <= 0 {
-			shutdownTimeout = 5 * time.Second
-		}
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
-		shutdownErr := server.Shutdown(shutdownCtx)
-		cancelShutdown()
-		if shutdownErr != nil {
-			_ = server.Close()
-		}
+	}
+	shutdownWebServer(server, webShutdownTimeout(a.WebShutdownTimeout))
+	if !serveFinished {
 		serveErr = <-serveResult
 	}
 	cancelWorker()
-	workerWG.Wait()
+	workerTimeout := webShutdownTimeout(a.WebWorkerShutdownTimeout)
+	if !waitForWebWorker(workerDone, workerTimeout) {
+		fmt.Fprintf(a.Err, "warning: reminder worker did not stop within %s\n", workerTimeout)
+	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		fmt.Fprintf(a.Err, "web server failed: %v\n", serveErr)
 		return 1
 	}
 	return 0
+}
+
+func webShutdownTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 5 * time.Second
+	}
+	return timeout
+}
+
+func shutdownWebServer(server *http.Server, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	err := server.Shutdown(ctx)
+	cancel()
+	if err != nil {
+		_ = server.Close()
+	}
+}
+
+func waitForWebWorker(done <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func (a App) runReleaseReminderWorker(ctx context.Context) {

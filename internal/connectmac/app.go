@@ -25,48 +25,50 @@ type Runner interface {
 type ExecRunner struct{}
 
 type App struct {
-	In                 io.Reader
-	Out                io.Writer
-	Err                io.Writer
-	Version            string
-	Runner             Runner
-	Validator          Validator
-	StateManager       StateManager
-	JobManager         JobManager
-	AWSService         AWSService
-	WebDir             string
-	MemberStore        MemberRepository
-	LogManager         LogManager
-	SyncHistory        SyncHistoryStore
-	LocalTransfers     *LocalTransferJobManager
-	KnownHosts         string
-	RemoteUserAPI      bool
-	LoginConfigCleanup bool
-	Listen             func(network, address string) (net.Listener, error)
-	WebHandler         http.Handler
-	WebReminderWorker  func(context.Context)
-	WebShutdownTimeout time.Duration
+	In                       io.Reader
+	Out                      io.Writer
+	Err                      io.Writer
+	Version                  string
+	Runner                   Runner
+	Validator                Validator
+	StateManager             StateManager
+	JobManager               JobManager
+	AWSService               AWSService
+	WebDir                   string
+	MemberStore              MemberRepository
+	LogManager               LogManager
+	SyncHistory              SyncHistoryStore
+	LocalTransfers           *LocalTransferJobManager
+	KnownHosts               string
+	RemoteUserAPI            bool
+	LoginConfigCleanup       bool
+	Listen                   func(network, address string) (net.Listener, error)
+	WebHandler               http.Handler
+	WebReminderWorker        func(context.Context)
+	WebShutdownTimeout       time.Duration
+	WebWorkerShutdownTimeout time.Duration
 }
 
 func NewApp(out, err io.Writer) App {
 	return App{
-		In:                 os.Stdin,
-		Out:                out,
-		Err:                err,
-		Version:            "dev",
-		Runner:             ExecRunner{},
-		Validator:          NewValidator(),
-		StateManager:       NewStateManager(DefaultStateDir),
-		JobManager:         NewJobManager(DefaultJobDir),
-		AWSService:         NewAWSService(),
-		MemberStore:        NewMemberStore(DefaultMemberDataPath),
-		LogManager:         NewLogManager(DefaultLogDir),
-		SyncHistory:        NewSyncHistoryStore(DefaultSyncHistoryPath),
-		LocalTransfers:     NewLocalTransferJobManager(),
-		KnownHosts:         "~/.ssh/known_hosts",
-		LoginConfigCleanup: true,
-		Listen:             net.Listen,
-		WebShutdownTimeout: 5 * time.Second,
+		In:                       os.Stdin,
+		Out:                      out,
+		Err:                      err,
+		Version:                  "dev",
+		Runner:                   ExecRunner{},
+		Validator:                NewValidator(),
+		StateManager:             NewStateManager(DefaultStateDir),
+		JobManager:               NewJobManager(DefaultJobDir),
+		AWSService:               NewAWSService(),
+		MemberStore:              NewMemberStore(DefaultMemberDataPath),
+		LogManager:               NewLogManager(DefaultLogDir),
+		SyncHistory:              NewSyncHistoryStore(DefaultSyncHistoryPath),
+		LocalTransfers:           NewLocalTransferJobManager(),
+		KnownHosts:               "~/.ssh/known_hosts",
+		LoginConfigCleanup:       true,
+		Listen:                   net.Listen,
+		WebShutdownTimeout:       5 * time.Second,
+		WebWorkerShutdownTimeout: 5 * time.Second,
 	}
 }
 
