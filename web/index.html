@@ -545,7 +545,7 @@
       </div>
     </div>
   </div>
-  <div id="autoReleaseLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="autoReleaseTitle">
+  <div id="autoReleaseLayer" class="picker-layer hidden" role="dialog" aria-modal="true" aria-labelledby="autoReleaseTitle" aria-describedby="autoReleaseDialogCopy autoReleaseSafetyCopy">
     <div class="picker-card">
       <div class="section-head">
         <h2 id="autoReleaseTitle">自动释放</h2>
@@ -553,7 +553,7 @@
       </div>
       <div class="profile-form-grid">
         <div id="autoReleaseDialogCopy" class="wide"></div>
-        <div class="wide muted">永久保留弹性IP，不会释放 Elastic IP allocation。</div>
+        <div id="autoReleaseSafetyCopy" class="wide muted">永久保留弹性IP，不会释放 Elastic IP allocation。取消已安排或正在重试的自动释放周期；自动释放已经开始时无法撤回。</div>
       </div>
       <div class="picker-actions">
         <button id="autoReleaseCancelBtn">取消</button>
@@ -918,7 +918,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoReleaseEnabled: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, autoReleaseTrigger: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -975,6 +975,8 @@
         path.startsWith("/api/profile-owner/") ||
         path === "/api/managed-profiles" ||
         path.startsWith("/api/managed-profile/") ||
+        path === "/api/release-reminders" ||
+        path === "/api/release-reminder/auto-release" ||
         path === "/api/settings" ||
         path.startsWith("/api/events");
     }
@@ -1344,7 +1346,7 @@
       refreshVisibleStatuses();
     }
 
-    async function loadReleaseReminders() {
+    async function loadReleaseReminders(options = {}) {
       try {
         const body = await api("/api/release-reminders");
         const reminders = body.data?.reminders || [];
@@ -1354,8 +1356,11 @@
             state.reminders[reminder.profile_name] = reminder;
           }
         }
+        return true;
       } catch (err) {
-        state.reminders = {};
+        if (options.required) throw err;
+        setStatus("提醒状态刷新失败，将继续重试");
+        return false;
       }
     }
 
@@ -1921,7 +1926,8 @@
         return;
       }
       const enabled = !reminder.auto_release_enabled;
-      state.pendingAutoReleaseEnabled = enabled;
+      state.pendingAutoRelease = { profile: p.name, enabled };
+      state.autoReleaseTrigger = document.activeElement;
       $("autoReleaseTitle").textContent = enabled ? "开启自动释放" : "关闭自动释放";
       $("autoReleaseDialogCopy").textContent = enabled
         ? "开启后，到期提醒后等待10分钟再自动释放；失败每5分钟重试，最多1小时。"
@@ -1931,37 +1937,61 @@
       $("autoReleaseConfirmBtn").classList.toggle("primary", enabled);
       renderAutoReleaseDialog();
       $("autoReleaseLayer").classList.remove("hidden");
+      $("autoReleaseConfirmBtn").focus();
     }
 
     function renderAutoReleaseDialog() {
       $("autoReleaseConfirmBtn").disabled = state.autoReleaseSubmitting;
       $("autoReleaseCancelBtn").disabled = state.autoReleaseSubmitting;
       $("autoReleaseCloseBtn").disabled = state.autoReleaseSubmitting;
-      $("autoReleaseConfirmBtn").textContent = state.autoReleaseSubmitting ? "保存中..." : (state.pendingAutoReleaseEnabled ? "确认开启" : "确认关闭");
+      $("autoReleaseConfirmBtn").textContent = state.autoReleaseSubmitting ? "保存中..." : (state.pendingAutoRelease?.enabled ? "确认开启" : "确认关闭");
     }
 
     function closeAutoReleaseDialog() {
       if (state.autoReleaseSubmitting) return;
-      state.pendingAutoReleaseEnabled = null;
+      const trigger = state.autoReleaseTrigger;
+      state.autoReleaseTrigger = null;
+      state.pendingAutoRelease = null;
       $("autoReleaseLayer").classList.add("hidden");
+      if (trigger && typeof trigger.focus === "function") trigger.focus();
+    }
+
+    function handleAutoReleaseDialogKeydown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeAutoReleaseDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from($("autoReleaseLayer").querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"));
+      if (!focusable.length) return;
+      if (event.shiftKey && document.activeElement === focusable[0]) {
+        event.preventDefault();
+        focusable[focusable.length - 1].focus();
+      } else if (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]) {
+        event.preventDefault();
+        focusable[0].focus();
+      }
     }
 
     async function submitAutoRelease() {
-      const p = selectedProfile();
-      const enabled = state.pendingAutoReleaseEnabled;
-      if (!p || !isAdmin() || state.autoReleaseSubmitting) return;
-      if (typeof enabled !== "boolean") return;
+      const pending = state.pendingAutoRelease;
+      if (!pending || pending.profile !== state.selected) {
+        setStatus("自动释放目标已变化，请重新打开设置。");
+        return;
+      }
+      if (!isAdmin() || state.autoReleaseSubmitting) return;
       state.autoReleaseSubmitting = true;
       renderAutoReleaseDialog();
       try {
         await api("/api/release-reminder/auto-release", {
           method: "POST",
-          body: JSON.stringify({ profile: p.name, enabled })
+          body: JSON.stringify({ profile: pending.profile, enabled: pending.enabled })
         });
-        await loadReleaseReminders();
+        await loadReleaseReminders({ required: true });
         state.autoReleaseSubmitting = false;
         closeAutoReleaseDialog();
-        setStatus(enabled ? "自动释放已开启。" : "自动释放已关闭，已取消等待或重试周期。");
+        setStatus(pending.enabled ? "自动释放已开启。" : "自动释放已关闭，已取消等待或重试周期。");
       } catch (err) {
         await loadReleaseReminders().catch(() => {});
         const detail = String(err.message || err || "未知错误");
@@ -3397,10 +3427,23 @@
       }
     }
 
-    async function loadJobs() {
+    function autoReleasePollingNeeded() {
+      return Object.values(state.reminders).some((reminder) =>
+        reminder.auto_release_state === "scheduled" || reminder.auto_release_state === "running" || reminder.auto_release_state === "retrying"
+      );
+    }
+
+    function jobPollingNeeded() {
+      return state.jobs.some((job) => job.status === "starting" || job.status === "running") || autoReleasePollingNeeded();
+    }
+
+    async function loadJobs(options = {}) {
       const body = await api("/api/jobs");
       const jobs = body.data.jobs || [];
       state.jobs = jobs;
+      if (options.refreshReminders) {
+        await loadReleaseReminders();
+      }
       $("jobs").innerHTML = jobs.length ? jobs.map((job) =>
         "<tr>" +
           "<td data-label=\"Job\">" + escapeHTML(job.id || "-") + "</td>" +
@@ -3413,7 +3456,7 @@
       document.querySelectorAll("[data-job-log]").forEach((button) => {
         button.addEventListener("click", () => loadJobLog(button.getAttribute("data-job-log")));
       });
-      if (jobs.some((job) => job.status === "starting" || job.status === "running")) {
+      if (jobPollingNeeded()) {
         scheduleJobRefresh();
       }
       renderSelected();
@@ -3424,7 +3467,15 @@
       if (jobRefreshTimer) return;
       jobRefreshTimer = setTimeout(async () => {
         jobRefreshTimer = null;
-        await loadJobs();
+        try {
+          await loadJobs({ refreshReminders: true });
+        } catch (err) {
+          setStatus("任务状态刷新失败，将继续重试");
+        } finally {
+          if (jobPollingNeeded()) {
+            scheduleJobRefresh();
+          }
+        }
       }, 10000);
     }
 
@@ -3612,6 +3663,7 @@
     $("autoReleaseLayer").addEventListener("click", (event) => {
       if (event.target === $("autoReleaseLayer")) closeAutoReleaseDialog();
     });
+    $("autoReleaseLayer").addEventListener("keydown", handleAutoReleaseDialogKeydown);
     $("cleanupRecordsBtn").addEventListener("click", cleanupLocalRecords);
     $("saveReleaseReminderBtn").addEventListener("click", saveReleaseReminder);
     $("cancelReleaseReminderBtn").addEventListener("click", closeReleaseReminderEditor);

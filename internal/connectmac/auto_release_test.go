@@ -438,6 +438,8 @@ func TestAutoReleaseObservesSuccessfulJobAndRetainsEIPAllocation(t *testing.T) {
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
 	jobs := &autoReleaseTestJobs{}
 	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	events := make([]AutoReleaseEvent, 0, 1)
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
 	coordinator.Jobs = jobs
 	statuses := []AWSStatus{
 		{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}, Instances: []InstanceStatus{autoReleaseTestInstance("running")}, ElasticIP: ElasticIP{AllocationID: "eipalloc-1", AssociationID: "eipassoc-1", InstanceID: "i-1"}},
@@ -468,6 +470,9 @@ func TestAutoReleaseObservesSuccessfulJobAndRetainsEIPAllocation(t *testing.T) {
 	}
 	if len(*notifications) != 1 || (*notifications)[0].Kind != AutoReleaseNotificationSuccess {
 		t.Fatalf("notifications = %+v", *notifications)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "released" || !strings.Contains(events[len(events)-1].Message, "eip_retained=true") {
+		t.Fatalf("events = %+v", events)
 	}
 }
 

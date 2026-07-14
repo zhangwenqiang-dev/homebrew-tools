@@ -127,6 +127,87 @@ func TestMemberStoreCompleteAutoReleaseRaceWithNewOpenIsSafe(t *testing.T) {
 	}
 }
 
+func TestMemberStoreUpsertReleaseReminderResetsAutoReleaseForNewCycle(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		state       string
+		changeApple bool
+	}{
+		{name: "enabled-new-host", state: ""},
+		{name: "running-new-host", state: ReleaseReminderAutoReleaseStateRunning},
+		{name: "retrying-new-host", state: ReleaseReminderAutoReleaseStateRetrying},
+		{name: "enabled-new-apple", state: "", changeApple: true},
+		{name: "running-new-apple", state: ReleaseReminderAutoReleaseStateRunning, changeApple: true},
+		{name: "retrying-new-apple", state: ReleaseReminderAutoReleaseStateRetrying, changeApple: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+			old := runningAutoReleaseReminder("owner@example.com")
+			old.AutoReleaseState = test.state
+			if test.state == "" {
+				old.AutoReleaseAt = "2026-07-13T08:10:00Z"
+				old.AutoReleaseStartedAt = ""
+				old.AutoReleaseLastAttemptAt = ""
+				old.AutoReleaseAttempts = 0
+			}
+			if _, err := store.UpsertReleaseReminder(old); err != nil {
+				t.Fatalf("upsert old reminder: %v", err)
+			}
+
+			updated := old
+			if !test.changeApple {
+				updated.HostID = "h-new"
+			}
+			if test.changeApple {
+				updated.AppleEmail = "new-apple@example.com"
+			}
+			updated.OwnerEmail = "new-owner@example.com"
+			updated.Status = ReleaseReminderStatusActive
+			updated.AutoReleaseAt = "2026-07-14T08:10:00Z"
+			updated.AutoReleaseStartedAt = "stale-start"
+			updated.AutoReleaseLastAttemptAt = "stale-attempt"
+			updated.AutoReleaseAttempts = 99
+			updated.AutoReleaseLastError = "stale error"
+			updated.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+			got, err := store.UpsertReleaseReminder(updated)
+			if err != nil {
+				t.Fatalf("upsert new reminder: %v", err)
+			}
+			if got.HostID != updated.HostID || got.AppleEmail != updated.AppleEmail || got.OwnerEmail != updated.OwnerEmail || got.Status != ReleaseReminderStatusActive {
+				t.Fatalf("new cycle fields not retained: %+v", got)
+			}
+			if got.AutoReleaseEnabled || got.AutoReleaseAt != "" || got.AutoReleaseStartedAt != "" || got.AutoReleaseLastAttemptAt != "" || got.AutoReleaseAttempts != 0 || got.AutoReleaseLastError != "" || got.AutoReleaseState != "" {
+				t.Fatalf("auto-release state leaked into new cycle: %+v", got)
+			}
+		})
+	}
+}
+
+func TestMemberStoreUpsertReleaseReminderPreservesAutoReleaseForSameCycle(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	old := runningAutoReleaseReminder("owner@example.com")
+	old.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+	old.AutoReleaseLastError = "host is pending"
+	if _, err := store.UpsertReleaseReminder(old); err != nil {
+		t.Fatalf("upsert old reminder: %v", err)
+	}
+
+	updated := old
+	updated.OwnerEmail = "new-owner@example.com"
+	updated.Status = ReleaseReminderStatusActive
+	updated.HostCreatedAt = "2026-07-13T08:00:00Z"
+	got, err := store.UpsertReleaseReminder(updated)
+	if err != nil {
+		t.Fatalf("upsert same-cycle reminder: %v", err)
+	}
+	if got.HostID != old.HostID || got.AppleEmail != old.AppleEmail || got.OwnerEmail != updated.OwnerEmail || got.Status != updated.Status {
+		t.Fatalf("same-cycle fields not updated: %+v", got)
+	}
+	if !got.AutoReleaseEnabled || got.AutoReleaseAt != old.AutoReleaseAt || got.AutoReleaseStartedAt != old.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != old.AutoReleaseLastAttemptAt || got.AutoReleaseAttempts != old.AutoReleaseAttempts || got.AutoReleaseLastError != old.AutoReleaseLastError || got.AutoReleaseState != old.AutoReleaseState {
+		t.Fatalf("same-cycle auto-release state was not preserved: %+v", got)
+	}
+}
+
 func runningAutoReleaseReminder(ownerEmail string) ReleaseReminder {
 	return ReleaseReminder{
 		ProfileName:              "mac",

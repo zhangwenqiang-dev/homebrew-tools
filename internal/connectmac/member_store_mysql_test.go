@@ -536,6 +536,7 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 func TestMySQLUpsertReleaseReminderPreservesAutomaticReleaseState(t *testing.T) {
 	current := ReleaseReminder{
 		ProfileName:              "apple-usw2",
+		AppleEmail:               "apple@example.com",
 		HostID:                   "h-original",
 		Status:                   ReleaseReminderStatusActive,
 		AutoReleaseEnabled:       true,
@@ -553,7 +554,7 @@ func TestMySQLUpsertReleaseReminderPreservesAutomaticReleaseState(t *testing.T) 
 	got, err := upsertReleaseReminderInMySQLTransaction(tx, ReleaseReminder{
 		ProfileName:         current.ProfileName,
 		AppleEmail:          " APPLE@EXAMPLE.COM ",
-		HostID:              "h-updated",
+		HostID:              "h-original",
 		OwnerEmail:          " OWNER@EXAMPLE.COM ",
 		LastExtendedByEmail: " ADMIN@EXAMPLE.COM ",
 	}, now)
@@ -562,7 +563,7 @@ func TestMySQLUpsertReleaseReminderPreservesAutomaticReleaseState(t *testing.T) 
 	}
 	want := current
 	want.AppleEmail = "apple@example.com"
-	want.HostID = "h-updated"
+	want.HostID = "h-original"
 	want.OwnerEmail = "owner@example.com"
 	want.LastExtendedByEmail = "admin@example.com"
 	want.Status = ReleaseReminderStatusActive

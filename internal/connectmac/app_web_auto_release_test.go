@@ -27,7 +27,6 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 		`id="autoReleaseError"`,
 		`id="autoReleaseToggleBtn" class="admin-only"`,
 		`/api/release-reminder/auto-release`,
-		`JSON.stringify({ profile: p.name, enabled })`,
 		`未开启自动释放`,
 		`等待提醒`,
 		`将在 ${formatTime(reminder.auto_release_at)} 自动释放`,
@@ -56,14 +55,146 @@ func TestWebAutoReleaseDialogAndSubmissionContract(t *testing.T) {
 		`永久保留弹性IP`,
 		`取消已安排或正在重试的自动释放周期`,
 		`自动释放已经开始时无法撤回`,
-		`if (!p || !isAdmin() || state.autoReleaseSubmitting) return;`,
+		`state.pendingAutoRelease = { profile: p.name, enabled };`,
+		`const pending = state.pendingAutoRelease;`,
+		`if (!pending || pending.profile !== state.selected)`,
 		`state.autoReleaseSubmitting = true;`,
 		`$("autoReleaseConfirmBtn").disabled = state.autoReleaseSubmitting;`,
-		`await loadReleaseReminders();`,
+		`body: JSON.stringify({ profile: pending.profile, enabled: pending.enabled })`,
+		`await loadReleaseReminders({ required: true });`,
 		`closeAutoReleaseDialog();`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web auto release dialog missing %q", want)
+		}
+	}
+}
+
+func TestWebAutoReleaseRemoteModeRoutesReminderAPIs(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	start := strings.Index(html, "function remoteUserAPIPath(path)")
+	if start < 0 {
+		t.Fatal("remote user API routing functions are missing")
+	}
+	end := strings.Index(html[start:], "function apiURL(path)")
+	if end < 0 {
+		t.Fatal("remote user API routing functions are missing")
+	}
+	routing := html[start : start+end]
+	for _, path := range []string{`path === "/api/release-reminders"`, `path === "/api/release-reminder/auto-release"`} {
+		if !strings.Contains(routing, path) {
+			t.Fatalf("remote user API routing missing %q", path)
+		}
+	}
+	if !strings.Contains(html, `return "/api/user-proxy" + path;`) {
+		t.Fatal("remote user API paths do not use the user proxy")
+	}
+}
+
+func TestWebAutoReleaseModalRejectsChangedSelection(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	start := strings.Index(html, "async function submitAutoRelease()")
+	if start < 0 {
+		t.Fatal("auto release submit function is missing")
+	}
+	end := strings.Index(html[start:], "async function saveReleaseReminder()")
+	if end < 0 {
+		t.Fatal("auto release submit function is missing")
+	}
+	submit := html[start : start+end]
+	guard := strings.Index(submit, `if (!pending || pending.profile !== state.selected)`)
+	mutation := strings.Index(submit, `api("/api/release-reminder/auto-release"`)
+	if guard < 0 || mutation < 0 || guard > mutation {
+		t.Fatal("changed selection is not rejected before the auto release mutation")
+	}
+	if strings.Contains(submit, `profile: p.name`) {
+		t.Fatal("auto release submit must not read the current selected profile")
+	}
+	if !strings.Contains(submit, `body: JSON.stringify({ profile: pending.profile, enabled: pending.enabled })`) {
+		t.Fatal("auto release submit does not use the captured modal target")
+	}
+}
+
+func TestWebAutoReleaseRefreshAndPollingContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`async function loadReleaseReminders(options = {})`,
+		`if (options.required) throw err;`,
+		`setStatus("提醒状态刷新失败，将继续重试");`,
+		`return false;`,
+		`autoReleasePollingNeeded()`,
+		`function jobPollingNeeded()`,
+		`await loadJobs({ refreshReminders: true });`,
+		`setStatus("任务状态刷新失败，将继续重试");`,
+		`} finally {`,
+		`if (jobPollingNeeded()) {`,
+		`if (jobRefreshTimer) return;`,
+		`auto_release_state === "scheduled" || reminder.auto_release_state === "running" || reminder.auto_release_state === "retrying"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web auto release refresh/polling contract missing %q", want)
+		}
+	}
+	reminderLoaderStart := strings.Index(html, "async function loadReleaseReminders(options = {})")
+	if reminderLoaderStart < 0 {
+		t.Fatal("release reminder loader is missing")
+	}
+	reminderLoaderEnd := strings.Index(html[reminderLoaderStart:], "async function loadProfileOwners()")
+	if reminderLoaderEnd < 0 {
+		t.Fatal("release reminder loader boundary is missing")
+	}
+	reminderLoader := html[reminderLoaderStart : reminderLoaderStart+reminderLoaderEnd]
+	if strings.Contains(reminderLoader, "state.reminders = {};\n        if (options.required)") {
+		t.Fatal("optional reminder refresh must preserve existing reminders")
+	}
+
+	pollingStart := strings.Index(html, "function scheduleJobRefresh()")
+	if pollingStart < 0 {
+		t.Fatal("job polling function is missing")
+	}
+	pollingEnd := strings.Index(html[pollingStart:], "async function loadJobLog(")
+	if pollingEnd < 0 {
+		t.Fatal("job polling boundary is missing")
+	}
+	polling := html[pollingStart : pollingStart+pollingEnd]
+	if !strings.Contains(polling, "try {") || !strings.Contains(polling, "} catch (err) {") || !strings.Contains(polling, "} finally {") {
+		t.Fatal("job polling must catch failures and schedule from finally")
+	}
+	if strings.Count(polling, "scheduleJobRefresh();") < 1 {
+		t.Fatal("job polling must schedule another attempt after a failed refresh")
+	}
+}
+
+func TestWebAutoReleaseDialogAccessibilityContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`role="dialog" aria-modal="true" aria-labelledby="autoReleaseTitle" aria-describedby="autoReleaseDialogCopy autoReleaseSafetyCopy"`,
+		`state.autoReleaseTrigger = document.activeElement;`,
+		`$("autoReleaseConfirmBtn").focus();`,
+		`if (event.key === "Escape")`,
+		`if (event.key !== "Tab") return;`,
+		`focusable[focusable.length - 1].focus();`,
+		`focusable[0].focus();`,
+		`trigger.focus();`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web auto release accessibility contract missing %q", want)
 		}
 	}
 }

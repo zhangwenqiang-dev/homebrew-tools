@@ -1980,6 +1980,9 @@ func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now stri
 
 func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) ReleaseReminder {
 	updated = normalizeReleaseReminderCallback(current, updated, now)
+	if current.HostID != updated.HostID || current.AppleEmail != updated.AppleEmail {
+		return resetAutoReleaseForNewCycle(updated)
+	}
 	updated.AutoReleaseEnabled = current.AutoReleaseEnabled
 	updated.AutoReleaseAt = current.AutoReleaseAt
 	updated.AutoReleaseStartedAt = current.AutoReleaseStartedAt
@@ -1988,6 +1991,17 @@ func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) Re
 	updated.AutoReleaseLastError = current.AutoReleaseLastError
 	updated.AutoReleaseState = current.AutoReleaseState
 	return updated
+}
+
+func resetAutoReleaseForNewCycle(reminder ReleaseReminder) ReleaseReminder {
+	reminder.AutoReleaseEnabled = false
+	reminder.AutoReleaseAt = ""
+	reminder.AutoReleaseStartedAt = ""
+	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseAttempts = 0
+	reminder.AutoReleaseLastError = ""
+	reminder.AutoReleaseState = ""
+	return reminder
 }
 
 func releaseReminderNotFoundError(profileName string) error {

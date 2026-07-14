@@ -468,13 +468,13 @@ func TestMemberStoreReleaseReminderLegacyWritersShareAtomicLock(t *testing.T) {
 			writer: func(store MemberStore) error {
 				_, err := store.UpsertReleaseReminder(ReleaseReminder{
 					ProfileName: "apple-usw2",
-					HostID:      "h-updated",
+					HostID:      "h-original",
 					Status:      ReleaseReminderStatusActive,
 				})
 				return err
 			},
 			check: func(t *testing.T, reminder ReleaseReminder) {
-				if reminder.HostID != "h-updated" {
+				if reminder.HostID != "h-original" {
 					t.Fatalf("legacy upsert host ID = %q", reminder.HostID)
 				}
 			},

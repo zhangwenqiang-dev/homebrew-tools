@@ -176,7 +176,7 @@ CONNECTMAC_WEB_BASE_URL=https://cm.hsgitlab.xyz
 
 Without those variables, `cm web` keeps using the local JSON member store at `~/.connectmac/members.json`.
 
-`CONNECTMAC_WECHAT_WEBHOOK_URL` enables Enterprise WeChat notifications for Mac open confirmation, release-reminder extension, due reminders, and confirmed release. Release reminders notify only; they never release AWS resources automatically.
+`CONNECTMAC_WECHAT_WEBHOOK_URL` enables Enterprise WeChat notifications for Mac open confirmation, release-reminder extension, due reminders, automatic-release failures, and confirmed release. Automatic release is configured per Profile and is disabled by default. When enabled, a due reminder starts a 10-minute grace period; a member can cancel that cycle only by extending the release time to at least 10 minutes after the current time. The automatic release worker retries recoverable failures every 5 minutes for at most 1 hour. It stops immediately for non-recoverable errors and reports the reason. It never releases the Elastic IP allocation; successful events include `eip_retained=true`. Reminder and automatic-release state is persisted, so the service can recover the cycle after a restart. Staging deployments use the job drain guard and wait for these background jobs before installing or restarting the service.
 
 ## Commands
 
