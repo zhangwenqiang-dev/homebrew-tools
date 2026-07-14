@@ -309,6 +309,7 @@
       white-space: nowrap;
     }
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .member-actions { gap: 10px; }
     .row-actions button { min-height: 28px; padding: 3px 8px; }
     .inline-select { width: 100%; margin-top: 6px; }
     .terminal-wrap { display: grid; gap: 10px; padding: 12px; }
@@ -1461,7 +1462,7 @@
           "<td data-label=\"负责人\">" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td data-label=\"Region\">" + escapeHTML(p.region || "-") + "</td>" +
           "<td data-label=\"状态\">" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td data-label=\"操作\"><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button class=\"local-action\" data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"连接到本机终端\"><span class=\"action-icon\" aria-hidden=\"true\">↗</span>连接</button><button class=\"local-action\" data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + " title=\"打开本机 VNC\"><span class=\"action-icon\" aria-hidden=\"true\">▣</span>VNC</button><button class=\"local-action\" data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"传输文件\"><span class=\"action-icon\" aria-hidden=\"true\">⇅</span>传输</button></div></td>" +
+          "<td data-label=\"操作\"><div class=\"row-actions\"><button class=\"local-action\" data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"连接到本机终端\"><span class=\"action-icon\" aria-hidden=\"true\">↗</span>连接</button><button class=\"local-action\" data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + " title=\"打开本机 VNC\"><span class=\"action-icon\" aria-hidden=\"true\">▣</span>VNC</button><button class=\"local-action\" data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"传输文件\"><span class=\"action-icon\" aria-hidden=\"true\">⇅</span>传输</button><button data-profile=\"" + escapeAttr(p.name) + "\" title=\"选择当前 Profile\"><span class=\"action-icon\" aria-hidden=\"true\">✓</span>选择</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {
@@ -1506,7 +1507,7 @@
       $("members").innerHTML = state.members.length ? state.members.map((member) => {
         const enabledText = member.enabled ? "启用" : "停用";
         const enabledClass = member.enabled ? "ready" : "stopped";
-        const actions = isAdmin() ? "<div class=\"row-actions\">" +
+        const actions = isAdmin() ? "<div class=\"row-actions member-actions\">" +
           "<button data-member-profiles=\"" + escapeAttr(member.email || "") + "\">配置</button>" +
           "<button data-member-edit=\"" + escapeAttr(member.email || "") + "\">修改</button>" +
           "<button data-member-password=\"" + escapeAttr(member.email || "") + "\">改密码</button>" +

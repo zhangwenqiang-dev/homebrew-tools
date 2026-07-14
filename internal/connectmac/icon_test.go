@@ -43,9 +43,13 @@ func TestConnectMacIconAssetAndLocalAgentEndpoint(t *testing.T) {
 		`class=\"action-icon\" aria-hidden=\"true\">↗</span>连接`,
 		`class=\"action-icon\" aria-hidden=\"true\">▣</span>VNC`,
 		`class=\"action-icon\" aria-hidden=\"true\">⇅</span>传输`,
+		`class=\"action-icon\" aria-hidden=\"true\">✓</span>选择`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("Web icon contract missing %q", want)
 		}
+	}
+	if strings.Index(html, `data-sync=\"`) > strings.Index(html, `data-profile=\"`) {
+		t.Fatalf("select action must appear after transfer action")
 	}
 }
