@@ -1,8 +1,14 @@
 # ConnectMac
 
+![ConnectMac link mark](web/assets/connectmac-mark.svg)
+
 ConnectMac is an internal CLI for managing SSH local port-forwarding profiles. It is built for commands like VNC tunnels, where a small typo in the host, key, or port can connect to the wrong place or silently fail.
 
 The binary command is `cm`.
+
+The shared ConnectMac link mark is `web/assets/connectmac-mark.svg`; packaged Web
+managers include it automatically, and the macOS Local Agent exposes the same
+mark at `http://127.0.0.1:18765/icon.svg`.
 
 ## Build
 

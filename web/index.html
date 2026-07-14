@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ConnectMac</title>
+  <link rel="icon" type="image/svg+xml" href="assets/connectmac-mark.svg">
   <link rel="stylesheet" href="/vendor/xterm/xterm.css">
   <script src="/vendor/xterm/xterm.js"></script>
   <style>
@@ -65,6 +66,9 @@
       background: var(--panel);
     }
     h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: 0; }
+    .brand-title { display: inline-flex; align-items: center; gap: 8px; }
+    .brand-title img { display: block; }
+    .action-icon { display: inline-block; min-width: 1em; margin-right: 4px; font-size: 15px; line-height: 1; }
     main {
       min-width: 0;
       flex: 1;
@@ -645,7 +649,7 @@
   </div>
   <div id="appShell" class="hidden">
     <header>
-      <h1>ConnectMac</h1>
+      <h1 class="brand-title"><img src="assets/connectmac-mark.svg" alt="" width="28" height="28">ConnectMac</h1>
       <div class="toolbar">
         <span id="localAgentStatus" class="local-agent-status">本机代理未启动</span>
         <button id="currentUserBtn" class="user-button" title="用户页">
@@ -1457,7 +1461,7 @@
           "<td data-label=\"负责人\">" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td data-label=\"Region\">" + escapeHTML(p.region || "-") + "</td>" +
           "<td data-label=\"状态\">" + statusBadge(status) + statusDetail(status) + "</td>" +
-          "<td data-label=\"操作\"><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button class=\"local-action\" data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">连接</button><button class=\"local-action\" data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + ">VNC</button><button class=\"local-action\" data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + ">传输</button></div></td>" +
+          "<td data-label=\"操作\"><div class=\"row-actions\"><button data-profile=\"" + escapeAttr(p.name) + "\">选择</button><button class=\"local-action\" data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"连接到本机终端\"><span class=\"action-icon\" aria-hidden=\"true\">↗</span>连接</button><button class=\"local-action\" data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + " title=\"打开本机 VNC\"><span class=\"action-icon\" aria-hidden=\"true\">▣</span>VNC</button><button class=\"local-action\" data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"传输文件\"><span class=\"action-icon\" aria-hidden=\"true\">⇅</span>传输</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-profile]").forEach((button) => {

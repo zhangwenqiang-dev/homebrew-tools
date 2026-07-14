@@ -589,6 +589,7 @@ func writePlistKeyBool(b *strings.Builder, key string, value bool) {
 
 func (a App) newLocalAgentHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/icon.svg", localAgentCORS(localAgentIconHandler))
 	mux.HandleFunc("/health", localAgentCORS(a.localAgentHealthHandler()))
 	mux.HandleFunc("/start", localAgentCORS(a.localAgentCommandHandler("start")))
 	mux.HandleFunc("/open-vnc", localAgentCORS(a.localAgentCommandHandler("open-vnc")))
@@ -605,6 +606,27 @@ func (a App) newLocalAgentHandler() http.Handler {
 	mux.HandleFunc("/local/pick", localAgentCORS(a.localAgentPickHandler()))
 	mux.HandleFunc("/local/list", localAgentCORS(a.webLocalListHandler()))
 	return mux
+}
+
+const localAgentIconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">ConnectMac</title>
+  <desc id="desc">Two linked blue chain loops</desc>
+  <g fill="none" stroke="#2563eb" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+    <path d="M25 39 18 46a11 11 0 0 1-16-16l9-9a11 11 0 0 1 16 0"/>
+    <path d="m39 25 7-7a11 11 0 0 1 16 16l-9 9a11 11 0 0 1-16 0"/>
+    <path d="m21 43 22-22"/>
+  </g>
+</svg>`
+
+func localAgentIconHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = io.WriteString(w, localAgentIconSVG)
 }
 
 func (a App) localAgentTransferHandler(direction string) http.HandlerFunc {

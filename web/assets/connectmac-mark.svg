@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">ConnectMac</title>
+  <desc id="desc">Two linked blue chain loops</desc>
+  <g fill="none" stroke="#2563eb" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+    <path d="M25 39 18 46a11 11 0 0 1-16-16l9-9a11 11 0 0 1 16 0"/>
+    <path d="m39 25 7-7a11 11 0 0 1 16 16l-9 9a11 11 0 0 1-16 0"/>
+    <path d="m21 43 22-22"/>
+  </g>
+</svg>
