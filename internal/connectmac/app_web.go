@@ -397,6 +397,19 @@ func (a App) newWebHandler(configPath string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		http.StripPrefix("/vendor/", http.FileServer(http.Dir(filepath.Join(dir, "vendor")))).ServeHTTP(w, r)
 	})
+	mux.HandleFunc("/assets/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		dir, err := a.resolveWebDir()
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(dir, "assets")))).ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/api/auth/me", a.webAuthMeHandler())
 	mux.HandleFunc("/api/auth/challenge", a.webAuthChallengeHandler())
 	mux.HandleFunc("/api/auth/setup", a.webAuthSetupHandler(configPath))

@@ -1992,6 +1992,33 @@ func TestAppWebServesVendorAssets(t *testing.T) {
 	}
 }
 
+func TestAppWebServesAssets(t *testing.T) {
+	dir := t.TempDir()
+	webDir := filepath.Join(dir, "web")
+	writeFile(t, filepath.Join(webDir, "index.html"), "<!doctype html><title>External ConnectMac</title>")
+	writeFile(t, filepath.Join(webDir, "assets", "connectmac-mark.svg"), "<svg>ConnectMac</svg>")
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.WebDir = webDir
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/connectmac-mark.svg", nil)
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "ConnectMac") {
+		t.Fatalf("asset body = %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/assets/connectmac-mark.svg", nil)
+	rec = httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAppWebAWSStatusAPI(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
