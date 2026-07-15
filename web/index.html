@@ -654,11 +654,9 @@
         <label>Apple 邮箱<input id="profileFormAppleEmail" placeholder="user@example.com"></label>
         <label class="wide">描述<input id="profileFormDescription" placeholder="苹果账号：user@example.com"></label>
         <label>SSH User<input id="profileFormUser" placeholder="ec2-user"></label>
-        <label>Identity File<input id="profileFormIdentityFile" placeholder="~/.ssh/maiqi-xcode.pem"></label>
         <label>Host<input id="profileFormHost" placeholder="ec2-1-2-3-4.us-west-2.compute.amazonaws.com"></label>
         <label>AWS Profile<input id="profileFormAWSProfile" placeholder="cm-user"></label>
         <label>Region<input id="profileFormRegion" placeholder="us-west-2"></label>
-        <label>Creator<input id="profileFormCreator" placeholder="张文强"></label>
         <label>Resource Name<input id="profileFormResourceName" placeholder="xcode-user@example.com"></label>
         <label>Key Name<input id="profileFormKeyName" placeholder="maiqi-xcode"></label>
         <label>Security Group ID<input id="profileFormSecurityGroup" placeholder="sg-..."></label>
@@ -3169,7 +3167,7 @@
     }
 
     function profileFormFieldIDs() {
-      return ["profileFormName", "profileFormAppleEmail", "profileFormDescription", "profileFormUser", "profileFormIdentityFile", "profileFormHost", "profileFormAWSProfile", "profileFormRegion", "profileFormCreator", "profileFormResourceName", "profileFormKeyName", "profileFormSecurityGroup", "profileFormSubnet", "profileFormEIPAllocation", "profileFormEIPPublic", "profileFormAMIX86", "profileFormAMIARM", "profileFormAZs", "profileFormTypes", "profileFormSubnetsByAZ", "profileFormTunnelPort", "profileFormIntelFallback"];
+      return ["profileFormName", "profileFormAppleEmail", "profileFormDescription", "profileFormUser", "profileFormHost", "profileFormAWSProfile", "profileFormRegion", "profileFormResourceName", "profileFormKeyName", "profileFormSecurityGroup", "profileFormSubnet", "profileFormEIPAllocation", "profileFormEIPPublic", "profileFormAMIX86", "profileFormAMIARM", "profileFormAZs", "profileFormTypes", "profileFormSubnetsByAZ", "profileFormTunnelPort", "profileFormIntelFallback"];
     }
 
     function fillProfileForm(profile) {
@@ -3178,11 +3176,9 @@
       $("profileFormAppleEmail").value = profile.apple_email || yamlField(yaml, "account_email") || yamlField(yaml, "value");
       $("profileFormDescription").value = profile.description || yamlField(yaml, "description");
       $("profileFormUser").value = yamlField(yaml, "user") || "ec2-user";
-      $("profileFormIdentityFile").value = yamlField(yaml, "identity_file");
       $("profileFormHost").value = profile.host || yamlField(yaml, "host");
       $("profileFormAWSProfile").value = profile.aws_profile || yamlField(yaml, "profile");
       $("profileFormRegion").value = profile.region || yamlField(yaml, "region");
-      $("profileFormCreator").value = yamlField(yaml, "creator");
       $("profileFormResourceName").value = yamlField(yaml, "resource_name");
       $("profileFormKeyName").value = yamlField(yaml, "key_name");
       $("profileFormSecurityGroup").value = yamlField(yaml, "security_group_id");
@@ -3275,13 +3271,11 @@
       const add = (indent, key, value) => { if (String(value || "").trim()) lines.push(indent + key + ": " + yamlQuote(String(value).trim())); };
       add("    ", "description", description);
       add("    ", "user", user);
-      add("    ", "identity_file", $("profileFormIdentityFile").value);
       add("    ", "host", host);
       lines.push("    aws:");
       add("      ", "profile", awsProfile);
       add("      ", "region", region);
       add("      ", "resource_name", $("profileFormResourceName").value);
-      add("      ", "creator", $("profileFormCreator").value);
       add("      ", "account_email", apple);
       const amiX86 = $("profileFormAMIX86").value.trim();
       const amiARM = $("profileFormAMIARM").value.trim();
