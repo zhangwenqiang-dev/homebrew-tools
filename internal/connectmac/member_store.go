@@ -43,6 +43,10 @@ func sharedStoreMutationGuard(key string) *storeMutationGuard {
 type MemberRepository interface {
 	Load() (MemberData, error)
 	Save(MemberData) error
+	CreateTransferRecord(memberID string, record TransferRecord) (TransferRecord, error)
+	ListTransferRecords(memberID, profileName string) ([]TransferRecord, error)
+	UpdateTransferRecord(memberID, recordID, localJobID string, update func(TransferRecord) (TransferRecord, error)) (TransferRecord, error)
+	DeleteTransferRecord(memberID, recordID string) error
 	ListMembers() ([]MemberWithAssignments, error)
 	AddMember(name, email, role string) (Member, error)
 	AddMemberWithPassword(name, email, role, password string) (Member, error)
@@ -90,6 +94,7 @@ type MemberData struct {
 	Profiles         []ManagedProfile     `json:"profiles"`
 	ProfileAccess    []ProfileAccess      `json:"profile_access"`
 	Reminders        []ReleaseReminder    `json:"release_reminders"`
+	TransferRecords  []TransferRecord     `json:"transfer_records"`
 	Events           []OperationEvent     `json:"events"`
 	Settings         WebSettings          `json:"settings"`
 	mutationRevision uint64
@@ -143,6 +148,43 @@ type ProfileAccess struct {
 	MemberID    string `json:"member_id"`
 	CreatedAt   string `json:"created_at"`
 }
+
+const (
+	TransferDirectionPush = "push"
+	TransferDirectionPull = "pull"
+
+	TransferStatusCreated     = "created"
+	TransferStatusQueued      = "queued"
+	TransferStatusRunning     = "running"
+	TransferStatusSucceeded   = "succeeded"
+	TransferStatusFailed      = "failed"
+	TransferStatusInterrupted = "interrupted"
+	TransferStatusUnconfirmed = "unconfirmed"
+)
+
+type TransferRecord struct {
+	ID           string `json:"id"`
+	MemberID     string `json:"member_id"`
+	MemberEmail  string `json:"member_email"`
+	ProfileName  string `json:"profile_name"`
+	AppleEmail   string `json:"apple_email,omitempty"`
+	Direction    string `json:"direction"`
+	LocalPath    string `json:"local_path"`
+	RemotePath   string `json:"remote_path"`
+	LocalJobID   string `json:"local_job_id,omitempty"`
+	Status       string `json:"status"`
+	Percent      int    `json:"percent"`
+	ErrorSummary string `json:"error_summary,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	StartedAt    string `json:"started_at,omitempty"`
+	FinishedAt   string `json:"finished_at,omitempty"`
+	UpdatedAt    string `json:"updated_at"`
+}
+
+var (
+	ErrTransferRecordNotFound     = errors.New("transfer record not found")
+	ErrTransferRecordsUnsupported = errors.New("transfer records are not supported by this repository")
+)
 
 const (
 	ReleaseReminderStatusActive      = "active"
@@ -299,7 +341,7 @@ func (s MemberStore) Load() (MemberData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
+			return MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, TransferRecords: []TransferRecord{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}, nil
 		}
 		return MemberData{}, err
 	}
@@ -325,8 +367,60 @@ func (s MemberStore) Save(db MemberData) error {
 	}
 	if db.mutationRevision != current.mutationRevision {
 		db.Reminders = current.Reminders
+		db.TransferRecords = current.TransferRecords
 	}
 	return s.saveUnlocked(db)
+}
+
+func (s MemberStore) CreateTransferRecord(memberID string, record TransferRecord) (TransferRecord, error) {
+	s = s.normalize()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	defer unlock()
+	return createTransferRecordInStore(s.unlocked(), memberID, record)
+}
+
+func (s MemberStore) ListTransferRecords(memberID, profileName string) ([]TransferRecord, error) {
+	return listTransferRecordsInStore(s, memberID, profileName)
+}
+
+func (s MemberStore) UpdateTransferRecord(memberID, recordID, localJobID string, update func(TransferRecord) (TransferRecord, error)) (TransferRecord, error) {
+	s = s.normalize()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	defer unlock()
+	return updateTransferRecordInStore(s.unlocked(), memberID, recordID, localJobID, update)
+}
+
+func (s MemberStore) DeleteTransferRecord(memberID, recordID string) error {
+	s = s.normalize()
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return deleteTransferRecordInStore(s.unlocked(), memberID, recordID)
+}
+
+// MySQL transfer persistence is implemented separately from the JSON repository.
+func (s MySQLMemberStore) CreateTransferRecord(memberID string, record TransferRecord) (TransferRecord, error) {
+	return TransferRecord{}, ErrTransferRecordsUnsupported
+}
+
+func (s MySQLMemberStore) ListTransferRecords(memberID, profileName string) ([]TransferRecord, error) {
+	return nil, ErrTransferRecordsUnsupported
+}
+
+func (s MySQLMemberStore) UpdateTransferRecord(memberID, recordID, localJobID string, update func(TransferRecord) (TransferRecord, error)) (TransferRecord, error) {
+	return TransferRecord{}, ErrTransferRecordsUnsupported
+}
+
+func (s MySQLMemberStore) DeleteTransferRecord(memberID, recordID string) error {
+	return ErrTransferRecordsUnsupported
 }
 
 func (s MemberStore) saveUnlocked(db MemberData) error {
@@ -1084,6 +1178,9 @@ func normalizeMemberData(db *MemberData) {
 	if db.Reminders == nil {
 		db.Reminders = []ReleaseReminder{}
 	}
+	if db.TransferRecords == nil {
+		db.TransferRecords = []TransferRecord{}
+	}
 	if db.Events == nil {
 		db.Events = []OperationEvent{}
 	}
@@ -1211,6 +1308,172 @@ type memberDataStore interface {
 	Load() (MemberData, error)
 	Save(MemberData) error
 	currentTime() time.Time
+}
+
+func createTransferRecordInStore(s memberDataStore, memberID string, record TransferRecord) (TransferRecord, error) {
+	memberID = strings.TrimSpace(memberID)
+	if memberID == "" {
+		return TransferRecord{}, errors.New("member ID is required")
+	}
+	if strings.TrimSpace(record.MemberID) != memberID {
+		return TransferRecord{}, errors.New("transfer record member ID does not match")
+	}
+	record.MemberID = memberID
+	record.MemberEmail = normalizeEmail(record.MemberEmail)
+	record.ProfileName = strings.TrimSpace(record.ProfileName)
+	record.AppleEmail = normalizeEmail(record.AppleEmail)
+	record.Direction = strings.TrimSpace(strings.ToLower(record.Direction))
+	record.Status = strings.TrimSpace(strings.ToLower(record.Status))
+	if err := validateTransferRecord(record); err != nil {
+		return TransferRecord{}, err
+	}
+	suffix, err := randomToken(12)
+	if err != nil {
+		return TransferRecord{}, fmt.Errorf("generate transfer record ID: %w", err)
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	record.ID = fmt.Sprintf("transfer-%d-%s", s.currentTime().UnixNano(), suffix)
+	record.CreatedAt = now
+	record.UpdatedAt = now
+	db, err := s.Load()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	db.TransferRecords = append(db.TransferRecords, record)
+	return record, s.Save(db)
+}
+
+func listTransferRecordsInStore(s memberDataStore, memberID, profileName string) ([]TransferRecord, error) {
+	memberID = strings.TrimSpace(memberID)
+	if memberID == "" {
+		return nil, errors.New("member ID is required")
+	}
+	profileName = strings.TrimSpace(profileName)
+	db, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	records := make([]TransferRecord, 0)
+	for _, record := range db.TransferRecords {
+		if record.MemberID == memberID && (profileName == "" || record.ProfileName == profileName) {
+			records = append(records, record)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].UpdatedAt == records[j].UpdatedAt {
+			return records[i].ID > records[j].ID
+		}
+		return records[i].UpdatedAt > records[j].UpdatedAt
+	})
+	return records, nil
+}
+
+func updateTransferRecordInStore(s memberDataStore, memberID, recordID, localJobID string, update func(TransferRecord) (TransferRecord, error)) (TransferRecord, error) {
+	memberID = strings.TrimSpace(memberID)
+	recordID = strings.TrimSpace(recordID)
+	localJobID = strings.TrimSpace(localJobID)
+	if memberID == "" {
+		return TransferRecord{}, errors.New("member ID is required")
+	}
+	if recordID == "" {
+		return TransferRecord{}, errors.New("transfer record ID is required")
+	}
+	if update == nil {
+		return TransferRecord{}, errors.New("transfer record update is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	for i, current := range db.TransferRecords {
+		if current.ID != recordID || current.MemberID != memberID {
+			continue
+		}
+		if isTerminalTransferStatus(current.Status) {
+			return TransferRecord{}, errors.New("terminal transfer record cannot be updated")
+		}
+		if current.LocalJobID != "" && current.LocalJobID != localJobID {
+			return TransferRecord{}, ErrTransferRecordNotFound
+		}
+		next, err := update(current)
+		if err != nil {
+			return TransferRecord{}, err
+		}
+		if next.ID != current.ID {
+			return TransferRecord{}, errors.New("transfer record ID cannot change")
+		}
+		if next.MemberID != memberID {
+			return TransferRecord{}, errors.New("transfer record member ID does not match")
+		}
+		next.LocalJobID = strings.TrimSpace(next.LocalJobID)
+		if current.LocalJobID == "" {
+			if next.LocalJobID != localJobID {
+				return TransferRecord{}, errors.New("transfer record local job ID does not match")
+			}
+		} else if next.LocalJobID != current.LocalJobID {
+			return TransferRecord{}, errors.New("transfer record local job ID cannot change")
+		}
+		next.Direction = strings.TrimSpace(strings.ToLower(next.Direction))
+		next.Status = strings.TrimSpace(strings.ToLower(next.Status))
+		if err := validateTransferRecord(next); err != nil {
+			return TransferRecord{}, err
+		}
+		if next.Percent < current.Percent {
+			return TransferRecord{}, errors.New("transfer percent cannot regress")
+		}
+		if isTerminalTransferStatus(current.Status) && isActiveTransferStatus(next.Status) {
+			return TransferRecord{}, errors.New("terminal transfer status cannot return to active")
+		}
+		next.CreatedAt = current.CreatedAt
+		next.UpdatedAt = s.currentTime().Format(time.RFC3339)
+		db.TransferRecords[i] = next
+		return next, s.Save(db)
+	}
+	return TransferRecord{}, ErrTransferRecordNotFound
+}
+
+func deleteTransferRecordInStore(s memberDataStore, memberID, recordID string) error {
+	memberID = strings.TrimSpace(memberID)
+	recordID = strings.TrimSpace(recordID)
+	if memberID == "" {
+		return errors.New("member ID is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return err
+	}
+	for i, record := range db.TransferRecords {
+		if record.ID == recordID && record.MemberID == memberID {
+			db.TransferRecords = append(db.TransferRecords[:i], db.TransferRecords[i+1:]...)
+			return s.Save(db)
+		}
+	}
+	return ErrTransferRecordNotFound
+}
+
+func validateTransferRecord(record TransferRecord) error {
+	switch record.Direction {
+	case TransferDirectionPush, TransferDirectionPull:
+	default:
+		return errors.New("transfer direction must be push or pull")
+	}
+	switch record.Status {
+	case TransferStatusCreated, TransferStatusQueued, TransferStatusRunning, TransferStatusSucceeded, TransferStatusFailed, TransferStatusInterrupted, TransferStatusUnconfirmed:
+	default:
+		return errors.New("invalid transfer status")
+	}
+	if record.Percent < 0 || record.Percent > 100 {
+		return errors.New("transfer percent must be between 0 and 100")
+	}
+	return nil
+}
+
+func isActiveTransferStatus(status string) bool {
+	return status == TransferStatusCreated || status == TransferStatusQueued || status == TransferStatusRunning
+}
+
+func isTerminalTransferStatus(status string) bool {
+	return status == TransferStatusSucceeded || status == TransferStatusFailed || status == TransferStatusInterrupted || status == TransferStatusUnconfirmed
 }
 
 type unlockedMemberStore struct {
