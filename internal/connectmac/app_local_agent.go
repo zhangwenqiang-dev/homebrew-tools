@@ -842,16 +842,22 @@ func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 		}
 		var req localAgentRequest
 		if err := decodeWebJSON(r, &req); err != nil {
+			a.writeLocalAgentVNCEarlyFailure(command)
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		profileName, configPath, err := writeLocalAgentProfileConfig(req)
 		if err != nil {
+			a.writeLocalAgentVNCEarlyFailure(command)
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
 		}
 		args := []string{command, profileName, "--config", configPath}
 		switch command {
+		case "start", "open-vnc":
+			resp := a.localAgentRunVNC(r.Context(), command, profileName, configPath)
+			writeWebJSON(w, resp)
+			return
 		case "push":
 			localPath := strings.TrimSpace(req.LocalPath)
 			remotePath := strings.TrimSpace(req.RemotePath)
@@ -1057,8 +1063,9 @@ func (a App) localAgentRun(ctx context.Context, args []string) webAPIResponse {
 func (a App) localAgentRunInDir(ctx context.Context, dir string, args []string) webAPIResponse {
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	app := NewApp(&out, &errOut)
-	app.Version = a.Version
+	app := a
+	app.Out = &out
+	app.Err = &errOut
 	if dir != "" {
 		expanded, err := ExpandPath(dir)
 		if err != nil {
@@ -1078,6 +1085,113 @@ func (a App) localAgentRunInDir(ctx context.Context, dir string, args []string) 
 	}
 	code := app.Run(ctx, args)
 	return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
+}
+
+func (a App) localAgentRunVNC(ctx context.Context, command, profileName, configPath string) webAPIResponse {
+	return a.localAgentRunVNCWithBeforeLock(ctx, command, profileName, configPath, nil)
+}
+
+func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profileName, configPath string, beforeLock func()) webAPIResponse {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	app := a
+	app.Out = &out
+	app.Err = &errOut
+
+	cfg, code := app.loadCommandConfig(ctx, configPath)
+	if code != 0 {
+		resp := webAPIResponse{OK: false, Code: code, Output: out.String(), Error: errOut.String()}
+		a.writeLocalAgentVNCLog(LogEntry{
+			Level: "error", Action: "local-agent.vnc", Profile: profileName,
+			Outcome: "failure", Message: "load local VNC profile failed",
+		})
+		return resp
+	}
+	profile, _ := cfg.Profile(profileName)
+	entry := LogEntry{
+		Action:     "local-agent.vnc",
+		Profile:    profileName,
+		LocalPorts: profileLocalPorts(profile),
+	}
+
+	switch command {
+	case "start":
+		code, result := app.runStartResult(ctx, cfg, []string{profileName})
+		entry.Profile = result.Profile
+		entry.LocalPorts = result.LocalPorts
+		entry.TunnelAction = result.Action
+		entry.PID = result.PID
+		entry.Outcome = outcomeForCode(code)
+		if code != 0 {
+			entry.Level = "error"
+			entry.Message = "local VNC tunnel start failed"
+		} else {
+			entry.Message = "local VNC tunnel ready"
+		}
+		a.writeLocalAgentVNCLog(entry)
+		return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
+	case "open-vnc":
+		code := 0
+		if beforeLock != nil {
+			beforeLock()
+		}
+		err := app.StateManager.WithProfileLock(profile.Name, func() error {
+			code = app.runOpenVNC(ctx, cfg, []string{profileName})
+			entry.PID = app.verifiedTunnelPID(profile)
+			return nil
+		})
+		if err != nil {
+			fmt.Fprintf(app.Err, "lock open-vnc lifecycle: %v\n", err)
+			code = 1
+		}
+		entry.Outcome = outcomeForCode(code)
+		entry.LaunchResult = entry.Outcome
+		if code != 0 {
+			entry.Level = "error"
+			entry.Message = "local VNC launch failed"
+		} else {
+			entry.Message = "local VNC launched"
+		}
+		a.writeLocalAgentVNCLog(entry)
+		return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
+	default:
+		return webAPIResponse{OK: false, Code: 2, Error: "unsupported local VNC command"}
+	}
+}
+
+func outcomeForCode(code int) string {
+	if code == 0 {
+		return "success"
+	}
+	return "failure"
+}
+
+func (a App) writeLocalAgentVNCLog(entry LogEntry) {
+	_ = a.LogManager.Write(entry)
+}
+
+func (a App) writeLocalAgentVNCEarlyFailure(command string) {
+	if command != "start" && command != "open-vnc" {
+		return
+	}
+	entry := LogEntry{
+		Level: "error", Action: "local-agent.vnc", Outcome: "failure",
+		Message: "local VNC request failed",
+	}
+	a.writeLocalAgentVNCLog(entry)
+}
+
+func (a App) verifiedTunnelPID(profile Profile) int {
+	stateKey := profile.Name
+	state, ok, err := a.StateManager.Load(stateKey)
+	if err != nil || !ok || !state.Matches(profile) {
+		return 0
+	}
+	sshArgs, err := SSHArgs(profile)
+	if err != nil || a.StateManager.VerifyExpectedManagedProcess(state, sshArgs) != nil {
+		return 0
+	}
+	return state.PID
 }
 
 func writeLocalAgentProfileConfig(req localAgentRequest) (string, string, error) {

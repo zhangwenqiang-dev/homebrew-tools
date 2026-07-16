@@ -20,14 +20,19 @@ type LogManager struct {
 }
 
 type LogEntry struct {
-	Time       string `json:"time"`
-	Level      string `json:"level"`
-	Action     string `json:"action"`
-	Profile    string `json:"profile,omitempty"`
-	AppleEmail string `json:"apple_email,omitempty"`
-	Region     string `json:"region,omitempty"`
-	AWSProfile string `json:"aws_profile,omitempty"`
-	Message    string `json:"message"`
+	Time         string `json:"time"`
+	Level        string `json:"level"`
+	Action       string `json:"action"`
+	Profile      string `json:"profile,omitempty"`
+	TunnelAction string `json:"tunnel_action,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	LocalPorts   []int  `json:"local_ports,omitempty"`
+	LaunchResult string `json:"launch_result,omitempty"`
+	Outcome      string `json:"outcome,omitempty"`
+	AppleEmail   string `json:"apple_email,omitempty"`
+	Region       string `json:"region,omitempty"`
+	AWSProfile   string `json:"aws_profile,omitempty"`
+	Message      string `json:"message"`
 }
 
 type LogFile struct {

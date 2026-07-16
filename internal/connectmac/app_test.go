@@ -37,6 +37,7 @@ type fakeRunner struct {
 	scanErr     error
 	openedURL   string
 	openedVNC   string
+	openVNCErr  error
 	stopPID     int
 	stopErr     error
 }
@@ -138,7 +139,370 @@ func (r *fakeRunner) OpenURL(ctx context.Context, target string) error {
 
 func (r *fakeRunner) OpenVNC(ctx context.Context, target string) error {
 	r.openedVNC = target
-	return nil
+	return r.openVNCErr
+}
+
+func TestLocalAgentVNCLogLifecycleAndLaunch(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     string
+		setup       func(*App, *fakeRunner, Profile)
+		wantAction  string
+		wantPID     int
+		wantOutcome string
+		wantLaunch  string
+	}{
+		{name: "started", command: "start", wantAction: "started", wantPID: 55, wantOutcome: "success"},
+		{name: "reused", command: "start", wantAction: "reused", wantPID: 77, wantOutcome: "success", setup: func(app *App, _ *fakeRunner, profile Profile) {
+			app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+			if err := app.StateManager.Save(managedTestState(profile, 77)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "restarted", command: "start", wantAction: "restarted", wantPID: 55, wantOutcome: "success", setup: func(app *App, _ *fakeRunner, profile Profile) {
+			app.StateManager.IsRunning = func(pid int) bool { return pid == 77 || pid == 55 }
+			old := profile
+			old.Host = "old-host.example.com"
+			if err := app.StateManager.Save(managedTestState(old, 77)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "conflict", command: "start", wantAction: "conflict", wantOutcome: "failure", setup: func(app *App, _ *fakeRunner, _ Profile) {
+			app.Validator.CheckPort = func(port int) error { return fmt.Errorf("local port %d is already in use", port) }
+		}},
+		{name: "existing live conflict", command: "start", wantAction: "conflict", wantPID: 77, wantOutcome: "failure", setup: func(app *App, _ *fakeRunner, profile Profile) {
+			app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+			state := managedTestState(profile, 77)
+			state.ProcessStartMarker = "wrong-start"
+			if err := app.StateManager.Save(state); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "launch success", command: "open-vnc", wantPID: 77, wantOutcome: "success", wantLaunch: "success", setup: func(app *App, _ *fakeRunner, profile Profile) {
+			app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+			if err := app.StateManager.Save(managedTestState(profile, 77)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "launch failure", command: "open-vnc", wantOutcome: "failure", wantLaunch: "failure", setup: func(_ *App, runner *fakeRunner, _ Profile) {
+			runner.openVNCErr = errors.New(`open failed password=hunter2 token=session-token cookie=browser-cookie vnc://user:secret@localhost:5900 /Users/test/.ssh/private.pem`)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			key := writeSSHKey(t, 0o600)
+			profile := validProfile(key)
+			profile.VNC.Username = "mac-user"
+			var out, errOut bytes.Buffer
+			runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+			app := testApp(&out, &errOut, dir)
+			app.Runner = runner
+			if tt.setup != nil {
+				tt.setup(&app, runner, profile)
+			}
+			body := strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":` + strconv.Quote(FormatProfileFile(profile)) + `}`)
+			req := httptest.NewRequest(http.MethodPost, "/"+tt.command, body)
+			rec := httptest.NewRecorder()
+			app.newLocalAgentHandler().ServeHTTP(rec, req)
+			var resp webAPIResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v: %s", err, rec.Body.String())
+			}
+			if resp.OK != (tt.wantOutcome == "success") {
+				t.Fatalf("response = %+v", resp)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 1 {
+				t.Fatalf("log entries = %#v", entries)
+			}
+			entry := entries[0]
+			if entry.Action != "local-agent.vnc" || entry.Profile != "xcode-vnc" ||
+				!reflect.DeepEqual(entry.LocalPorts, []int{5900}) || entry.TunnelAction != tt.wantAction ||
+				entry.PID != tt.wantPID || entry.Outcome != tt.wantOutcome || entry.LaunchResult != tt.wantLaunch {
+				t.Fatalf("entry = %+v", entry)
+			}
+			raw := readTestLogsRaw(t, app.LogManager)
+			for _, secret := range []string{key, "hunter2", "session-token", "browser-cookie", "user:secret", "profile_yaml", "PRIVATE KEY"} {
+				if strings.Contains(raw, secret) {
+					t.Fatalf("log contains secret %q: %s", secret, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestLocalAgentVNCStartSyntaxFailureReportsExistingLiveStateConflict(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	oldProfile := validProfile(key)
+	newProfile := validProfile(key)
+	newProfile.Host = "replacement-host.example.com"
+	newProfile.Tunnels[0].RemotePort = 0
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	original := managedTestState(oldProfile, 77)
+	if err := app.StateManager.Save(original); err != nil {
+		t.Fatal(err)
+	}
+	original, ok, err := app.StateManager.Load(oldProfile.Name)
+	if err != nil || !ok {
+		t.Fatalf("load original state: ok=%t err=%v", ok, err)
+	}
+
+	code, result := app.runStartLockedResult(context.Background(), newProfile, newProfile.Name)
+
+	if code != 1 || result.Action != "conflict" || result.PID != 77 {
+		t.Fatalf("code=%d result=%+v err=%q", code, result, errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("existing pid was stopped: %d", runner.stopPID)
+	}
+	got, ok, err := app.StateManager.Load(oldProfile.Name)
+	if err != nil || !ok || !reflect.DeepEqual(got, original) {
+		t.Fatalf("existing state changed: got=%+v ok=%t err=%v want=%+v", got, ok, err, original)
+	}
+}
+
+func TestLocalAgentVNCStartAccessFailureReportsExistingLiveStateConflict(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	oldProfile := validProfile(key)
+	newProfile := validProfile(key)
+	newProfile.Host = "replacement-host.example.com"
+	newProfile.User = ""
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	original := managedTestState(oldProfile, 77)
+	if err := app.StateManager.Save(original); err != nil {
+		t.Fatal(err)
+	}
+	original, ok, err := app.StateManager.Load(oldProfile.Name)
+	if err != nil || !ok {
+		t.Fatalf("load original state: ok=%t err=%v", ok, err)
+	}
+
+	code, result := app.runStartLockedResult(context.Background(), newProfile, newProfile.Name)
+
+	if code != 1 || result.Action != "conflict" || result.PID != 77 {
+		t.Fatalf("code=%d result=%+v err=%q", code, result, errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("existing pid was stopped: %d", runner.stopPID)
+	}
+	got, ok, err := app.StateManager.Load(oldProfile.Name)
+	if err != nil || !ok || !reflect.DeepEqual(got, original) {
+		t.Fatalf("existing state changed: got=%+v ok=%t err=%v want=%+v", got, ok, err, original)
+	}
+}
+
+func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		body       string
+		wantStatus int
+	}{
+		{
+			name: "start decode", command: "start",
+			body:       `{"profile":"secret-profile","profile_yaml":"password=hunter2`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "open-vnc config", command: "open-vnc",
+			body:       `{"profile":"malicious-profile-token","profile_yaml":"password=hunter2 token=session-token"}`,
+			wantStatus: http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, dir)
+			req := httptest.NewRequest(http.MethodPost, "/"+tt.command, strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			app.newLocalAgentHandler().ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 1 {
+				t.Fatalf("entries = %#v", entries)
+			}
+			entry := entries[0]
+			if entry.Action != "local-agent.vnc" || entry.Outcome != "failure" ||
+				entry.Message != "local VNC request failed" ||
+				entry.Profile != "" || entry.TunnelAction != "" || entry.LaunchResult != "" {
+				t.Fatalf("entry = %+v", entry)
+			}
+			raw := readTestLogsRaw(t, app.LogManager)
+			for _, secret := range []string{"hunter2", "session-token", "secret-profile", "malicious-profile-token", "profile_yaml"} {
+				if strings.Contains(raw, secret) {
+					t.Fatalf("log contains secret %q: %s", secret, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestLocalAgentOpenVNCWaitsForConcurrentRestartAndLogsVerifiedPID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	profile := validProfile(key)
+	profile.VNC.Username = "mac-user"
+	var startOut, startErr, openOut, openErr bytes.Buffer
+	runner := &blockingStartRunner{
+		fakeRunner: &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"},
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	startApp := testApp(&startOut, &startErr, dir)
+	startApp.Runner = runner
+	openApp := testApp(&openOut, &openErr, dir)
+	openApp.Runner = runner
+	startDone := make(chan int, 1)
+	go func() {
+		cfg := Config{Profiles: map[string]Profile{profile.Name: profile}}
+		startDone <- startApp.runStart(context.Background(), cfg, []string{profile.Name})
+	}()
+	<-runner.entered
+
+	openDone := make(chan webAPIResponse, 1)
+	beforeLock := make(chan struct{})
+	go func() {
+		_, configPath, err := writeLocalAgentProfileConfig(localAgentRequest{
+			Profile: profile.Name, ProfileYAML: FormatProfileFile(profile),
+		})
+		if err != nil {
+			t.Errorf("write profile config: %v", err)
+			return
+		}
+		openDone <- openApp.localAgentRunVNCWithBeforeLock(context.Background(), "open-vnc", profile.Name, configPath, func() {
+			close(beforeLock)
+		})
+	}()
+	<-beforeLock
+	select {
+	case resp := <-openDone:
+		t.Fatalf("open-vnc completed before restart released lock: %+v", resp)
+	default:
+	}
+	close(runner.release)
+	if code := <-startDone; code != 0 {
+		t.Fatalf("start code=%d err=%q", code, startErr.String())
+	}
+	resp := <-openDone
+	if !resp.OK || resp.Code != 0 {
+		t.Fatalf("open response=%+v", resp)
+	}
+	entries := readTestLogEntries(t, openApp.LogManager)
+	if len(entries) != 1 || entries[0].PID != 55 || entries[0].LaunchResult != "success" {
+		t.Fatalf("entries=%+v", entries)
+	}
+}
+
+func TestLocalAgentOpenVNCLockFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	profile := validProfile(key)
+	profile.VNC.Username = "mac-user"
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	blockedStateDir := filepath.Join(dir, "blocked-state")
+	if err := os.WriteFile(blockedStateDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.Dir = blockedStateDir
+	_, configPath, err := writeLocalAgentProfileConfig(localAgentRequest{
+		Profile: profile.Name, ProfileYAML: FormatProfileFile(profile),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp := app.localAgentRunVNC(context.Background(), "open-vnc", profile.Name, configPath)
+	if resp.OK || resp.Code != 1 || !strings.Contains(resp.Error, "lock open-vnc lifecycle") {
+		t.Fatalf("response=%+v", resp)
+	}
+	if runner.openedVNC != "" {
+		t.Fatalf("open-vnc ran despite lock failure: %q", runner.openedVNC)
+	}
+	entries := readTestLogEntries(t, app.LogManager)
+	if len(entries) != 1 || entries[0].LaunchResult != "failure" || entries[0].PID != 0 {
+		t.Fatalf("entries=%+v", entries)
+	}
+}
+
+func TestLocalAgentVNCLogFailureDoesNotChangeResponse(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	profile := validProfile(key)
+	profile.VNC.Username = "mac-user"
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.Runner = &fakeRunner{}
+	blockedLogPath := filepath.Join(dir, "blocked-log-path")
+	if err := os.WriteFile(blockedLogPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.LogManager.Dir = blockedLogPath
+
+	body := strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":` + strconv.Quote(FormatProfileFile(profile)) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/open-vnc", body)
+	rec := httptest.NewRecorder()
+	app.newLocalAgentHandler().ServeHTTP(rec, req)
+	var resp webAPIResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK || resp.Code != 0 {
+		t.Fatalf("logging failure changed response: %+v", resp)
+	}
+}
+
+func readTestLogEntries(t *testing.T, manager LogManager) []LogEntry {
+	t.Helper()
+	raw := readTestLogsRaw(t, manager)
+	var entries []LogEntry
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		var entry LogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log entry: %v", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func readTestLogsRaw(t *testing.T, manager LogManager) string {
+	t.Helper()
+	files, err := manager.List()
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("log files = %#v", files)
+	}
+	data, err := os.ReadFile(files[0].Path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	return string(data)
 }
 
 func TestAppInitAndList(t *testing.T) {
