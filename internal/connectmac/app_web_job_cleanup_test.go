@@ -43,6 +43,16 @@ func TestWebBackgroundAWSJobTempConfigLifecycle(t *testing.T) {
 					t.Fatalf("response = %s", resp.Body.String())
 				}
 				job := onlyWebBackgroundJob(t, app.JobManager)
+				if job.LifecycleState != JobLifecyclePending {
+					t.Fatalf("lifecycle state = %q", job.LifecycleState)
+				}
+				if command == "open" {
+					if job.LifecycleOwnerEmail != "admin@example.com" {
+						t.Fatalf("lifecycle owner email = %q", job.LifecycleOwnerEmail)
+					}
+				} else if job.LifecycleOwnerEmail != "" {
+					t.Fatalf("destroy lifecycle owner email = %q", job.LifecycleOwnerEmail)
+				}
 				if len(job.CleanupPaths) != 1 {
 					t.Fatalf("cleanup paths = %#v", job.CleanupPaths)
 				}

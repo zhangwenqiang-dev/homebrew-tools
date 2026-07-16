@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,111 @@ import (
 	"testing"
 	"time"
 )
+
+func TestJobLifecycleMetadataIsBackwardCompatible(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	legacy := Job{
+		ID:        "legacy-lifecycle",
+		Type:      "aws-open",
+		Profile:   "mac",
+		Status:    JobStatusRunning,
+		StartedAt: time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC),
+	}
+	path, err := manager.JobPath(legacy.ID)
+	if err != nil {
+		t.Fatalf("job path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create job dir: %v", err)
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy job: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy job: %v", err)
+	}
+
+	loaded, err := manager.loadRaw(legacy.ID)
+	if err != nil {
+		t.Fatalf("load legacy job: %v", err)
+	}
+	if loaded.LifecycleState != "" || loaded.LifecycleOwnerEmail != "" || !loaded.LifecycleFinalizedAt.IsZero() || !loaded.LifecycleNotifiedAt.IsZero() || loaded.LifecycleError != "" {
+		t.Fatalf("legacy lifecycle metadata = %#v", loaded)
+	}
+
+	updated, err := manager.Update(legacy.ID, func(current Job) (Job, error) {
+		current.LifecycleOwnerEmail = "owner@example.com"
+		current.LifecycleState = JobLifecyclePending
+		return current, nil
+	})
+	if err != nil {
+		t.Fatalf("update lifecycle metadata: %v", err)
+	}
+	if updated.LifecycleOwnerEmail != "owner@example.com" || updated.LifecycleState != JobLifecyclePending {
+		t.Fatalf("updated job = %#v", updated)
+	}
+	persisted, err := manager.loadRaw(legacy.ID)
+	if err != nil {
+		t.Fatalf("load updated job: %v", err)
+	}
+	if persisted.LifecycleOwnerEmail != updated.LifecycleOwnerEmail || persisted.LifecycleState != updated.LifecycleState {
+		t.Fatalf("persisted job = %#v, updated = %#v", persisted, updated)
+	}
+}
+
+func TestJobManagerUpdatePreservesExistingFields(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	job, err := manager.Create(Job{
+		ID:        "atomic-lifecycle-update",
+		Type:      "aws-open",
+		Profile:   "mac",
+		Status:    JobStatusRunning,
+		Notify:    true,
+		LastError: "existing error",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	updated, err := manager.Update(job.ID, func(current Job) (Job, error) {
+		current.LifecycleState = JobLifecyclePending
+		current.LifecycleOwnerEmail = "owner@example.com"
+		return current, nil
+	})
+	if err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+	if updated.Type != job.Type || updated.Profile != job.Profile || updated.Status != job.Status ||
+		updated.Notify != job.Notify || updated.LastError != job.LastError {
+		t.Fatalf("update lost existing fields: updated=%#v original=%#v", updated, job)
+	}
+	if updated.LifecycleState != JobLifecyclePending || updated.LifecycleOwnerEmail != "owner@example.com" {
+		t.Fatalf("updated job = %#v", updated)
+	}
+
+	callbackErr := errors.New("reject update")
+	if _, err := manager.Update(job.ID, func(current Job) (Job, error) {
+		current.LifecycleState = JobLifecycleFailed
+		return current, callbackErr
+	}); !errors.Is(err, callbackErr) {
+		t.Fatalf("callback error = %v", err)
+	}
+	persisted, err := manager.loadRaw(job.ID)
+	if err != nil {
+		t.Fatalf("load persisted job: %v", err)
+	}
+	if persisted.LifecycleState != JobLifecyclePending {
+		t.Fatalf("failed callback changed persisted job: %#v", persisted)
+	}
+
+	if _, err := manager.Update(job.ID, func(current Job) (Job, error) {
+		current.ID = "different-job"
+		return current, nil
+	}); err == nil {
+		t.Fatal("changing job ID must fail")
+	}
+}
 
 func TestManualAndAutomaticDestroyPathsShareAtomicUniqueness(t *testing.T) {
 	var out, errOut bytes.Buffer
@@ -26,6 +132,13 @@ func TestManualAndAutomaticDestroyPathsShareAtomicUniqueness(t *testing.T) {
 	}
 	if code := app.startAWSDestroyJob(context.Background(), profile, plan, filepath.Join(t.TempDir(), "config.yaml"), false); code != 0 {
 		t.Fatalf("manual start code=%d err=%s", code, errOut.String())
+	}
+	manualJobs, err := manager.listRaw()
+	if err != nil {
+		t.Fatalf("list manual jobs: %v", err)
+	}
+	if len(manualJobs) != 1 || manualJobs[0].LifecycleState != "" || manualJobs[0].LifecycleOwnerEmail != "" {
+		t.Fatalf("manual CLI job lifecycle metadata = %+v", manualJobs)
 	}
 	autoConfig := filepath.Join(t.TempDir(), "auto-config.yaml")
 	if err := os.WriteFile(autoConfig, []byte("profiles: {}\n"), 0o600); err != nil {

@@ -1633,7 +1633,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			args = append(args, "--confirm")
 		}
 		if req.Confirm && req.Background {
-			resp := a.startWebAWSJob(r, configPath, command, req.Profile, req.Notify)
+			resp := a.startWebAWSJob(r, configPath, command, req.Profile, req.OwnerEmail, req.Notify)
 			if resp.OK {
 				if err := a.afterConfirmedWebAWSAction(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
 					resp.Output = strings.TrimSpace(resp.Output+"\n"+resp.Error) + "\n负责人记录更新失败：" + err.Error()
@@ -1957,7 +1957,7 @@ func (a App) webRunCommand(r *http.Request, configPath string, args []string) we
 	return resp
 }
 
-func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef string, notify bool) webAPIResponse {
+func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef, ownerEmail string, notify bool) webAPIResponse {
 	cfg, err := a.loadWebConfig(r, configPath)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
@@ -1973,7 +1973,22 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef str
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
-	job, plan, err := a.startAWSJobForResolvedProfile(r.Context(), runConfigPath, command, profile, notify, runConfigPath)
+	lifecycleOwnerEmail := ""
+	if command == "open" {
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			_ = removeJobPaths([]string{runConfigPath})
+			return webAPIResponse{OK: false, Code: 1, Error: "login required"}
+		}
+		lifecycleOwnerEmail = normalizeEmail(ownerEmail)
+		if member.Role != "admin" {
+			lifecycleOwnerEmail = member.Email
+		}
+	}
+	job, plan, err := a.startAWSJobForResolvedProfileJob(r.Context(), runConfigPath, command, profile, notify, Job{
+		LifecycleOwnerEmail: lifecycleOwnerEmail,
+		LifecycleState:      JobLifecyclePending,
+	}, runConfigPath)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
@@ -1992,6 +2007,10 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef str
 }
 
 func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, command string, profile Profile, notify bool, cleanupPaths ...string) (job Job, plan MacPlan, err error) {
+	return a.startAWSJobForResolvedProfileJob(ctx, configPath, command, profile, notify, Job{}, cleanupPaths...)
+}
+
+func (a App) startAWSJobForResolvedProfileJob(ctx context.Context, configPath, command string, profile Profile, notify bool, job Job, cleanupPaths ...string) (created Job, plan MacPlan, err error) {
 	defer func() {
 		if err != nil {
 			_ = removeJobPaths(cleanupPaths)
@@ -2005,19 +2024,18 @@ func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, comm
 	if err != nil {
 		return Job{}, MacPlan{}, err
 	}
-	job, err = a.JobManager.Create(Job{
-		Type:         "aws-" + command,
-		Profile:      profile.Name,
-		AppleEmail:   plan.AccountEmail,
-		Command:      []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath},
-		Notify:       notify,
-		CleanupPaths: append([]string(nil), cleanupPaths...),
-	})
+	job.Type = "aws-" + command
+	job.Profile = profile.Name
+	job.AppleEmail = plan.AccountEmail
+	job.Command = []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath}
+	job.Notify = notify
+	job.CleanupPaths = append([]string(nil), cleanupPaths...)
+	created, err = a.JobManager.Create(job)
 	if err != nil {
 		return Job{}, MacPlan{}, err
 	}
-	job, err = a.JobManager.StartRunner(ctx, job)
-	return job, plan, err
+	created, err = a.JobManager.StartRunner(ctx, created)
+	return created, plan, err
 }
 
 func (a App) recordWebEvent(configPath, profileRef, action string, confirmed bool, resp webAPIResponse) {
