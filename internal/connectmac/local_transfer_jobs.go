@@ -25,25 +25,40 @@ const (
 
 var (
 	ErrLocalTransferDraining = errors.New("local transfer manager is draining")
+	ErrLocalTransferConflict = errors.New("active local transfer has a different transfer ID")
 	rsyncPercentPattern      = regexp.MustCompile(`(?:^|\s)(\d{1,3})%`)
 	rsyncToCheckPattern      = regexp.MustCompile(`to-(?:chk|check)=(\d+)/(\d+)`)
 )
 
 type LocalTransferJob struct {
-	ID         string     `json:"id"`
-	Profile    string     `json:"profile"`
-	Direction  string     `json:"direction"`
-	Status     string     `json:"status"`
-	Percent    int        `json:"percent"`
-	Output     string     `json:"output"`
-	Error      string     `json:"error"`
-	CreatedAt  time.Time  `json:"created_at"`
-	StartedAt  *time.Time `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at"`
+	ID                string     `json:"id"`
+	TransferID        string     `json:"transfer_id,omitempty"`
+	Profile           string     `json:"profile"`
+	Direction         string     `json:"direction"`
+	Status            string     `json:"status"`
+	Percent           int        `json:"percent"`
+	Output            string     `json:"output"`
+	Error             string     `json:"error"`
+	CreatedAt         time.Time  `json:"created_at"`
+	StartedAt         *time.Time `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
+	onEvent           func(LocalTransferEvent)
+	emittedMilestones map[int]bool
 }
 
 func (j LocalTransferJob) Active() bool {
 	return j.Status == LocalTransferQueued || j.Status == LocalTransferRunning
+}
+
+type LocalTransferEvent struct {
+	TransferID string
+	LocalJobID string
+	Profile    string
+	Direction  string
+	Status     string
+	Percent    int
+	Elapsed    time.Duration
+	Error      string
 }
 
 type LocalTransferJobManager struct {
@@ -64,6 +79,10 @@ func NewLocalTransferJobManager() *LocalTransferJobManager {
 }
 
 func (m *LocalTransferJobManager) Start(profile, direction string, run func(func(string)) error) (LocalTransferJob, error) {
+	return m.StartWithEvents("", profile, direction, nil, run)
+}
+
+func (m *LocalTransferJobManager) StartWithEvents(transferID, profile, direction string, onEvent func(LocalTransferEvent), run func(func(string)) error) (LocalTransferJob, error) {
 	m.mu.Lock()
 	m.cleanupLocked()
 	if m.draining {
@@ -72,6 +91,10 @@ func (m *LocalTransferJobManager) Start(profile, direction string, run func(func
 	}
 	for _, job := range m.jobs {
 		if job.Profile == profile && job.Direction == direction && job.Active() {
+			if transferID != "" && job.TransferID != "" && transferID != job.TransferID {
+				m.mu.Unlock()
+				return LocalTransferJob{}, fmt.Errorf("%w: active=%s requested=%s", ErrLocalTransferConflict, job.TransferID, transferID)
+			}
 			result := *job
 			m.mu.Unlock()
 			return result, nil
@@ -80,11 +103,14 @@ func (m *LocalTransferJobManager) Start(profile, direction string, run func(func
 	m.sequence++
 	created := m.now()
 	job := &LocalTransferJob{
-		ID:        fmt.Sprintf("transfer-%d-%d", created.UnixNano(), m.sequence),
-		Profile:   profile,
-		Direction: direction,
-		Status:    LocalTransferQueued,
-		CreatedAt: created,
+		ID:                fmt.Sprintf("transfer-%d-%d", created.UnixNano(), m.sequence),
+		TransferID:        transferID,
+		Profile:           profile,
+		Direction:         direction,
+		Status:            LocalTransferQueued,
+		CreatedAt:         created,
+		onEvent:           onEvent,
+		emittedMilestones: make(map[int]bool),
 	}
 	m.jobs[job.ID] = job
 	result := *job
@@ -166,16 +192,19 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 	started := m.now()
 	job.Status = LocalTransferRunning
 	job.StartedAt = &started
+	job.emittedMilestones[0] = true
+	event := localTransferEvent(*job, started)
 	m.mu.Unlock()
+	emitLocalTransferEvent(job.onEvent, event)
 
 	err := run(func(output string) {
 		m.appendOutput(id, output)
 	})
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	job, ok = m.jobs[id]
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
 	finished := m.now()
@@ -191,6 +220,10 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 		job.Status = LocalTransferFailed
 		job.Error = localTransferFailureError(job.Output, err)
 	}
+	event = localTransferEvent(*job, finished)
+	onEvent := job.onEvent
+	m.mu.Unlock()
+	emitLocalTransferEvent(onEvent, event)
 }
 
 func localTransferFailureError(output string, err error) string {
@@ -215,9 +248,9 @@ func localTransferFailureError(output string, err error) string {
 
 func (m *LocalTransferJobManager) appendOutput(id, output string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	job, ok := m.jobs[id]
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
 	job.Output += output
@@ -226,6 +259,52 @@ func (m *LocalTransferJobManager) appendOutput(id, output string) {
 	}
 	if progress, ok := parseRsyncProgress(job.Output); ok && progress > job.Percent {
 		job.Percent = progress
+	}
+	events := job.milestoneEvents(m.now())
+	onEvent := job.onEvent
+	m.mu.Unlock()
+	for _, event := range events {
+		emitLocalTransferEvent(onEvent, event)
+	}
+}
+
+func (j *LocalTransferJob) milestoneEvents(now time.Time) []LocalTransferEvent {
+	var events []LocalTransferEvent
+	for _, milestone := range []int{10, 25, 50, 75, 90, 99} {
+		if j.Percent < milestone || j.emittedMilestones[milestone] {
+			continue
+		}
+		j.emittedMilestones[milestone] = true
+		event := localTransferEvent(*j, now)
+		event.Percent = milestone
+		events = append(events, event)
+	}
+	return events
+}
+
+func localTransferEvent(job LocalTransferJob, now time.Time) LocalTransferEvent {
+	elapsed := time.Duration(0)
+	if job.StartedAt != nil {
+		elapsed = now.Sub(*job.StartedAt)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+	}
+	return LocalTransferEvent{
+		TransferID: job.TransferID,
+		LocalJobID: job.ID,
+		Profile:    job.Profile,
+		Direction:  job.Direction,
+		Status:     job.Status,
+		Percent:    job.Percent,
+		Elapsed:    elapsed,
+		Error:      job.Error,
+	}
+}
+
+func emitLocalTransferEvent(callback func(LocalTransferEvent), event LocalTransferEvent) {
+	if callback != nil {
+		callback(event)
 	}
 }
 

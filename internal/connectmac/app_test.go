@@ -1296,6 +1296,168 @@ profiles:
 	}
 }
 
+func TestLocalTransferCorrelationAndLogs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := filepath.Join(home, ".ssh", "private.pem")
+	writeFile(t, key, "-----BEGIN PRIVATE KEY-----\nprivate-key-material\n-----END PRIVATE KEY-----\n")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localPath := filepath.Join(home, "payload.txt")
+	writeFile(t, localPath, "payload")
+
+	runner := &fakeRunner{
+		rsyncOutput: []string{
+			"file-one (xfr#1, to-chk=9/10)\n",
+			"file-two (xfr#2, to-chk=5/10)\n",
+			"file-three (xfr#3, to-chk=0/10)\n",
+		},
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	handler := app.newLocalAgentHandler()
+	profileYAML := "profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n    identity_file: " + key + "\n"
+	body := fmt.Sprintf(`{"transfer_id":"member-transfer-1","profile":"remote-usw2","local_path":%q,"profile_yaml":%q}`, localPath, profileYAML)
+	job := postLocalTransferForTest(t, handler, "/sync/push", body)
+	finished := waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
+	if finished.TransferID != "member-transfer-1" {
+		t.Fatalf("job transfer id = %q", finished.TransferID)
+	}
+
+	entries := waitForLocalTransferLogs(t, app.LogManager, 8)
+	actions := make(map[string]bool)
+	for _, entry := range entries {
+		actions[entry.Action] = true
+		if entry.TransferID != "member-transfer-1" || entry.LocalJobID != job.ID ||
+			entry.Profile != "remote-usw2" || entry.Direction != "push" ||
+			entry.Status == "" || entry.ElapsedMS < 0 {
+			t.Fatalf("log entry = %+v", entry)
+		}
+	}
+	for _, action := range []string{"transfer.local.started", "transfer.progress", "transfer.local.succeeded"} {
+		if !actions[action] {
+			t.Fatalf("missing action %q in %+v", action, entries)
+		}
+	}
+	raw := readTestLogsRaw(t, app.LogManager)
+	for _, secret := range []string{profileYAML, key, "private-key-material", "profile_yaml", "cookie=", "token="} {
+		if strings.Contains(raw, secret) {
+			t.Fatalf("local transfer log contains secret %q: %s", secret, raw)
+		}
+	}
+}
+
+func TestLocalTransferFailedLogSanitizesError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := filepath.Join(home, ".ssh", "private.pem")
+	writeFile(t, key, "private key")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localPath := filepath.Join(home, "payload.txt")
+	writeFile(t, localPath, "payload")
+
+	runner := &fakeRunner{
+		rsyncOutput: []string{
+			"  1,024  25% password=hunter2 token session-token cookie browser-cookie\n",
+			"-----BEGIN CERTIFICATE-----\ncertificate-material\n-----END CERTIFICATE-----\n",
+		},
+		rsyncErr: errors.New("rsync failed with token terminal-token"),
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	body := fmt.Sprintf(`{"transfer_id":"member-transfer-failed","profile":"remote-usw2","local_path":%q,"profile_yaml":"profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n    identity_file: %s\n"}`, localPath, key)
+	job := postLocalTransferForTest(t, app.newLocalAgentHandler(), "/sync/push", body)
+	waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
+
+	entries := waitForLocalTransferLogs(t, app.LogManager, 4)
+	var failed LogEntry
+	for _, entry := range entries {
+		if entry.Action == "transfer.local.failed" {
+			failed = entry
+			break
+		}
+	}
+	if failed.Action == "" || failed.Status != LocalTransferFailed || failed.Percent != 25 {
+		t.Fatalf("failed log = %+v, entries = %+v", failed, entries)
+	}
+	raw := readTestLogsRaw(t, app.LogManager)
+	for _, secret := range []string{"hunter2", "session-token", "browser-cookie", "terminal-token", "certificate-material", "BEGIN CERTIFICATE", key, "profile_yaml"} {
+		if strings.Contains(raw, secret) {
+			t.Fatalf("failed log contains secret %q: %s", secret, raw)
+		}
+	}
+}
+
+func TestLocalTransferInterruptedLifecycleLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := filepath.Join(home, ".ssh", "private.pem")
+	writeFile(t, key, "private key")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localPath := filepath.Join(home, "payload.txt")
+	writeFile(t, localPath, "payload")
+
+	runner := &fakeRunner{
+		rsyncOutput: []string{"  1,024  50% cookie interrupted-cookie\n"},
+		rsyncErr:    context.Canceled,
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	body := fmt.Sprintf(`{"transfer_id":"member-transfer-interrupted","profile":"remote-usw2","local_path":%q,"profile_yaml":"profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n    identity_file: %s\n"}`, localPath, key)
+	job := postLocalTransferForTest(t, app.newLocalAgentHandler(), "/sync/push", body)
+	finished := waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
+	if finished.Status != LocalTransferInterrupted || finished.Percent != 50 {
+		t.Fatalf("interrupted job = %+v", finished)
+	}
+
+	entries := waitForLocalTransferLogs(t, app.LogManager, 5)
+	var interrupted LogEntry
+	for _, entry := range entries {
+		if entry.Action == "transfer.local.interrupted" {
+			interrupted = entry
+			break
+		}
+	}
+	if interrupted.Action == "" || interrupted.Level != "warn" ||
+		interrupted.TransferID != "member-transfer-interrupted" ||
+		interrupted.LocalJobID != job.ID || interrupted.Status != LocalTransferInterrupted ||
+		interrupted.Percent != 50 {
+		t.Fatalf("interrupted log = %+v, entries = %+v", interrupted, entries)
+	}
+	raw := readTestLogsRaw(t, app.LogManager)
+	if strings.Contains(raw, "interrupted-cookie") {
+		t.Fatalf("interrupted log leaked cookie: %s", raw)
+	}
+}
+
+func waitForLocalTransferLogs(t *testing.T, manager LogManager, minimum int) []LogEntry {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		files, err := manager.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) == 1 {
+			entries := readTestLogEntries(t, manager)
+			if len(entries) >= minimum {
+				return entries
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d local transfer logs", minimum)
+	return nil
+}
+
 func TestLocalAgentActivityDecodeAndGuard(t *testing.T) {
 	activeJob := LocalTransferJob{
 		ID:        "transfer-1",

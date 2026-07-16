@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ type localAgentOptions struct {
 }
 
 type localAgentRequest struct {
+	TransferID  string `json:"transfer_id"`
 	Profile     string `json:"profile"`
 	ProfileYAML string `json:"profile_yaml"`
 	LocalPath   string `json:"local_path"`
@@ -713,10 +715,56 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction string) (L
 		return LocalTransferJob{}, err
 	}
 
-	job, err := a.LocalTransfers.Start(profileName, direction, func(onOutput func(string)) error {
+	job, err := a.LocalTransfers.StartWithEvents(strings.TrimSpace(req.TransferID), profileName, direction, a.writeLocalTransferEvent, func(onOutput func(string)) error {
 		return a.Runner.RunRsyncProgress(context.Background(), rsyncArgs, onOutput)
 	})
 	return job, err
+}
+
+func (a App) writeLocalTransferEvent(event LocalTransferEvent) {
+	action := "transfer.progress"
+	level := "info"
+	message := "local transfer progress"
+	switch event.Status {
+	case LocalTransferRunning:
+		if event.Percent == 0 {
+			action = "transfer.local.started"
+			message = "local transfer started"
+		}
+	case LocalTransferSucceeded:
+		action = "transfer.local.succeeded"
+		message = "local transfer succeeded"
+	case LocalTransferFailed:
+		action = "transfer.local.failed"
+		level = "error"
+		message = sanitizedLocalTransferError(event.Error)
+	case LocalTransferInterrupted:
+		action = "transfer.local.interrupted"
+		level = "warn"
+		message = sanitizedLocalTransferError(event.Error)
+	}
+	message = fmt.Sprintf("%s; percent=%d elapsed=%s", message, event.Percent, event.Elapsed)
+	_ = a.LogManager.Write(LogEntry{
+		Level:      level,
+		Action:     action,
+		TransferID: event.TransferID,
+		LocalJobID: event.LocalJobID,
+		Profile:    event.Profile,
+		Direction:  event.Direction,
+		Status:     event.Status,
+		Percent:    event.Percent,
+		ElapsedMS:  event.Elapsed.Milliseconds(),
+		Message:    message,
+	})
+}
+
+var localTransferSecretPattern = regexp.MustCompile(`(?i)(password|token|cookie|session|secret)(?:\s*[:=]\s*|\s+)\S+`)
+var localTransferPEMPattern = regexp.MustCompile(`(?s)-----BEGIN [^-]+-----.*?-----END [^-]+-----`)
+
+func sanitizedLocalTransferError(message string) string {
+	message = localTransferPEMPattern.ReplaceAllString(message, "[private key]")
+	message = localTransferSecretPattern.ReplaceAllString(message, "$1=[redacted]")
+	return sanitizeLogText(message)
 }
 
 func (a App) localAgentTransferJobHandler() http.HandlerFunc {

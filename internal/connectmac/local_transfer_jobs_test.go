@@ -3,7 +3,10 @@ package connectmac
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -120,6 +123,63 @@ func TestLocalTransferJobManagerDeduplicatesActiveDirection(t *testing.T) {
 	close(release)
 	waitForLocalTransferJob(t, manager, first.ID)
 	waitForLocalTransferJob(t, manager, otherDirection.ID)
+}
+
+func TestLocalTransferJobManagerRejectsConflictingActiveCorrelation(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var (
+		mu          sync.Mutex
+		firstEvents []LocalTransferEvent
+		otherEvents []LocalTransferEvent
+	)
+	first, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+		mu.Lock()
+		firstEvents = append(firstEvents, event)
+		mu.Unlock()
+	}, func(onOutput func(string)) error {
+		close(started)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	retry, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+		t.Fatal("same-transfer retry callback must not replace the original callback")
+	}, func(onOutput func(string)) error {
+		t.Fatal("same-transfer retry must not run")
+		return nil
+	})
+	if err != nil || retry.ID != first.ID {
+		t.Fatalf("same-transfer retry = (%+v, %v), want job %q", retry, err, first.ID)
+	}
+
+	_, err = manager.StartWithEvents("member-transfer-2", "mac-one", "push", func(event LocalTransferEvent) {
+		mu.Lock()
+		otherEvents = append(otherEvents, event)
+		mu.Unlock()
+	}, func(onOutput func(string)) error {
+		t.Fatal("conflicting transfer must not run")
+		return nil
+	})
+	if !errors.Is(err, ErrLocalTransferConflict) {
+		t.Fatalf("conflicting transfer error = %v", err)
+	}
+
+	close(release)
+	waitForLocalTransferJob(t, manager, first.ID)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(firstEvents) == 0 {
+		t.Fatal("original callback received no events")
+	}
+	if len(otherEvents) != 0 {
+		t.Fatalf("conflicting callback events = %+v", otherEvents)
+	}
 }
 
 func TestLocalTransferJobManagerTryDrainIsAtomicWithStart(t *testing.T) {
@@ -255,6 +315,59 @@ func TestLocalTransferJobManagerParsesProgressAcrossOutputChunks(t *testing.T) {
 	finished := waitForLocalTransferJob(t, manager, job.ID)
 	if finished.Percent != 58 {
 		t.Fatalf("percent = %d, output = %q", finished.Percent, finished.Output)
+	}
+}
+
+func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	var (
+		mu     sync.Mutex
+		events []LocalTransferEvent
+	)
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}, func(onOutput func(string)) error {
+		onOutput("file-one (xfr#1, to-chk=8/10)\n")
+		onOutput("file-two (xfr#2, to-chk=0/10)\n")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.TransferID != "member-transfer-1" {
+		t.Fatalf("transfer id = %q", finished.TransferID)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		count := len(events)
+		mu.Unlock()
+		if count == 8 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var got []string
+	for _, event := range events {
+		if event.TransferID != "member-transfer-1" || event.LocalJobID != job.ID ||
+			event.Profile != "mac-one" || event.Direction != "push" || event.Elapsed < 0 {
+			t.Fatalf("event = %+v", event)
+		}
+		got = append(got, fmt.Sprintf("%s:%d", event.Status, event.Percent))
+	}
+	want := []string{
+		"running:0",
+		"running:10", "running:25", "running:50", "running:75", "running:90", "running:99",
+		"succeeded:100",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
 
