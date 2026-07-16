@@ -2591,7 +2591,7 @@ func TestAppWebAWSStatusWritesErrorLog(t *testing.T) {
 	}
 }
 
-func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
+func TestAppWebBackgroundDestroyDefersLifecycleMutation(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
@@ -2603,7 +2603,19 @@ func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "admin@example.com"); err != nil {
 		t.Fatalf("set profile owner: %v", err)
 	}
-	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"notify":true}`)
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:   "xcode-vnc",
+		AppleEmail:    "user@example.com",
+		HostID:        "h-1",
+		HostCreatedAt: "2026-07-01T08:00:00Z",
+		ReleaseDueAt:  "2026-07-02T08:00:00Z",
+		OwnerEmail:    "admin@example.com",
+		OwnerName:     "Owner",
+		Status:        ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true,"notify":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/aws/destroy", body)
 	addWebAuth(t, &app, req, "admin")
 	rec := httptest.NewRecorder()
@@ -2624,14 +2636,62 @@ func TestAppWebDestroyConfirmStartsBackgroundJob(t *testing.T) {
 	if len(events) != 1 || events[0].Action != "destroy" || !events[0].Confirmed || events[0].Profile != "xcode-vnc" {
 		t.Fatalf("events = %+v", events)
 	}
-	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+	if owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
 		t.Fatalf("profile owner: %v", err)
-	} else if ok {
-		t.Fatalf("profile owner should be cleared after confirmed destroy")
+	} else if !ok || owner.Owner.Email != "admin@example.com" {
+		t.Fatalf("profile owner must remain until stopped: %+v ok=%t", owner, ok)
+	}
+	if reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc"); err != nil {
+		t.Fatalf("release reminder: %v", err)
+	} else if !ok || reminder.Status != ReleaseReminderStatusActive || reminder.OwnerEmail != "admin@example.com" {
+		t.Fatalf("release reminder must remain until stopped: %+v ok=%t", reminder, ok)
 	}
 }
 
-func TestAppWebOpenConfirmStartsBackgroundJobWhenRequested(t *testing.T) {
+func TestAppWebForegroundDestroyKeepsImmediateLifecycleMutation(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("Owner", "admin@example.com", "admin"); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "admin@example.com"); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:  "xcode-vnc",
+		AppleEmail:   "user@example.com",
+		ReleaseDueAt: time.Now().Add(12 * time.Hour).Format(time.RFC3339),
+		OwnerEmail:   "admin@example.com",
+		OwnerName:    "Owner",
+		Status:       ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("seed release reminder: %v", err)
+	}
+
+	body := strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"notify":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/aws/destroy", body)
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+		t.Fatalf("profile owner: %v", err)
+	} else if ok {
+		t.Fatal("foreground confirmed destroy must clear owner immediately")
+	}
+	if reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc"); err != nil {
+		t.Fatalf("release reminder: %v", err)
+	} else if !ok || reminder.Status != ReleaseReminderStatusReleased {
+		t.Fatalf("foreground confirmed destroy must release reminder immediately: %+v ok=%t", reminder, ok)
+	}
+}
+
+func TestAppWebBackgroundOpenDefersLifecycleMutation(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
@@ -2651,14 +2711,19 @@ func TestAppWebOpenConfirmStartsBackgroundJobWhenRequested(t *testing.T) {
 			t.Fatalf("open response missing %q:\n%s", want, text)
 		}
 	}
-	if owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
 		t.Fatalf("profile owner: %v", err)
-	} else if !ok || owner.Owner.Email != "admin@example.com" {
-		t.Fatalf("profile owner after open = %+v ok=%v", owner, ok)
+	} else if ok {
+		t.Fatalf("profile owner must remain unset until ready")
+	}
+	if _, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc"); err != nil {
+		t.Fatalf("release reminder: %v", err)
+	} else if ok {
+		t.Fatalf("release reminder must remain unset until ready")
 	}
 }
 
-func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
+func TestAppWebBackgroundOpenDefersOperatorAssignment(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
@@ -2712,24 +2777,27 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("members for apple: %v", err)
 	}
-	found := false
 	for _, owner := range owners {
 		if owner.Email == "operator@example.com" {
-			found = true
+			t.Fatalf("operator assignment must wait until ready: %+v", owners)
 		}
 	}
-	if !found {
-		t.Fatalf("operator was not assigned as owner: %+v", owners)
-	}
-	if owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
 		t.Fatalf("profile owner: %v", err)
-	} else if !ok || owner.Owner.Email != "operator@example.com" {
-		t.Fatalf("profile owner after operator open = %+v ok=%v", owner, ok)
+	} else if ok {
+		t.Fatalf("profile owner must remain unset until ready")
 	}
 	if reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc"); err != nil {
 		t.Fatalf("release reminder: %v", err)
-	} else if !ok || reminder.OwnerEmail != "operator@example.com" || reminder.OwnerName != "Operator" || reminder.Status != ReleaseReminderStatusActive {
-		t.Fatalf("release reminder owner after operator open = %+v ok=%v", reminder, ok)
+	} else if !ok || reminder.OwnerEmail != "old-owner@example.com" || reminder.OwnerName != "Old Owner" || reminder.Status != ReleaseReminderStatusActive {
+		t.Fatalf("release reminder must remain unchanged until ready: %+v ok=%v", reminder, ok)
+	}
+	jobs, err := app.JobManager.listRaw()
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].LifecycleState != JobLifecyclePending || jobs[0].LifecycleOwnerEmail != "operator@example.com" {
+		t.Fatalf("operator lifecycle intent = %+v", jobs)
 	}
 }
 

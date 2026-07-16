@@ -1634,12 +1634,6 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		}
 		if req.Confirm && req.Background {
 			resp := a.startWebAWSJob(r, configPath, command, req.Profile, req.OwnerEmail, req.Notify)
-			if resp.OK {
-				if err := a.afterConfirmedWebAWSAction(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
-					resp.Output = strings.TrimSpace(resp.Output+"\n"+resp.Error) + "\n负责人记录更新失败：" + err.Error()
-					resp.Error = ""
-				}
-			}
 			a.logWebResponse("web.aws."+command, req.Profile, resp)
 			a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 			writeWebJSON(w, resp)
