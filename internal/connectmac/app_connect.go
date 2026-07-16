@@ -44,8 +44,18 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintf(a.Err, "load state: %v\n", err)
 		return 1
 	} else if ok {
-		fmt.Fprintf(a.Out, "already started %s with pid %d\n", stateKey, state.PID)
-		return 0
+		if state.Matches(profile) {
+			fmt.Fprintf(a.Out, "already started %s with pid %d\n", stateKey, state.PID)
+			return 0
+		}
+		if err := a.Runner.Stop(state.PID); err != nil {
+			fmt.Fprintf(a.Err, "stop mismatched managed tunnel pid %d: %v\n", state.PID, err)
+			return 1
+		}
+		if err := a.StateManager.Remove(stateKey); err != nil {
+			fmt.Fprintf(a.Err, "remove mismatched managed tunnel state: %v\n", err)
+			return 1
+		}
 	}
 	if !a.validateAndSummarize(profile) {
 		return 1

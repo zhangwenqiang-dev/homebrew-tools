@@ -25,6 +25,24 @@ type StateManager struct {
 	IsRunning func(pid int) bool
 }
 
+func (s State) Matches(profile Profile) bool {
+	if s.Profile != profile.Name || s.Target != fmt.Sprintf("%s@%s", profile.User, profile.Host) {
+		return false
+	}
+	if len(s.Tunnels) != len(profile.Tunnels) {
+		return false
+	}
+	for i, tunnel := range s.Tunnels {
+		current := profile.Tunnels[i]
+		if tunnel.LocalPort != current.LocalPort ||
+			tunnel.RemoteHost != current.RemoteHost ||
+			tunnel.RemotePort != current.RemotePort {
+			return false
+		}
+	}
+	return true
+}
+
 func NewStateManager(dir string) StateManager {
 	return StateManager{Dir: dir, IsRunning: ProcessRunning}
 }

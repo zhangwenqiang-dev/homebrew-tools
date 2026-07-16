@@ -37,6 +37,7 @@ type fakeRunner struct {
 	openedURL   string
 	openedVNC   string
 	stopPID     int
+	stopErr     error
 }
 
 func (r *fakeRunner) RunForeground(ctx context.Context, args []string) error {
@@ -54,7 +55,7 @@ func (r *fakeRunner) StartBackground(ctx context.Context, args []string) (int, e
 
 func (r *fakeRunner) Stop(pid int) error {
 	r.stopPID = pid
-	return nil
+	return r.stopErr
 }
 
 func (r *fakeRunner) RunRsync(ctx context.Context, args []string) error {
@@ -3417,7 +3418,7 @@ func TestAppStartReusesExistingRunningTunnel(t *testing.T) {
 		return fmt.Errorf("local port %d is already in use", port)
 	}
 	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
-	if err := app.StateManager.Save(State{Profile: "xcode-vnc", PID: 77, Target: "user@mac-host.example.com"}); err != nil {
+	if err := app.StateManager.Save(NewState(validProfile(key), 77)); err != nil {
 		t.Fatal(err)
 	}
 	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
@@ -3428,6 +3429,106 @@ func TestAppStartReusesExistingRunningTunnel(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "already started xcode-vnc with pid 77") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppStartReplacesHealthyMismatchedManagedTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 || pid == 55 }
+	oldProfile := validProfile(key)
+	oldProfile.Host = "old-host.example.com"
+	if err := app.StateManager.Save(NewState(oldProfile, 77)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, err = %s", code, errOut.String())
+	}
+	if runner.stopPID != 77 {
+		t.Fatalf("stopped pid = %d, want 77", runner.stopPID)
+	}
+	if len(runner.background) == 0 {
+		t.Fatal("expected replacement tunnel to start")
+	}
+	state, ok, err := app.StateManager.Load("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("replacement state ok=%t err=%v", ok, err)
+	}
+	if state.PID != 55 || !state.Matches(validProfile(key)) {
+		t.Fatalf("replacement state = %+v", state)
+	}
+}
+
+func TestAppStartReturnsClearErrorWhenMismatchedManagedTunnelStopFails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{stopErr: errors.New("operation not permitted")}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	oldProfile := validProfile(key)
+	oldProfile.Tunnels[0].LocalPort = 5901
+	if err := app.StateManager.Save(NewState(oldProfile, 77)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "stop mismatched managed tunnel pid 77: operation not permitted") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+	if len(runner.background) != 0 {
+		t.Fatalf("replacement tunnel should not start: %#v", runner.background)
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || !ok {
+		t.Fatalf("managed state should remain after stop failure, ok=%t err=%v", ok, err)
+	}
+}
+
+func TestAppStartStopsMismatchedManagedTunnelBeforeReportingOccupiedPort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.Validator.CheckPort = func(port int) error {
+		return fmt.Errorf("local port %d is already in use", port)
+	}
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	oldProfile := validProfile(key)
+	oldProfile.Host = "old-host.example.com"
+	if err := app.StateManager.Save(NewState(oldProfile, 77)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 77 {
+		t.Fatalf("stopped pid = %d, want 77", runner.stopPID)
+	}
+	if !strings.Contains(errOut.String(), "local port 5900 is already in use") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+	if len(runner.background) != 0 {
+		t.Fatalf("replacement tunnel should not start: %#v", runner.background)
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || ok {
+		t.Fatalf("old managed state should be removed, ok=%t err=%v", ok, err)
 	}
 }
 

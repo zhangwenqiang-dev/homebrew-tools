@@ -69,6 +69,47 @@ func TestStateList(t *testing.T) {
 	}
 }
 
+func TestStateMatchesProfile(t *testing.T) {
+	profile := validProfile("/tmp/key.pem")
+	state := NewState(profile, 44)
+
+	if !state.Matches(profile) {
+		t.Fatal("expected state to match the profile it was created from")
+	}
+}
+
+func TestStateDoesNotMatchChangedHostOrTunnels(t *testing.T) {
+	profile := validProfile("/tmp/key.pem")
+	state := NewState(profile, 44)
+
+	changedHost := profile
+	changedHost.Host = "replacement.example.com"
+	if state.Matches(changedHost) {
+		t.Fatal("state should not match a changed host")
+	}
+
+	changedLocalPort := profile
+	changedLocalPort.Tunnels = append([]Tunnel(nil), profile.Tunnels...)
+	changedLocalPort.Tunnels[0].LocalPort = 5901
+	if state.Matches(changedLocalPort) {
+		t.Fatal("state should not match a changed local port")
+	}
+
+	changedRemoteHost := profile
+	changedRemoteHost.Tunnels = append([]Tunnel(nil), profile.Tunnels...)
+	changedRemoteHost.Tunnels[0].RemoteHost = "127.0.0.1"
+	if state.Matches(changedRemoteHost) {
+		t.Fatal("state should not match a changed remote host")
+	}
+
+	changedRemotePort := profile
+	changedRemotePort.Tunnels = append([]Tunnel(nil), profile.Tunnels...)
+	changedRemotePort.Tunnels[0].RemotePort = 5901
+	if state.Matches(changedRemotePort) {
+		t.Fatal("state should not match a changed remote port")
+	}
+}
+
 func TestProcessSignalMeansRunningTreatsPermissionDeniedAsRunning(t *testing.T) {
 	if !processSignalMeansRunning(syscall.EPERM) {
 		t.Fatalf("EPERM should be treated as running")
