@@ -15,6 +15,8 @@ type webSyncRequest struct {
 }
 
 func (a App) webSyncHistoryHandler() http.HandlerFunc {
+	// Legacy global sync history is retained for compatibility with older clients.
+	// The current Web UI uses the authenticated, member-scoped transfer record APIs.
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -30,6 +32,8 @@ func (a App) webSyncHistoryHandler() http.HandlerFunc {
 }
 
 func (a App) webSyncHistoryDeleteHandler() http.HandlerFunc {
+	// Legacy global sync history is retained for compatibility with older clients.
+	// The current Web UI never calls this unscoped delete endpoint.
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")

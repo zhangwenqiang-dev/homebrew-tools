@@ -976,7 +976,10 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, autoReleaseTrigger: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, syncJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const transferMissingGraceMS = 10000;
+    const transferMissingReloadDelayMS = 3000;
+    const transferMissingMaxReloads = 4;
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -1036,6 +1039,8 @@
         path === "/api/release-reminders" ||
         path === "/api/release-reminder/auto-release" ||
         path === "/api/settings" ||
+        path === "/api/transfer-records" ||
+        path.startsWith("/api/transfer-record/") ||
         path.startsWith("/api/events");
     }
 
@@ -1195,6 +1200,9 @@
       if ((viewID === "userManagementView" || viewID === "profilesAdminView") && !isAdmin()) {
         viewID = "profilesView";
       }
+      if (state.view === "syncView" && viewID !== "syncView") {
+        clearSyncProfileState(state.selected);
+      }
       state.view = viewID;
       document.querySelectorAll(".view").forEach((el) => {
         el.classList.toggle("hidden", el.id !== viewID);
@@ -1223,6 +1231,10 @@
     function restoreBrowserHistory(event) {
       const payload = event.state;
       if (!payload?.connectmac) return;
+      const nextSelected = typeof payload.selected === "string" ? payload.selected : state.selected;
+      if (state.view === "syncView" && (payload.view !== "syncView" || nextSelected !== state.selected)) {
+        clearSyncProfileState(state.selected);
+      }
       if (typeof payload.selected === "string") {
         state.selected = payload.selected;
       }
@@ -2177,6 +2189,9 @@
 
     async function openSync(profile) {
       if (!profile) return;
+      if (state.view === "syncView" && state.selected !== profile) {
+        clearSyncProfileState(state.selected);
+      }
       state.selected = profile;
       showView("syncView");
       renderProfiles();
@@ -2188,6 +2203,7 @@
       if (!profile || state.view !== "syncView" || state.selected !== profile) return;
       const generation = ++state.syncViewGeneration;
       state.syncHistory = [];
+      delete state.syncLoadedJobs[profile];
       renderSyncHistoryMessage("正在加载同步历史...");
       setOutput("");
       setStatus("正在加载传输任务...");
@@ -2268,10 +2284,13 @@
       const generation = (state.syncHistoryGenerations[p.name] || 0) + 1;
       state.syncHistoryGenerations[p.name] = generation;
       try {
-        const body = await api("/api/sync/history?profile=" + encodeURIComponent(p.name));
+        const body = await api("/api/transfer-records?profile=" + encodeURIComponent(p.name));
         if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name) return { stale: true };
-        state.syncHistory = body.data.items || [];
+        state.syncHistory = body.data.records || [];
         renderSyncHistory();
+        if (state.syncLoadedJobs[p.name]) {
+          await reconcileTransferRecords(p.name, state.syncLoadedJobs[p.name]);
+        }
         return { ok: true };
       } catch (err) {
         if (state.syncHistoryGenerations[p.name] !== generation || state.view !== "syncView" || state.selected !== p.name) return { stale: true };
@@ -2294,9 +2313,15 @@
         const label = item.direction === "push" ? "上传" : "下载";
         const from = item.direction === "push" ? item.local_path : item.remote_path;
         const to = item.direction === "push" ? item.remote_path : item.local_path;
+        const started = item.started_at || "";
+        const finished = item.finished_at || "";
+        const elapsed = transferElapsed(item);
         return "<div class=\"sync-history-item\">" +
-          "<div><span class=\"badge " + (item.direction === "push" ? "wait" : "ready") + "\">" + escapeHTML(label) + "</span> <span class=\"muted\">" + escapeHTML(formatTime(item.updated_at || item.created_at)) + "</span></div>" +
-          "<code>" + escapeHTML(from || "-") + " -> " + escapeHTML(to || "-") + "</code>" +
+          "<div><strong>方向：</strong><span class=\"badge " + (item.direction === "push" ? "wait" : "ready") + "\">" + escapeHTML(label) + "</span></div>" +
+          "<div><strong>路径：</strong><code>" + escapeHTML(from || "-") + " -> " + escapeHTML(to || "-") + "</code></div>" +
+          "<div><strong>状态：</strong>" + escapeHTML(transferStatusLabel(item.status)) + " <strong>进度：</strong>" + escapeHTML(String(item.percent || 0)) + "%</div>" +
+          "<div class=\"muted\"><strong>开始：</strong>" + escapeHTML(formatTime(started || item.created_at)) + " <strong>结束：</strong>" + escapeHTML(finished ? formatTime(finished) : "-") + " <strong>耗时：</strong>" + escapeHTML(elapsed) + "</div>" +
+          (item.error_summary ? "<div class=\"danger\"><strong>错误：</strong>" + escapeHTML(item.error_summary) + "</div>" : "") +
           "<div class=\"sync-history-actions\"><button data-sync-use=\"" + escapeAttr(item.id) + "\">使用</button><button data-sync-delete=\"" + escapeAttr(item.id) + "\">删除</button></div>" +
         "</div>";
       }).join("") : "<div class=\"muted\">还没有传输记录。</div>";
@@ -2306,6 +2331,169 @@
       document.querySelectorAll("[data-sync-delete]").forEach((button) => {
         button.addEventListener("click", () => deleteSyncHistory(button.getAttribute("data-sync-delete")));
       });
+    }
+
+    function transferStatusLabel(status) {
+      return {
+        created: "已创建", queued: "排队中", running: "传输中", succeeded: "已完成",
+        failed: "失败", interrupted: "已中断", unconfirmed: "无法确认"
+      }[status] || "未知";
+    }
+
+    function transferElapsed(item) {
+      const start = Date.parse(item.started_at || item.created_at || "");
+      const finish = Date.parse(item.finished_at || item.updated_at || "");
+      if (!start || !finish || finish < start) return "-";
+      const seconds = Math.max(0, Math.round((finish - start) / 1000));
+      if (seconds < 60) return seconds + " 秒";
+      const minutes = Math.floor(seconds / 60);
+      return minutes + " 分 " + (seconds % 60) + " 秒";
+    }
+
+    function transferRecordForJob(job) {
+      if (!job?.id) return null;
+      return (state.syncHistory || []).find((record) => record.local_job_id === job.id || (!record.local_job_id && record.id === job.transfer_id)) || null;
+    }
+
+    function transferTerminal(status) {
+      return status === "succeeded" || status === "failed" || status === "interrupted" || status === "unconfirmed";
+    }
+
+    function transferMilestone(percent) {
+      return [100, 99, 90, 75, 50, 25, 10, 0].find((value) => Number(percent || 0) >= value) ?? 0;
+    }
+
+    async function updateTransferRecord(transferID, job, bind = false) {
+      if (!transferID || !job) return null;
+      const terminal = transferTerminal(job.status);
+      const milestone = transferMilestone(job.percent);
+      const last = state.transferMilestones[transferID];
+      if (!bind && !terminal && last !== undefined && milestone <= last) return null;
+      const started = Date.parse(job.started_at || job.created_at || "");
+      const finished = Date.parse(job.finished_at || "");
+      const body = {
+        id: transferID,
+        local_job_id: job.id || "",
+        status: job.status || "running",
+        percent: terminal && job.status === "succeeded" ? 100 : milestone,
+        error_summary: String(job.error || "").trim(),
+        elapsed_ms: started ? Math.max(0, (finished || Date.now()) - started) : 0
+      };
+      const result = await api("/api/transfer-record/update", { method: "POST", body: JSON.stringify(body) });
+      state.transferMilestones[transferID] = body.percent;
+      const updated = result.data?.record;
+      if (updated && state.view === "syncView" && state.selected === updated.profile_name) {
+        const index = state.syncHistory.findIndex((record) => record.id === transferID);
+        if (index >= 0) state.syncHistory[index] = updated;
+        else state.syncHistory.unshift(updated);
+        renderSyncHistory();
+      }
+      return updated || null;
+    }
+
+    async function failTransferRecord(transferID, err) {
+      if (!transferID) return;
+      await updateTransferRecord(transferID, {
+        id: "",
+        status: "failed",
+        percent: 0,
+        error: String(err?.message || err || "本机传输启动失败")
+      }, true);
+    }
+
+    function clearTransferMissingConfirmation(transferID) {
+      const missing = state.transferMissingConfirmations[transferID];
+      if (!missing) return;
+      if (missing.timerID) window.clearTimeout(missing.timerID);
+      delete state.transferMissingConfirmations[transferID];
+    }
+
+    function scheduleTransferMissingReload(profile, transferID, missing) {
+      if (!missing || missing.timerID || !(missing.reloads < transferMissingMaxReloads)) return;
+      missing.timerID = window.setTimeout(async () => {
+        if (state.transferMissingConfirmations[transferID] !== missing) return;
+        missing.timerID = 0;
+        if (state.view !== "syncView" || state.selected !== profile) {
+          clearTransferMissingConfirmation(transferID);
+          return;
+        }
+        missing.reloads += 1;
+        const loaded = await loadSyncJobs(profile);
+        if (!loaded && state.transferMissingConfirmations[transferID] === missing) {
+          scheduleTransferMissingReload(profile, transferID, missing);
+        }
+      }, transferMissingReloadDelayMS);
+    }
+
+    function confirmMissingTransferRecord(profile, record) {
+      if (!profile || !record?.id || transferTerminal(record.status)) return;
+      let missing = state.transferMissingConfirmations[record.id];
+      if (!missing) {
+        missing = { profile, startedAt: Date.now(), successfulLoads: 0, reloads: 0, timerID: 0, updating: false };
+        state.transferMissingConfirmations[record.id] = missing;
+      }
+      missing.successfulLoads += 1;
+      const graceExpired = Date.now() - missing.startedAt >= transferMissingGraceMS;
+      if (state.localAgent.online && graceExpired && missing.successfulLoads >= 2) {
+        if (missing.updating) return;
+        missing.updating = true;
+        updateTransferRecord(record.id, {
+          id: record.local_job_id || "",
+          status: "unconfirmed",
+          percent: record.percent || 0,
+          error: "本机代理中无法恢复对应传输任务"
+        }, true).then(() => {
+          clearTransferMissingConfirmation(record.id);
+        }).catch(() => {
+          missing.updating = false;
+        });
+        return;
+      }
+      scheduleTransferMissingReload(profile, record.id, missing);
+    }
+
+    async function reconcileTransferRecords(profile, jobs) {
+      if (!profile || state.view !== "syncView" || state.selected !== profile) return;
+      const records = (state.syncHistory || []).filter((item) => item.profile_name === profile);
+      const matchedJobs = (jobs || []).filter((job) =>
+        Boolean(job.transfer_id) && records.some((record) =>
+          record.local_job_id === job.id || record.id === job.transfer_id
+        )
+      );
+      const byID = new Map(matchedJobs.map((job) => [job.id, job]));
+      for (const direction of ["push", "pull"]) {
+        if (state.view !== "syncView" || state.selected !== profile) return;
+        const key = syncJobKey(profile, direction);
+        const latest = latestSyncJob(matchedJobs, direction);
+        if (!latest) {
+          clearSyncPollTimer(key);
+          cancelSyncPollRequest(key);
+          delete state.syncJobs[key];
+          delete state.syncPollUnavailable[key];
+          continue;
+        }
+        storeSyncJob(key, latest);
+        delete state.syncPollUnavailable[key];
+        if (syncJobActive(state.syncJobs[key])) scheduleSyncPoll(state.syncJobs[key]);
+      }
+      for (const record of records.filter((item) => !transferTerminal(item.status))) {
+        if (state.view !== "syncView" || state.selected !== profile) return;
+        let job = record.local_job_id ? byID.get(record.local_job_id) : null;
+        let bind = false;
+        if (!job) {
+          job = matchedJobs.find((job) => job.transfer_id === record.id) || null;
+          bind = Boolean(job);
+        }
+        if (job) {
+          clearTransferMissingConfirmation(record.id);
+          if (bind) await updateTransferRecord(record.id, job, true);
+          else await updateTransferRecord(record.id, job);
+          if (state.view !== "syncView" || state.selected !== profile) return;
+          if (syncJobActive(job)) scheduleSyncPoll(job);
+          continue;
+        }
+        confirmMissingTransferRecord(profile, record);
+      }
     }
 
     function useSyncHistory(id) {
@@ -2547,6 +2735,9 @@
         if (!job || job.id !== jobID) throw new Error("传输任务响应无效");
         if (state.syncJobs[key]?.id !== jobID) return;
         const savedJob = storeSyncJob(key, job);
+        const record = transferRecordForJob(savedJob);
+        if (record) await updateTransferRecord(record.id, savedJob);
+        if (state.syncPollRequests[key] !== request || state.view !== "syncView" || state.selected !== profile) return;
         delete state.syncPollUnavailable[key];
         presentSyncJob(savedJob);
         renderSelected();
@@ -2564,6 +2755,14 @@
             error: [job.error || job.output || "", "传输任务不存在"].filter(Boolean).join("\n"),
             finished_at: new Date().toISOString()
           });
+          const record = transferRecordForJob(state.syncJobs[key]);
+          if (record) {
+            await updateTransferRecord(record.id, {
+              ...state.syncJobs[key],
+              status: "unconfirmed",
+              error: "本机代理中无法恢复对应传输任务"
+            }, true).catch(() => {});
+          }
           delete state.syncPollUnavailable[key];
           presentSyncJob(state.syncJobs[key]);
           renderSelected();
@@ -2590,6 +2789,26 @@
       request.controller.abort();
     }
 
+    function clearSyncProfileState(profile) {
+      if (!profile) return;
+      state.syncViewGeneration += 1;
+      state.syncHistoryGenerations[profile] = (state.syncHistoryGenerations[profile] || 0) + 1;
+      state.syncJobsGenerations[profile] = (state.syncJobsGenerations[profile] || 0) + 1;
+      cancelSyncJobsRequest(profile);
+      delete state.syncJobsLoading[profile];
+      delete state.syncLoadedJobs[profile];
+      for (const direction of ["push", "pull"]) {
+        const key = syncJobKey(profile, direction);
+        clearSyncPollTimer(key);
+        cancelSyncPollRequest(key);
+        delete state.syncJobs[key];
+        delete state.syncPollUnavailable[key];
+      }
+      for (const [transferID, missing] of Object.entries(state.transferMissingConfirmations)) {
+        if (missing.profile === profile) clearTransferMissingConfirmation(transferID);
+      }
+    }
+
     async function loadSyncJobs(profile) {
       if (!profile) return false;
       const generation = (state.syncJobsGenerations[profile] || 0) + 1;
@@ -2607,14 +2826,9 @@
         const body = await localAgentAPI("/sync/jobs?profile=" + encodeURIComponent(profile), { signal: controller.signal });
         if (state.syncJobsGenerations[profile] !== generation || state.syncJobsRequests[profile] !== request) return false;
         const jobs = body.data?.jobs || [];
-        for (const direction of ["push", "pull"]) {
-          const latest = latestSyncJob(jobs, direction);
-          if (!latest) continue;
-          const key = syncJobKey(profile, direction);
-          storeSyncJob(key, latest);
-          delete state.syncPollUnavailable[key];
-          if (syncJobActive(state.syncJobs[key])) scheduleSyncPoll(state.syncJobs[key]);
-        }
+        state.syncLoadedJobs[profile] = jobs;
+        await reconcileTransferRecords(profile, jobs);
+        if (state.syncJobsGenerations[profile] !== generation || state.syncJobsRequests[profile] !== request) return false;
         return true;
       } catch (err) {
         return false;
@@ -2634,7 +2848,7 @@
       if (!id) return;
       setBusy(true, "正在删除同步记录...");
       try {
-        await api("/api/sync/history/delete", {
+        await api("/api/transfer-record/delete", {
           method: "POST",
           body: JSON.stringify({ id })
         });
@@ -2669,25 +2883,47 @@
       const label = syncDirectionLabel(direction);
       setBusy(true, "正在启动" + label + "...");
       setStatus("正在启动" + label + "...");
+      let record = null;
+      let job = null;
       try {
         if (!state.localAgent.online) {
           throw new Error("本机代理未启动，请先运行 cm local-agent");
         }
+        const created = await api("/api/transfer-record/start", {
+          method: "POST",
+          body: JSON.stringify({ profile: p.name, direction, local_path: payload.local_path, remote_path: payload.remote_path })
+        });
+        record = created.data?.record;
+        if (!record?.id) throw new Error("传输记录创建响应无效");
+        state.syncHistory.unshift(record);
+        renderSyncHistory();
+        payload.transfer_id = record.id;
         const body = await localAgentAPI("/sync/" + direction, {
           method: "POST",
           body: JSON.stringify(localAgentPayload(p.name, payload))
         });
-        const job = body.data?.job;
-        if (!job?.id) throw new Error("传输任务启动响应无效");
+        job = body.data?.job;
+        if (!job?.id) {
+          job = null;
+          throw new Error("传输任务启动响应无效");
+        }
         const key = syncJobKey(job.profile || p.name, job.direction || direction);
-        storeSyncJob(key, job);
+        const savedJob = storeSyncJob(key, job);
         delete state.syncPollUnavailable[key];
+        scheduleSyncPoll(savedJob);
+        await updateTransferRecord(record.id, job, true).catch((err) => {
+          setOutput(String(err.message || err));
+          setStatus(label + "已启动，记录绑定待重试");
+          loadSyncJobs(p.name);
+        });
         setBusy(false);
         renderProfiles();
         renderSelected();
-        presentSyncJob(state.syncJobs[key]);
-        scheduleSyncPoll(state.syncJobs[key]);
+        presentSyncJob(savedJob);
       } catch (err) {
+        if (record?.id && !job) {
+          await failTransferRecord(record.id, err).catch(() => {});
+        }
         setOutput(String(err.message || err));
         setStatus(label + "启动失败");
       } finally {

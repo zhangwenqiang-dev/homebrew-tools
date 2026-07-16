@@ -3679,6 +3679,263 @@ func TestAppWebVNCStartTunnelContract(t *testing.T) {
 	}
 }
 
+func TestAppWebTransferStartContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	fn := extractWebSource(t, html, "async function runSync(direction)", "\n    function terminalSetStatus(text)")
+
+	recordStart := `await api("/api/transfer-record/start", {`
+	localStart := `await localAgentAPI("/sync/" + direction, {`
+	saveJob := `const savedJob = storeSyncJob(key, job);`
+	pollJob := `scheduleSyncPoll(savedJob);`
+	bind := `await updateTransferRecord(record.id, job, true)`
+	reconcileRetry := `loadSyncJobs(p.name);`
+	for _, want := range []string{
+		recordStart,
+		localStart,
+		saveJob,
+		pollJob,
+		bind,
+		reconcileRetry,
+		`payload.transfer_id = record.id;`,
+		`body: JSON.stringify({ profile: p.name, direction, local_path: payload.local_path, remote_path: payload.remote_path })`,
+		`if (record?.id && !job) {`,
+	} {
+		if !strings.Contains(fn, want) {
+			t.Fatalf("runSync missing %q; function = %s", want, fn)
+		}
+	}
+	if strings.Index(fn, recordStart) >= strings.Index(fn, localStart) {
+		t.Fatalf("server transfer record must be created before local sync starts; function = %s", fn)
+	}
+	if strings.Index(fn, localStart) >= strings.Index(fn, saveJob) {
+		t.Fatalf("valid local job must be saved after local start; function = %s", fn)
+	}
+	if strings.Index(fn, saveJob) >= strings.Index(fn, bind) || strings.Index(fn, pollJob) >= strings.Index(fn, bind) {
+		t.Fatalf("valid local job must be saved and made recoverable before the first bind update; function = %s", fn)
+	}
+	bindWindow := fn[strings.Index(fn, bind):]
+	bindCatch := strings.Index(bindWindow, `.catch((err) => {`)
+	failCatch := strings.Index(bindWindow, `} catch (err) {`)
+	if bindCatch < 0 || failCatch < 0 || bindCatch >= failCatch {
+		t.Fatalf("first bind update must handle failure locally before the outer startup catch; function = %s", fn)
+	}
+	bindCatchWindow := bindWindow[bindCatch:failCatch]
+	if !strings.Contains(bindCatchWindow, reconcileRetry) {
+		t.Fatalf("first bind failure must explicitly reload and reconcile jobs even when the local job is already terminal; function = %s", fn)
+	}
+	for _, forbidden := range []string{"member_id", "member_email", "/api/sync/history"} {
+		if strings.Contains(fn, forbidden) {
+			t.Fatalf("runSync must not contain %q; function = %s", forbidden, fn)
+		}
+	}
+}
+
+func TestAppWebTransferReconcileContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	fn := extractWebSource(t, html, "async function reconcileTransferRecords(profile, jobs)", "\n    function useSyncHistory(id)")
+
+	localMatch := `byID.get(record.local_job_id)`
+	transferMatch := `job.transfer_id === record.id`
+	clearMissing := `clearTransferMissingConfirmation(record.id);`
+	bind := `await updateTransferRecord(record.id, job, true);`
+	poll := `if (syncJobActive(job)) scheduleSyncPoll(job);`
+	confirmMissing := `confirmMissingTransferRecord(profile, record)`
+	for _, want := range []string{localMatch, transferMatch, clearMissing, bind, poll, confirmMissing} {
+		if !strings.Contains(fn, want) {
+			t.Fatalf("reconcileTransferRecords missing %q; function = %s", want, fn)
+		}
+	}
+	if strings.Index(fn, transferMatch) >= strings.Index(fn, clearMissing) ||
+		strings.Index(fn, clearMissing) >= strings.Index(fn, bind) ||
+		strings.Index(fn, bind) >= strings.Index(fn, poll) {
+		t.Fatalf("transfer_id recovery must clear missing confirmation and bind local_job_id before polling continues; function = %s", fn)
+	}
+	if strings.Contains(fn, `status: "unconfirmed"`) {
+		t.Fatalf("a single successful jobs list must not immediately mark a transfer unconfirmed; function = %s", fn)
+	}
+}
+
+func TestAppWebTransferMissingGraceContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	confirm := extractWebSource(t, html, "function confirmMissingTransferRecord(profile, record)", "\n    async function reconcileTransferRecords(profile, jobs)")
+	clearMissing := extractWebSource(t, html, "function clearTransferMissingConfirmation(transferID)", "\n    function confirmMissingTransferRecord(profile, record)")
+	reload := extractWebSource(t, html, "function scheduleTransferMissingReload(profile, transferID, missing)", "\n    function confirmMissingTransferRecord(profile, record)")
+
+	for _, want := range []string{
+		`const transferMissingGraceMS = 10000;`,
+		`const transferMissingMaxReloads = 4;`,
+		`successfulLoads: 0`,
+		`missing.successfulLoads += 1;`,
+		`Date.now() - missing.startedAt >= transferMissingGraceMS`,
+		`missing.successfulLoads >= 2`,
+		`state.localAgent.online`,
+		`missing.reloads < transferMissingMaxReloads`,
+		`const loaded = await loadSyncJobs(profile);`,
+		`if (!loaded && state.transferMissingConfirmations[transferID] === missing)`,
+		`scheduleTransferMissingReload(profile, transferID, missing);`,
+		`status: "unconfirmed"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("missing-transfer grace contract missing %q", want)
+		}
+	}
+	if strings.Index(confirm, `missing.successfulLoads += 1;`) >= strings.Index(confirm, `status: "unconfirmed"`) {
+		t.Fatalf("successful jobs-list observations must be counted before unconfirmed is allowed; function = %s", confirm)
+	}
+	if strings.Contains(reload, `successfulLoads += 1`) {
+		t.Fatalf("failed jobs-list reloads must not count as successful observations; function = %s", reload)
+	}
+	if strings.Index(reload, `missing.reloads += 1;`) >= strings.Index(reload, `const loaded = await loadSyncJobs(profile);`) {
+		t.Fatalf("each bounded reload attempt must be counted before loading; function = %s", reload)
+	}
+	if !strings.Contains(clearMissing, `window.clearTimeout(missing.timerID)`) ||
+		!strings.Contains(clearMissing, `delete state.transferMissingConfirmations[transferID]`) {
+		t.Fatalf("matched transfers must clear missing state and timer; function = %s", clearMissing)
+	}
+}
+
+func TestAppWebTransferNavigationCleanupContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	cleanup := extractWebSource(t, html, "function clearSyncProfileState(profile)", "\n    async function loadSyncJobs(profile)")
+	showView := extractWebSource(t, html, "function showView(viewID, options = {})", "\n    function updateBrowserHistory(viewID, mode)")
+	openSync := extractWebSource(t, html, "async function openSync(profile)", "\n    async function restoreSyncProfile(profile)")
+	restoreHistory := extractWebSource(t, html, "function restoreBrowserHistory(event)", "\n    async function loadChallenge()")
+
+	for _, want := range []string{
+		`state.syncViewGeneration += 1;`,
+		`state.syncHistoryGenerations[profile] = (state.syncHistoryGenerations[profile] || 0) + 1;`,
+		`state.syncJobsGenerations[profile] = (state.syncJobsGenerations[profile] || 0) + 1;`,
+		`cancelSyncJobsRequest(profile);`,
+		`clearSyncPollTimer(key);`,
+		`cancelSyncPollRequest(key);`,
+		`delete state.syncJobs[key];`,
+		`delete state.syncLoadedJobs[profile];`,
+		`Object.entries(state.transferMissingConfirmations)`,
+		`clearTransferMissingConfirmation(transferID);`,
+	} {
+		if !strings.Contains(cleanup, want) {
+			t.Fatalf("sync profile cleanup missing %q; function = %s", want, cleanup)
+		}
+	}
+	if !strings.Contains(showView, `state.view === "syncView" && viewID !== "syncView"`) ||
+		!strings.Contains(showView, `clearSyncProfileState(state.selected);`) {
+		t.Fatalf("leaving syncView must clear profile transfer state; function = %s", showView)
+	}
+	for name, source := range map[string]string{"openSync": openSync, "restoreBrowserHistory": restoreHistory} {
+		if !strings.Contains(source, `clearSyncProfileState(state.selected);`) {
+			t.Fatalf("%s must clear the old profile before switching sync history; function = %s", name, source)
+		}
+	}
+	reconcile := extractWebSource(t, html, "async function reconcileTransferRecords(profile, jobs)", "\n    function useSyncHistory(id)")
+	poll := extractWebSource(t, html, "async function pollSyncJob(", "\n    function cancelSyncJobsRequest")
+	loadJobs := extractWebSource(t, html, "async function loadSyncJobs(profile)", "\n    async function deleteSyncHistory(id)")
+	if !strings.Contains(reconcile, `state.view !== "syncView" || state.selected !== profile`) {
+		t.Fatalf("reconcile must stop writing after its sync profile becomes stale; function = %s", reconcile)
+	}
+	if !strings.Contains(poll, `state.syncPollRequests[key] !== request || state.view !== "syncView" || state.selected !== profile`) {
+		t.Fatalf("poll completion must stop writing after cancellation or navigation; function = %s", poll)
+	}
+	if strings.Count(loadJobs, `state.syncJobsGenerations[profile] !== generation || state.syncJobsRequests[profile] !== request`) < 2 {
+		t.Fatalf("jobs loading must recheck cancellation after reconcile; function = %s", loadJobs)
+	}
+}
+
+func TestAppWebTransferMemberJobFilteringContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	loadJobs := extractWebSource(t, html, "async function loadSyncJobs(profile)", "\n    async function deleteSyncHistory(id)")
+	reconcile := extractWebSource(t, html, "async function reconcileTransferRecords(profile, jobs)", "\n    function useSyncHistory(id)")
+	loadHistory := extractWebSource(t, html, "async function loadSyncHistory(", "\n    function renderSyncHistoryMessage")
+
+	if !strings.Contains(loadJobs, `state.syncLoadedJobs[profile] = jobs;`) ||
+		!strings.Contains(loadJobs, `await reconcileTransferRecords(profile, jobs);`) {
+		t.Fatalf("loadSyncJobs must retain the raw global list and defer member filtering to reconcile; function = %s", loadJobs)
+	}
+	for _, forbidden := range []string{`latestSyncJob(jobs`, `storeSyncJob(`, `scheduleSyncPoll(`} {
+		if strings.Contains(loadJobs, forbidden) {
+			t.Fatalf("loadSyncJobs must not expose or poll unfiltered global jobs via %q; function = %s", forbidden, loadJobs)
+		}
+	}
+	for _, want := range []string{
+		`record.local_job_id === job.id`,
+		`Boolean(job.transfer_id) && records.some((record) =>`,
+		`record.id === job.transfer_id`,
+		`const matchedJobs = (jobs || []).filter`,
+		`latestSyncJob(matchedJobs, direction)`,
+	} {
+		if !strings.Contains(reconcile, want) {
+			t.Fatalf("reconcile must filter jobs through current member records using %q; function = %s", want, reconcile)
+		}
+	}
+	if !strings.Contains(loadHistory, `state.syncLoadedJobs[p.name]`) ||
+		!strings.Contains(loadHistory, `await reconcileTransferRecords(p.name, state.syncLoadedJobs[p.name]);`) {
+		t.Fatalf("history/jobs concurrent loading must reconcile the retained raw list after history arrives; function = %s", loadHistory)
+	}
+}
+
+func TestAppWebTransferHistoryContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	history := extractWebSource(t, html, "async function loadSyncHistory(", "\n    function renderSyncHistoryMessage")
+	polling := extractWebSource(t, html, "async function pollSyncJob(", "\n    function cancelSyncJobsRequest")
+	deletion := extractWebSource(t, html, "async function deleteSyncHistory(", "\n    async function runSync(direction)")
+
+	for _, want := range []string{
+		`api("/api/transfer-records?profile="`,
+		`body.data.records || []`,
+		`reconcileTransferRecords`,
+		`local_job_id`,
+		`"unconfirmed"`,
+		`updateTransferRecord`,
+		`transferMilestones`,
+		`"/api/transfer-record/delete"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web transfer flow missing %q", want)
+		}
+	}
+	if !strings.Contains(polling, "await updateTransferRecord") {
+		t.Fatalf("polling must report transfer milestones and terminal states; function = %s", polling)
+	}
+	if !strings.Contains(deletion, `api("/api/transfer-record/delete", {`) {
+		t.Fatalf("history deletion must use member transfer records; function = %s", deletion)
+	}
+	for _, source := range []string{history, polling, deletion} {
+		for _, forbidden := range []string{"/api/sync/history", "member_id", "member_email"} {
+			if strings.Contains(source, forbidden) {
+				t.Fatalf("active transfer flow must not contain %q; source = %s", forbidden, source)
+			}
+		}
+	}
+	for _, label := range []string{"方向", "路径", "状态", "进度", "开始", "结束", "耗时", "错误", "使用", "删除"} {
+		if !strings.Contains(html, label) {
+			t.Fatalf("transfer history rendering missing label %q", label)
+		}
+	}
+}
+
 func TestAppWebVNCReadinessGating(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
 	if err != nil {
