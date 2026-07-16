@@ -153,7 +153,7 @@ func (a App) runOpenVNC(ctx context.Context, cfg Config, args []string) int {
 		return 1
 	}
 	fmt.Fprintf(a.Out, "Opening %s\n", target)
-	if err := a.Runner.OpenURL(ctx, target); err != nil {
+	if err := a.Runner.OpenVNC(ctx, target); err != nil {
 		fmt.Fprintf(a.Err, "open failed: %v\n", err)
 		return 1
 	}

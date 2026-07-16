@@ -20,6 +20,7 @@ type Runner interface {
 	ScanHostKey(ctx context.Context, host string) (string, error)
 	ForgetHost(ctx context.Context, host string) error
 	OpenURL(ctx context.Context, target string) error
+	OpenVNC(ctx context.Context, target string) error
 }
 
 type ExecRunner struct{}

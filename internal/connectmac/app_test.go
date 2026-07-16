@@ -35,6 +35,7 @@ type fakeRunner struct {
 	scannedKey  string
 	scanErr     error
 	openedURL   string
+	openedVNC   string
 	stopPID     int
 }
 
@@ -97,6 +98,11 @@ func (r *fakeRunner) ForgetHost(ctx context.Context, host string) error {
 
 func (r *fakeRunner) OpenURL(ctx context.Context, target string) error {
 	r.openedURL = target
+	return nil
+}
+
+func (r *fakeRunner) OpenVNC(ctx context.Context, target string) error {
+	r.openedVNC = target
 	return nil
 }
 
@@ -3711,11 +3717,22 @@ func TestAppOpenVNCUsesRunner(t *testing.T) {
 	if code := app.Run(context.Background(), []string{"open-vnc", "xcode-vnc", "--config", config}); code != 0 {
 		t.Fatalf("open-vnc code = %d, err = %s", code, errOut.String())
 	}
-	if runner.openedURL != "vnc://mac-user@localhost:5900" {
-		t.Fatalf("opened url = %q", runner.openedURL)
+	if runner.openedVNC != "vnc://mac-user@localhost:5900" {
+		t.Fatalf("opened VNC url = %q", runner.openedVNC)
+	}
+	if runner.openedURL != "" {
+		t.Fatalf("ordinary URL opener called with %q", runner.openedURL)
 	}
 	if !strings.Contains(out.String(), "Opening vnc://mac-user@localhost:5900") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestExecRunnerOpenVNCCommand(t *testing.T) {
+	cmd := (ExecRunner{}).openVNCCommand(context.Background(), "vnc://mac-user@localhost:5900")
+	want := []string{"open", "-n", "-a", "Screen Sharing", "vnc://mac-user@localhost:5900"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("command args = %#v, want %#v", cmd.Args, want)
 	}
 }
 

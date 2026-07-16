@@ -106,3 +106,15 @@ func (ExecRunner) OpenURL(ctx context.Context, target string) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
+
+func (r ExecRunner) OpenVNC(ctx context.Context, target string) error {
+	cmd := r.openVNCCommand(ctx, target)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (ExecRunner) openVNCCommand(ctx context.Context, target string) *exec.Cmd {
+	return exec.CommandContext(ctx, "open", "-n", "-a", "Screen Sharing", target)
+}
