@@ -1493,14 +1493,6 @@
       return !!state.statuses[name]?.ready;
     }
 
-    function profileVNCReady(name) {
-      return state.terminalConnectedProfiles.has(name);
-    }
-
-    function isLocalPortInUseError(err) {
-      return /local port \d+ is already in use/i.test(String(err?.message || err || ""));
-    }
-
     function renderProfiles() {
       const rows = filteredProfiles();
       $("profileCount").textContent = `${rows.length}/${state.profiles.length}`;
@@ -2160,26 +2152,19 @@
       setBusy(true, "正在打开 VNC...");
       setStatus("VNC 打开中...");
       try {
-        let start = null;
-        try {
-          start = await localAgentAPI("/start", {
-            method: "POST",
-            body: JSON.stringify(localAgentPayload(profile))
-          });
-        } catch (err) {
-          if (!isLocalPortInUseError(err) || !profileVNCReady(profile)) {
-            throw err;
-          }
-          start = { output: "检测到本地 VNC 端口已被占用，按已有连接继续打开 VNC。\n" };
-        }
+        const start = await localAgentAPI("/start", {
+          method: "POST",
+          body: JSON.stringify(localAgentPayload(profile))
+        });
         const opened = await localAgentAPI("/open-vnc", {
           method: "POST",
           body: JSON.stringify(localAgentPayload(profile))
         });
         setOutput((start.output || "") + (start.error || "") + "\n" + (opened.output || "") + (opened.error || ""));
         state.terminalConnectedProfiles.add(profile);
-        setStatus("VNC 已打开");
-        await loadEvents(false);
+        const reused = /already started|reused/i.test(String(start.output || ""));
+        setStatus(reused ? "已复用 SSH 隧道并打开新的 VNC 窗口" : "已启动 SSH 隧道并打开 VNC");
+        await loadEvents(false).catch(() => {});
       } catch (err) {
         setOutput(String(err.message || err));
         setStatus("VNC 打开失败");

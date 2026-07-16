@@ -2989,6 +2989,314 @@ func TestWebJobBadgesIncludeStartingAndInterruptedLabels(t *testing.T) {
 	}
 }
 
+func extractWebSource(t *testing.T, html, startMarker, endMarker string) string {
+	t.Helper()
+	start := strings.Index(html, startMarker)
+	if start < 0 {
+		t.Fatalf("web source start marker is missing: %q", startMarker)
+	}
+	end := strings.Index(html[start:], endMarker)
+	if end < 0 {
+		t.Fatalf("web source end marker %q is missing after %q", endMarker, startMarker)
+	}
+	return html[start : start+end]
+}
+
+func TestAppWebVNCStartTunnelContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	fn := extractWebSource(t, html, "async function startTunnel(profile)", "\n    async function openSync(profile)")
+
+	startCall := `const start = await localAgentAPI("/start", {`
+	openCall := `const opened = await localAgentAPI("/open-vnc", {`
+	startIndex := strings.Index(fn, startCall)
+	openIndex := strings.Index(fn, openCall)
+	if startIndex < 0 {
+		t.Fatalf("startTunnel must always POST /start; function = %s", fn)
+	}
+	if openIndex < 0 {
+		t.Fatalf("startTunnel must POST /open-vnc after /start succeeds; function = %s", fn)
+	}
+	if startIndex >= openIndex {
+		t.Fatalf("/open-vnc must follow successful /start; function = %s", fn)
+	}
+	for _, call := range []string{startCall, openCall} {
+		callIndex := strings.Index(fn, call)
+		callEnd := strings.Index(fn[callIndex:], "\n        });")
+		if callEnd < 0 {
+			t.Fatalf("%s call boundary is missing; function = %s", call, fn)
+		}
+		callBlock := fn[callIndex : callIndex+callEnd]
+		if !strings.Contains(callBlock, `method: "POST"`) {
+			t.Fatalf("%s must use POST; function = %s", call, fn)
+		}
+	}
+}
+
+func TestAppWebVNCReadinessGating(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	setBusy := extractWebSource(t, html, "function setBusy(busy, message", "\n    function setOutput(text)")
+	if !strings.Contains(setBusy, `document.querySelectorAll("[data-start]")`) ||
+		!strings.Contains(setBusy, `button.disabled = busy || !profileReady(profile);`) {
+		t.Fatalf("setBusy must disable VNC start buttons while busy or not ready; function = %s", setBusy)
+	}
+
+	renderProfiles := extractWebSource(t, html, "function renderProfiles()", "\n    function renderSelected()")
+	startHandler := extractWebSource(t, renderProfiles, `document.querySelectorAll("[data-start]")`, `document.querySelectorAll("[data-sync]")`)
+	if !strings.Contains(startHandler, `if (!profileReady(profile)) {`) ||
+		!strings.Contains(startHandler, `return;`) {
+		t.Fatalf("VNC click path must refuse profiles that are not ready; handler = %s", startHandler)
+	}
+}
+
+func TestAppWebVNCPortConflictIsNotSuppressedByReadiness(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	start := strings.Index(html, "async function startTunnel(profile)")
+	if start < 0 {
+		t.Fatal("startTunnel function is missing")
+	}
+	end := strings.Index(html[start:], "\n    async function openSync(profile)")
+	if end < 0 {
+		t.Fatal("startTunnel function boundary is missing")
+	}
+	fn := html[start : start+end]
+
+	for _, forbidden := range []string{
+		"isLocalPortInUseError",
+		"profileVNCReady",
+		"按已有连接继续打开 VNC",
+	} {
+		if strings.Contains(fn, forbidden) {
+			t.Fatalf("startTunnel must not suppress /start errors using %q; function = %s", forbidden, fn)
+		}
+	}
+	for _, definition := range []string{"function isLocalPortInUseError", "function profileVNCReady"} {
+		if strings.Contains(html, definition) {
+			t.Fatalf("unused VNC fallback definition must be absent globally: %q", definition)
+		}
+	}
+}
+
+func TestAppWebVNCStartTunnelBehavior(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	payloadFunctions := extractWebSource(t, html, "function selectedProfileYAML(profileName)", "\n    async function loadClientConfig()")
+	fn := extractWebSource(t, html, "async function startTunnel(profile)", "\n    async function openSync(profile)")
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for embedded startTunnel behavior test: %v", err)
+	}
+	harness := `
+import assert from "node:assert/strict";
+
+const state = {
+  busy: false,
+  localAgent: { online: true },
+  profiles: [],
+  selected: "",
+  terminalConnectedProfiles: new Set()
+};
+let scenario;
+let calls;
+let busyTransitions;
+let statuses;
+let outputs;
+let views;
+let renderProfileCount;
+let renderSelectedCount;
+let loadEventsCalls;
+
+function reset(next) {
+  scenario = next;
+  state.profiles = [{
+    name: next.profile,
+    profile_yaml: next.profileYAML
+  }];
+  calls = [];
+  busyTransitions = [];
+  statuses = [];
+  outputs = [];
+  views = [];
+  renderProfileCount = 0;
+  renderSelectedCount = 0;
+  loadEventsCalls = [];
+  state.busy = false;
+  state.selected = "";
+  state.terminalConnectedProfiles.clear();
+}
+
+async function localAgentAPI(path, options) {
+  calls.push([path, options.method, JSON.parse(options.body)]);
+  if (path === "/start") {
+    if (scenario.startError) throw scenario.startError;
+    return scenario.start;
+  }
+  if (path === "/open-vnc") {
+    if (scenario.openError) throw scenario.openError;
+    return scenario.opened;
+  }
+  throw new Error("unexpected API path: " + path);
+}
+function setBusy(value, message) {
+  busyTransitions.push([value, message]);
+  state.busy = value;
+}
+function setStatus(value) { statuses.push(value); }
+function setOutput(value) { outputs.push(value); }
+function showView(value) { views.push(value); }
+function renderProfiles() { renderProfileCount++; }
+function renderSelected() { renderSelectedCount++; }
+async function loadEvents(value) {
+  loadEventsCalls.push(value);
+  if (scenario.loadEventsError) throw scenario.loadEventsError;
+}
+
+` + payloadFunctions + "\n" + fn + `
+
+reset({
+  profile: "reject-profile",
+  profileYAML: "name: reject-profile\napple_email: reject@example.com\n",
+  startError: new Error("start exploded")
+});
+await startTunnel("reject-profile");
+assert.deepEqual(calls, [
+  ["/start", "POST", {
+    profile: "reject-profile",
+    profile_yaml: "name: reject-profile\napple_email: reject@example.com\n"
+  }]
+]);
+assert.deepEqual(busyTransitions, [
+  [true, "正在打开 VNC..."],
+  [false, undefined]
+]);
+assert.equal(outputs.at(-1), "start exploded");
+assert.equal(statuses.at(-1), "VNC 打开失败");
+assert.equal(calls.some(([path]) => path === "/open-vnc"), false);
+
+reset({
+  profile: "open-reject-profile",
+  profileYAML: "name: open-reject-profile\napple_email: open-reject@example.com\n",
+  start: { output: "tunnel started\n" },
+  openError: new Error("open vnc exploded")
+});
+await startTunnel("open-reject-profile");
+assert.deepEqual(calls, [
+  ["/start", "POST", {
+    profile: "open-reject-profile",
+    profile_yaml: "name: open-reject-profile\napple_email: open-reject@example.com\n"
+  }],
+  ["/open-vnc", "POST", {
+    profile: "open-reject-profile",
+    profile_yaml: "name: open-reject-profile\napple_email: open-reject@example.com\n"
+  }]
+]);
+assert.deepEqual(busyTransitions, [
+  [true, "正在打开 VNC..."],
+  [false, undefined]
+]);
+assert.equal(outputs.at(-1), "open vnc exploded");
+assert.equal(statuses.at(-1), "VNC 打开失败");
+assert.equal(state.terminalConnectedProfiles.has("open-reject-profile"), false);
+
+reset({
+  profile: "new-profile",
+  profileYAML: "name: new-profile\napple_email: new@example.com\n",
+  start: { output: "tunnel started\n" },
+  opened: { output: "vnc opened\n" }
+});
+await startTunnel("new-profile");
+assert.deepEqual(calls, [
+  ["/start", "POST", {
+    profile: "new-profile",
+    profile_yaml: "name: new-profile\napple_email: new@example.com\n"
+  }],
+  ["/open-vnc", "POST", {
+    profile: "new-profile",
+    profile_yaml: "name: new-profile\napple_email: new@example.com\n"
+  }]
+]);
+assert.deepEqual(busyTransitions, [
+  [true, "正在打开 VNC..."],
+  [false, undefined]
+]);
+assert.equal(statuses.at(-1), "已启动 SSH 隧道并打开 VNC");
+assert.deepEqual(loadEventsCalls, [false]);
+assert.equal(state.terminalConnectedProfiles.has("new-profile"), true);
+
+reset({
+  profile: "reuse-profile",
+  profileYAML: "name: reuse-profile\napple_email: reuse@example.com\n",
+  start: { output: "tunnel already started; reused\n" },
+  opened: { output: "vnc opened\n" }
+});
+await startTunnel("reuse-profile");
+assert.deepEqual(calls, [
+  ["/start", "POST", {
+    profile: "reuse-profile",
+    profile_yaml: "name: reuse-profile\napple_email: reuse@example.com\n"
+  }],
+  ["/open-vnc", "POST", {
+    profile: "reuse-profile",
+    profile_yaml: "name: reuse-profile\napple_email: reuse@example.com\n"
+  }]
+]);
+assert.deepEqual(busyTransitions, [
+  [true, "正在打开 VNC..."],
+  [false, undefined]
+]);
+assert.equal(statuses.at(-1), "已复用 SSH 隧道并打开新的 VNC 窗口");
+
+reset({
+  profile: "events-profile",
+  profileYAML: "name: events-profile\napple_email: events@example.com\n",
+  start: { output: "tunnel started\n" },
+  opened: { output: "vnc opened\n" },
+  loadEventsError: new Error("events unavailable")
+});
+await startTunnel("events-profile");
+assert.deepEqual(calls, [
+  ["/start", "POST", {
+    profile: "events-profile",
+    profile_yaml: "name: events-profile\napple_email: events@example.com\n"
+  }],
+  ["/open-vnc", "POST", {
+    profile: "events-profile",
+    profile_yaml: "name: events-profile\napple_email: events@example.com\n"
+  }]
+]);
+assert.deepEqual(busyTransitions, [
+  [true, "正在打开 VNC..."],
+  [false, undefined]
+]);
+assert.equal(statuses.at(-1), "已启动 SSH 隧道并打开 VNC");
+assert.equal(statuses.includes("VNC 打开失败"), false);
+`
+	script := filepath.Join(t.TempDir(), "start_tunnel_test.mjs")
+	if err := os.WriteFile(script, []byte(harness), 0o600); err != nil {
+		t.Fatalf("write node harness: %v", err)
+	}
+	cmd := exec.Command(node, script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("startTunnel node behavior test failed: %v\n%s", err, output)
+	}
+}
+
 func TestAppWebJobLogAPI(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
