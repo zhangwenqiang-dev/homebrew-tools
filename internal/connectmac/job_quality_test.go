@@ -41,7 +41,7 @@ func TestJobLifecycleMetadataIsBackwardCompatible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load legacy job: %v", err)
 	}
-	if loaded.LifecycleState != "" || loaded.LifecycleOwnerEmail != "" || !loaded.LifecycleFinalizedAt.IsZero() || !loaded.LifecycleNotifiedAt.IsZero() || loaded.LifecycleError != "" {
+	if loaded.LifecycleState != "" || loaded.LifecycleOwnerEmail != "" || !loaded.LifecycleFinalizedAt.IsZero() || !loaded.LifecycleNotifyClaimedAt.IsZero() || !loaded.LifecycleNotifiedAt.IsZero() || loaded.LifecycleError != "" {
 		t.Fatalf("legacy lifecycle metadata = %#v", loaded)
 	}
 

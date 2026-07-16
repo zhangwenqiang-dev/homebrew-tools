@@ -46,6 +46,7 @@ type App struct {
 	Listen                   func(network, address string) (net.Listener, error)
 	WebHandler               http.Handler
 	WebReminderWorker        func(context.Context)
+	WebAWSLifecycleNotifier  func(event string, reminder ReleaseReminder, operator, description string) error
 	WebShutdownTimeout       time.Duration
 	WebWorkerShutdownTimeout time.Duration
 }

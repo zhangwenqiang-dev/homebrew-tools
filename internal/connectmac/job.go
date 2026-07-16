@@ -64,31 +64,32 @@ type JobOutcome struct {
 }
 
 type Job struct {
-	ID                   string            `json:"id"`
-	Type                 string            `json:"type"`
-	Profile              string            `json:"profile"`
-	AppleEmail           string            `json:"apple_email,omitempty"`
-	Status               JobStatus         `json:"status"`
-	PID                  int               `json:"pid,omitempty"`
-	CreatorPID           int               `json:"creator_pid,omitempty"`
-	StartedAt            time.Time         `json:"started_at"`
-	FinishedAt           time.Time         `json:"finished_at,omitempty"`
-	Log                  string            `json:"log"`
-	Command              []string          `json:"command"`
-	Notify               bool              `json:"notify"`
-	ExitCode             *int              `json:"exit_code,omitempty"`
-	LastError            string            `json:"last_error,omitempty"`
-	ErrorCategory        JobErrorCategory  `json:"error_category,omitempty"`
-	ErrorCode            string            `json:"error_code,omitempty"`
-	OutcomePath          string            `json:"outcome_path,omitempty"`
-	CleanupPaths         []string          `json:"cleanup_paths,omitempty"`
-	CompletedBy          int               `json:"completed_by,omitempty"`
-	RunnerToken          string            `json:"runner_token,omitempty"`
-	LifecycleOwnerEmail  string            `json:"lifecycle_owner_email,omitempty"`
-	LifecycleState       JobLifecycleState `json:"lifecycle_state,omitempty"`
-	LifecycleFinalizedAt time.Time         `json:"lifecycle_finalized_at,omitempty"`
-	LifecycleNotifiedAt  time.Time         `json:"lifecycle_notified_at,omitempty"`
-	LifecycleError       string            `json:"lifecycle_error,omitempty"`
+	ID                       string            `json:"id"`
+	Type                     string            `json:"type"`
+	Profile                  string            `json:"profile"`
+	AppleEmail               string            `json:"apple_email,omitempty"`
+	Status                   JobStatus         `json:"status"`
+	PID                      int               `json:"pid,omitempty"`
+	CreatorPID               int               `json:"creator_pid,omitempty"`
+	StartedAt                time.Time         `json:"started_at"`
+	FinishedAt               time.Time         `json:"finished_at,omitempty"`
+	Log                      string            `json:"log"`
+	Command                  []string          `json:"command"`
+	Notify                   bool              `json:"notify"`
+	ExitCode                 *int              `json:"exit_code,omitempty"`
+	LastError                string            `json:"last_error,omitempty"`
+	ErrorCategory            JobErrorCategory  `json:"error_category,omitempty"`
+	ErrorCode                string            `json:"error_code,omitempty"`
+	OutcomePath              string            `json:"outcome_path,omitempty"`
+	CleanupPaths             []string          `json:"cleanup_paths,omitempty"`
+	CompletedBy              int               `json:"completed_by,omitempty"`
+	RunnerToken              string            `json:"runner_token,omitempty"`
+	LifecycleOwnerEmail      string            `json:"lifecycle_owner_email,omitempty"`
+	LifecycleState           JobLifecycleState `json:"lifecycle_state,omitempty"`
+	LifecycleFinalizedAt     time.Time         `json:"lifecycle_finalized_at,omitempty"`
+	LifecycleNotifyClaimedAt time.Time         `json:"lifecycle_notify_claimed_at,omitempty"`
+	LifecycleNotifiedAt      time.Time         `json:"lifecycle_notified_at,omitempty"`
+	LifecycleError           string            `json:"lifecycle_error,omitempty"`
 }
 
 type JobsDrainingError struct{}

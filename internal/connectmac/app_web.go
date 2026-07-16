@@ -1876,7 +1876,7 @@ func (a App) clearProfileOwnerForCleanup(profileName string) error {
 	return a.MemberStore.ClearProfileOwner(profileName)
 }
 
-func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) {
+func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) error {
 	result, err := NewWechatNotifierFromEnv().Send(WechatNotification{
 		Event:         event,
 		Profile:       reminder.ProfileName,
@@ -1890,12 +1890,14 @@ func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, opera
 		Description:   description,
 	})
 	if err != nil {
-		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: redactWechatWebhookURL(err.Error())})
-		return
+		redacted := redactWechatWebhookURL(err.Error())
+		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: redacted})
+		return errors.New(redacted)
 	}
 	if result.Skipped {
 		_ = a.LogManager.Write(LogEntry{Level: "info", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: result.Message})
 	}
+	return nil
 }
 
 func displayNameEmail(name, email string) string {
