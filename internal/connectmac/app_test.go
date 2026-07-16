@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,6 +39,39 @@ type fakeRunner struct {
 	openedVNC   string
 	stopPID     int
 	stopErr     error
+}
+
+type synchronizedRunner struct {
+	*fakeRunner
+	mu     sync.Mutex
+	starts int
+}
+
+type blockingStartRunner struct {
+	*fakeRunner
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingStartRunner) StartBackground(ctx context.Context, args []string) (int, error) {
+	close(r.entered)
+	select {
+	case <-r.release:
+		return r.fakeRunner.StartBackground(ctx, args)
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+func managedTestState(profile Profile, pid int) State {
+	return NewState(profile, pid, testProcessIdentity("ssh fake-managed-tunnel", fmt.Sprintf("start-%d", pid)))
+}
+
+func (r *synchronizedRunner) StartBackground(ctx context.Context, args []string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts++
+	return r.fakeRunner.StartBackground(ctx, args)
 }
 
 func (r *fakeRunner) RunForeground(ctx context.Context, args []string) error {
@@ -3418,7 +3452,7 @@ func TestAppStartReusesExistingRunningTunnel(t *testing.T) {
 		return fmt.Errorf("local port %d is already in use", port)
 	}
 	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
-	if err := app.StateManager.Save(NewState(validProfile(key), 77)); err != nil {
+	if err := app.StateManager.Save(managedTestState(validProfile(key), 77)); err != nil {
 		t.Fatal(err)
 	}
 	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
@@ -3429,6 +3463,498 @@ func TestAppStartReusesExistingRunningTunnel(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "already started xcode-vnc with pid 77") {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppStartReusesExistingRunningTunnelWithoutPEMOrSSHAvailability(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.Validator.CheckSSH = func() error { return errors.New("ssh executable not found on PATH") }
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	profile := validProfile(key)
+	if err := app.StateManager.Save(managedTestState(profile, 77)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) != 0 {
+		t.Fatalf("exact reuse mutated lifecycle: stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+}
+
+func TestAppStartRefusesExactMatchWithDifferentCommand(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	if err := app.StateManager.Save(managedTestState(validProfile(key), 77)); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("unrelated-process --serve", "start-77"), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) != 0 {
+		t.Fatalf("unverified exact match was mutated: stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+	if !strings.Contains(errOut.String(), "refusing to reuse tunnel pid 77") ||
+		!strings.Contains(errOut.String(), "command does not match") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartAdoptsMatchingLegacyLiveState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	state := managedTestState(validProfile(key), 77)
+	state.IdentityFile = ""
+	state.SSHCommandFingerprint = ""
+	state.ProcessStartMarker = ""
+	if err := app.StateManager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) != 0 {
+		t.Fatalf("legacy exact match was restarted: stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+	adopted, ok, err := app.StateManager.Load("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("adopted state ok=%t err=%v", ok, err)
+	}
+	if adopted.IdentityFile == "" || adopted.SSHCommandFingerprint == "" || adopted.ProcessStartMarker != "start-77" {
+		t.Fatalf("adopted state = %+v", adopted)
+	}
+	if !strings.Contains(out.String(), "adopted legacy state") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestAppStartRefusesMismatchedLegacyLiveCommandWithoutKilling(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	state := managedTestState(validProfile(key), 77)
+	state.IdentityFile = ""
+	state.SSHCommandFingerprint = ""
+	state.ProcessStartMarker = ""
+	if err := app.StateManager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("unrelated --serve", "start-77"), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) != 0 {
+		t.Fatalf("mismatched legacy process was mutated: stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+	if !strings.Contains(errOut.String(), "cannot be safely killed") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartRefusesExactMatchWithReusedPIDStartMarker(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	if err := app.StateManager.Save(managedTestState(validProfile(key), 77)); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("ssh fake-managed-tunnel", "different-start"), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) != 0 {
+		t.Fatalf("reused pid was mutated: stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+	if !strings.Contains(errOut.String(), "start marker does not match") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartCaptureFailureStopsUnrecordedTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return ProcessIdentity{}, errors.New("process disappeared")
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("unverified cleanup stopped pid = %d", runner.stopPID)
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || ok {
+		t.Fatalf("unrecorded tunnel left state, ok=%t err=%v", ok, err)
+	}
+	if !strings.Contains(errOut.String(), "inspect started tunnel pid 55: inspect pid 55: process disappeared") ||
+		!strings.Contains(errOut.String(), "cannot safely terminate the unverified process") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartRefusesStartedPIDWithUnrelatedCommandWithoutKilling(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("unrelated --serve", "reused-start"), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("unrelated reused pid was killed: %d", runner.stopPID)
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || ok {
+		t.Fatalf("unrelated pid was saved, ok=%t err=%v", ok, err)
+	}
+}
+
+func TestAppStartRestartsDeadPIDAndReplacesState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 55 }
+	if err := app.StateManager.Save(managedTestState(validProfile(key), 77)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) == 0 {
+		t.Fatalf("dead pid handling stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+	state, ok, err := app.StateManager.Load("xcode-vnc")
+	if err != nil || !ok || state.PID != 55 {
+		t.Fatalf("replacement state = %+v ok=%t err=%v", state, ok, err)
+	}
+}
+
+func TestAppStatusCannotDeleteStateReplacedByConcurrentStart(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var startOut, startErr, statusOut, statusErr bytes.Buffer
+	startApp := testApp(&startOut, &startErr, dir)
+	startApp.Runner = &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	statusApp := testApp(&statusOut, &statusErr, dir)
+	statusReadOld := make(chan struct{})
+	releaseStatus := make(chan struct{})
+	statusApp.StateManager.IsRunning = func(pid int) bool {
+		if pid == 77 {
+			close(statusReadOld)
+			<-releaseStatus
+			return false
+		}
+		return pid == 55
+	}
+	startApp.StateManager.IsRunning = func(pid int) bool { return pid == 55 }
+	if err := startApp.StateManager.Save(managedTestState(validProfile(key), 77)); err != nil {
+		t.Fatal(err)
+	}
+	statusDone := make(chan int, 1)
+	go func() {
+		statusDone <- statusApp.runStatus()
+	}()
+	<-statusReadOld
+	if code := startApp.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code=%d err=%q", code, startErr.String())
+	}
+	close(releaseStatus)
+	if code := <-statusDone; code != 0 {
+		t.Fatalf("status code=%d err=%q", code, statusErr.String())
+	}
+	state, ok, err := startApp.StateManager.Load("xcode-vnc")
+	if err != nil || !ok || state.PID != 55 {
+		t.Fatalf("concurrent status lost replacement state: %+v ok=%t err=%v", state, ok, err)
+	}
+}
+
+func TestAppStatusOmitsLivePIDWithCommandMismatch(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	if err := app.StateManager.Save(managedTestState(validProfile("/tmp/key.pem"), 77)); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("unrelated --serve", "start-77"), nil
+	}
+
+	if code := app.runStatus(); code != 0 {
+		t.Fatalf("status code = %d, err = %s", code, errOut.String())
+	}
+	if out.String() != "no managed tunnels running\n" {
+		t.Fatalf("status output = %q", out.String())
+	}
+}
+
+func TestAppStatusOmitsLivePIDWithStartMarkerMismatch(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	if err := app.StateManager.Save(managedTestState(validProfile("/tmp/key.pem"), 77)); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("ssh fake-managed-tunnel", "different-start"), nil
+	}
+
+	if code := app.runStatus(); code != 0 {
+		t.Fatalf("status code = %d, err = %s", code, errOut.String())
+	}
+	if out.String() != "no managed tunnels running\n" {
+		t.Fatalf("status output = %q", out.String())
+	}
+}
+
+func TestAppStartPreflightFailureDoesNotSpawnOrReplaceTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.Preflight = func() error { return errors.New("unsupported test OS") }
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 || len(runner.background) != 0 {
+		t.Fatalf("preflight failure mutated lifecycle: stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+	if !strings.Contains(errOut.String(), "unsupported test OS") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartSaveFailureStopsUnrecordedTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		if err := os.RemoveAll(app.StateManager.Dir); err != nil {
+			return ProcessIdentity{}, err
+		}
+		if err := os.WriteFile(app.StateManager.Dir, []byte("blocks state directory"), 0o600); err != nil {
+			return ProcessIdentity{}, err
+		}
+		return testProcessIdentity("ssh fake-managed-tunnel", "start-55"), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 55 {
+		t.Fatalf("cleanup stopped pid = %d, want 55", runner.stopPID)
+	}
+	if !strings.Contains(errOut.String(), "save state for started tunnel pid 55") ||
+		!strings.Contains(errOut.String(), "stopped unrecorded tunnel") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartSaveFailureRefusesCleanupAfterIdentityChanges(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	inspections := 0
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		inspections++
+		if inspections == 1 {
+			if err := os.RemoveAll(app.StateManager.Dir); err != nil {
+				return ProcessIdentity{}, err
+			}
+			if err := os.WriteFile(app.StateManager.Dir, []byte("blocks state directory"), 0o600); err != nil {
+				return ProcessIdentity{}, err
+			}
+			return testProcessIdentity("ssh fake-managed-tunnel", "start-55"), nil
+		}
+		return testProcessIdentity("unrelated-process --serve", "start-55"), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("identity-mismatched cleanup stopped pid = %d", runner.stopPID)
+	}
+	if inspections != 2 || !strings.Contains(errOut.String(), "cleanup failed") ||
+		!strings.Contains(errOut.String(), "command does not match") {
+		t.Fatalf("inspections=%d err=%q", inspections, errOut.String())
+	}
+}
+
+func TestAppStopVerifiesManagedProcess(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	if err := app.StateManager.Save(managedTestState(validProfile("/tmp/key.pem"), 77)); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("unrelated-process", "start-77"), nil
+	}
+
+	if code := app.runStop([]string{"xcode-vnc"}); code != 1 {
+		t.Fatalf("stop code = %d, out=%q err=%q", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("unverified pid was stopped: %d", runner.stopPID)
+	}
+	if !strings.Contains(errOut.String(), "command does not match") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStopRefusesLegacyLiveStateActionably(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	state := managedTestState(validProfile("/tmp/key.pem"), 77)
+	state.ProcessStartMarker = ""
+	if err := app.StateManager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.runStop([]string{"xcode-vnc"}); code != 1 {
+		t.Fatalf("stop code = %d, out=%q err=%q", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("legacy pid was stopped: %d", runner.stopPID)
+	}
+	for _, want := range []string{"cannot be safely managed", "manually verify and terminate", "remove the stale state only after the process is gone"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("err missing %q: %q", want, errOut.String())
+		}
+	}
+}
+
+func TestAppConcurrentStartAndStopUseSameProfileLock(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var startOut, startErr, stopOut, stopErr bytes.Buffer
+	runner := &blockingStartRunner{
+		fakeRunner: &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"},
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	startApp := testApp(&startOut, &startErr, dir)
+	startApp.Runner = runner
+	stopApp := testApp(&stopOut, &stopErr, dir)
+	stopApp.Runner = runner
+	startDone := make(chan int, 1)
+	stopDone := make(chan int, 1)
+	go func() {
+		startDone <- startApp.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config})
+	}()
+	<-runner.entered
+	go func() {
+		stopDone <- stopApp.runStop([]string{"xcode-vnc"})
+	}()
+	select {
+	case code := <-stopDone:
+		t.Fatalf("stop completed before start released the profile lock: %d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(runner.release)
+	if code := <-startDone; code != 0 {
+		t.Fatalf("start code=%d err=%q", code, startErr.String())
+	}
+	if code := <-stopDone; code != 0 {
+		t.Fatalf("stop code=%d err=%q", code, stopErr.String())
+	}
+	if runner.stopPID != 55 {
+		t.Fatalf("stop pid=%d, want 55", runner.stopPID)
 	}
 }
 
@@ -3444,7 +3970,7 @@ func TestAppStartReplacesHealthyMismatchedManagedTunnel(t *testing.T) {
 	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 || pid == 55 }
 	oldProfile := validProfile(key)
 	oldProfile.Host = "old-host.example.com"
-	if err := app.StateManager.Save(NewState(oldProfile, 77)); err != nil {
+	if err := app.StateManager.Save(managedTestState(oldProfile, 77)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3478,7 +4004,7 @@ func TestAppStartReturnsClearErrorWhenMismatchedManagedTunnelStopFails(t *testin
 	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
 	oldProfile := validProfile(key)
 	oldProfile.Tunnels[0].LocalPort = 5901
-	if err := app.StateManager.Save(NewState(oldProfile, 77)); err != nil {
+	if err := app.StateManager.Save(managedTestState(oldProfile, 77)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3496,7 +4022,7 @@ func TestAppStartReturnsClearErrorWhenMismatchedManagedTunnelStopFails(t *testin
 	}
 }
 
-func TestAppStartStopsMismatchedManagedTunnelBeforeReportingOccupiedPort(t *testing.T) {
+func TestAppStartPreservesMismatchedManagedTunnelWhenNewPortIsOccupied(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	key := writeSSHKey(t, 0o600)
@@ -3506,29 +4032,205 @@ func TestAppStartStopsMismatchedManagedTunnelBeforeReportingOccupiedPort(t *test
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
 	app.Validator.CheckPort = func(port int) error {
-		return fmt.Errorf("local port %d is already in use", port)
+		if port == 5901 {
+			return fmt.Errorf("local port %d is already in use", port)
+		}
+		return nil
 	}
 	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
 	oldProfile := validProfile(key)
 	oldProfile.Host = "old-host.example.com"
-	if err := app.StateManager.Save(NewState(oldProfile, 77)); err != nil {
+	newProfile := validProfile(key)
+	newProfile.Tunnels = append(newProfile.Tunnels, Tunnel{
+		LocalPort:  5901,
+		RemoteHost: "localhost",
+		RemotePort: 5901,
+	})
+	configData, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configData = []byte(strings.Replace(string(configData),
+		"      - local_port: 5900\n        remote_host: localhost\n        remote_port: 5900\n",
+		"      - local_port: 5900\n        remote_host: localhost\n        remote_port: 5900\n"+
+			"      - local_port: 5901\n        remote_host: localhost\n        remote_port: 5901\n", 1))
+	if err := os.WriteFile(config, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.StateManager.Save(managedTestState(oldProfile, 77)); err != nil {
 		t.Fatal(err)
 	}
 
 	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
 		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
 	}
-	if runner.stopPID != 77 {
-		t.Fatalf("stopped pid = %d, want 77", runner.stopPID)
+	if runner.stopPID != 0 {
+		t.Fatalf("old tunnel was stopped: %d", runner.stopPID)
 	}
-	if !strings.Contains(errOut.String(), "local port 5900 is already in use") {
+	if !strings.Contains(errOut.String(), "local port 5901 is already in use") {
 		t.Fatalf("err = %q", errOut.String())
 	}
 	if len(runner.background) != 0 {
 		t.Fatalf("replacement tunnel should not start: %#v", runner.background)
 	}
-	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || ok {
-		t.Fatalf("old managed state should be removed, ok=%t err=%v", ok, err)
+	if state, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || !ok || state.PID != 77 {
+		t.Fatalf("old managed state should remain, state=%+v ok=%t err=%v", state, ok, err)
+	}
+}
+
+func TestAppStartDefersExistingTunnelPortValidationUntilAfterStop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 || pid == 55 }
+	app.Validator.CheckPort = func(port int) error {
+		if port == 5900 && runner.stopPID != 77 {
+			return fmt.Errorf("local port %d is already in use", port)
+		}
+		return nil
+	}
+	oldProfile := validProfile(key)
+	oldProfile.Host = "old-host.example.com"
+	if err := app.StateManager.Save(managedTestState(oldProfile, 77)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 77 || len(runner.background) == 0 {
+		t.Fatalf("replacement lifecycle stop=%d background=%#v", runner.stopPID, runner.background)
+	}
+}
+
+func TestAppStartRefusesToStopUnverifiedMismatchedPID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	oldProfile := validProfile(key)
+	oldProfile.Host = "old-host.example.com"
+	if err := app.StateManager.Save(managedTestState(oldProfile, 77)); err != nil {
+		t.Fatal(err)
+	}
+	app.StateManager.InspectProcess = func(pid int) (ProcessIdentity, error) {
+		return testProcessIdentity("unrelated-process --serve", fmt.Sprintf("start-%d", pid)), nil
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("unverified pid was stopped: %d", runner.stopPID)
+	}
+	if !strings.Contains(errOut.String(), "stop mismatched managed tunnel pid 77") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || !ok {
+		t.Fatalf("old state should be preserved, ok=%t err=%v", ok, err)
+	}
+}
+
+func TestAppStartRefusesToStopLegacyMismatchedState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	oldProfile := validProfile(key)
+	oldProfile.Host = "old-host.example.com"
+	state := managedTestState(oldProfile, 77)
+	state.SSHCommandFingerprint = ""
+	if err := app.StateManager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("legacy state pid was stopped: %d", runner.stopPID)
+	}
+	if !strings.Contains(errOut.String(), "legacy live tunnel pid 77") ||
+		!strings.Contains(errOut.String(), "complete process identity") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+}
+
+func TestAppStartInvalidReplacementPreservesOldTunnel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	runner := &fakeRunner{}
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.Validator.CheckSSH = func() error { return errors.New("ssh executable not found on PATH") }
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 77 }
+	oldProfile := validProfile(key)
+	oldProfile.Host = "old-host.example.com"
+	if err := app.StateManager.Save(managedTestState(oldProfile, 77)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("start code = %d, out = %s, err = %s", code, out.String(), errOut.String())
+	}
+	if runner.stopPID != 0 {
+		t.Fatalf("healthy old tunnel was stopped: %d", runner.stopPID)
+	}
+	if !strings.Contains(errOut.String(), "ssh executable not found on PATH") {
+		t.Fatalf("err = %q", errOut.String())
+	}
+	if _, ok, err := app.StateManager.Load("xcode-vnc"); err != nil || !ok {
+		t.Fatalf("old state should be preserved, ok=%t err=%v", ok, err)
+	}
+}
+
+func TestAppStartSerializesConcurrentStartsPerProfile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	runner := &synchronizedRunner{fakeRunner: &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.Runner = runner
+	app.StateManager.IsRunning = func(pid int) bool { return pid == 55 }
+
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config})
+		}()
+	}
+	close(start)
+	for range 2 {
+		if code := <-results; code != 0 {
+			t.Fatalf("start code = %d", code)
+		}
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.starts != 1 {
+		t.Fatalf("background starts = %d, want 1", runner.starts)
 	}
 }
 
@@ -5324,6 +6026,23 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		StateManager: StateManager{
 			Dir:       filepath.Join(stateDir, "state"),
 			IsRunning: func(pid int) bool { return pid == 55 },
+			InspectProcess: func(pid int) (ProcessIdentity, error) {
+				return testProcessIdentity("ssh fake-managed-tunnel", fmt.Sprintf("start-%d", pid)), nil
+			},
+			TerminateProcess: func(state State, verify func(State) error, stop func(int) error) error {
+				if err := verify(state); err != nil {
+					return err
+				}
+				return stop(state.PID)
+			},
+			Preflight:     func() error { return nil },
+			SyncDirectory: func(string) error { return nil },
+			CommandMatches: func(actual, expected string) bool {
+				return actual == "ssh fake-managed-tunnel" || normalizeSSHCommand(actual) == normalizeSSHCommand(expected)
+			},
+			FingerprintMatches: func(actual, fingerprint string) bool {
+				return actual == "ssh fake-managed-tunnel" || commandFingerprint(actual) == fingerprint
+			},
 		},
 		JobManager: JobManager{
 			Dir:        filepath.Join(stateDir, "jobs"),

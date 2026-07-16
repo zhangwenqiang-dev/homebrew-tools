@@ -55,6 +55,30 @@ func TestValidateProfileBusyPort(t *testing.T) {
 	}
 }
 
+func TestValidateNewLocalPortsSkipsPortsOwnedByExistingState(t *testing.T) {
+	key := writeSSHKey(t, 0o600)
+	profile := validProfile(key)
+	profile.Tunnels = append(profile.Tunnels, Tunnel{
+		LocalPort:  5901,
+		RemoteHost: "localhost",
+		RemotePort: 5901,
+	})
+	var checked []int
+	validator := NewValidatorForTest(func(port int) error {
+		checked = append(checked, port)
+		return nil
+	})
+	existing := State{Tunnels: []Tunnel{{LocalPort: 5900}}}
+
+	errs := validator.ValidateNewLocalPorts(profile, existing)
+	if len(errs) != 0 {
+		t.Fatalf("ValidateNewLocalPorts errors = %v", errs)
+	}
+	if len(checked) != 1 || checked[0] != 5901 {
+		t.Fatalf("checked ports = %v, want [5901]", checked)
+	}
+}
+
 func TestValidateProfileRejectsKeyOutsideSSHDir(t *testing.T) {
 	key := writeKey(t, 0o600)
 	profile := validProfile(key)

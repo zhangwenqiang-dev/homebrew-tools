@@ -30,7 +30,20 @@ func NewValidator() Validator {
 }
 
 func (v Validator) ValidateProfile(profile Profile) []error {
-	errs := v.ValidateAccess(profile)
+	errs := v.ValidateProfileSyntax(profile)
+	errs = append(errs, v.ValidateAccess(profile)...)
+	for _, tunnel := range profile.Tunnels {
+		if v.CheckPort != nil && tunnel.LocalPort > 0 && tunnel.LocalPort <= 65535 {
+			if err := v.CheckPort(tunnel.LocalPort); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errs
+}
+
+func (v Validator) ValidateProfileSyntax(profile Profile) []error {
+	var errs []error
 	if len(profile.Tunnels) == 0 {
 		errs = append(errs, errors.New("at least one tunnel is required"))
 	}
@@ -44,7 +57,21 @@ func (v Validator) ValidateProfile(profile Profile) []error {
 		if tunnel.RemotePort < 1 || tunnel.RemotePort > 65535 {
 			errs = append(errs, fmt.Errorf("tunnel %d remote_port must be between 1 and 65535", i+1))
 		}
-		if v.CheckPort != nil && tunnel.LocalPort > 0 {
+	}
+	return errs
+}
+
+func (v Validator) ValidateNewLocalPorts(profile Profile, existing State) []error {
+	owned := make(map[int]struct{}, len(existing.Tunnels))
+	for _, tunnel := range existing.Tunnels {
+		owned[tunnel.LocalPort] = struct{}{}
+	}
+	var errs []error
+	for _, tunnel := range profile.Tunnels {
+		if _, ok := owned[tunnel.LocalPort]; ok {
+			continue
+		}
+		if v.CheckPort != nil && tunnel.LocalPort > 0 && tunnel.LocalPort <= 65535 {
 			if err := v.CheckPort(tunnel.LocalPort); err != nil {
 				errs = append(errs, err)
 			}

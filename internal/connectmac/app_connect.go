@@ -40,19 +40,75 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 	if stateKey == "" {
 		stateKey = profileRef
 	}
+	code := 0
+	err := a.StateManager.WithProfileLock(stateKey, func() error {
+		code = a.runStartLocked(ctx, profile, stateKey)
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(a.Err, "lock start lifecycle: %v\n", err)
+		return 1
+	}
+	return code
+}
+
+func (a App) runStartLocked(ctx context.Context, profile Profile, stateKey string) int {
+	if err := a.StateManager.PreflightTunnelLifecycle(); err != nil {
+		fmt.Fprintf(a.Err, "cannot manage SSH tunnel on this platform: %v\n", err)
+		return 1
+	}
+	sshArgs, err := SSHArgs(profile)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	if state, ok, err := a.StateManager.Load(stateKey); err != nil {
 		fmt.Fprintf(a.Err, "load state: %v\n", err)
 		return 1
 	} else if ok {
-		if state.Matches(profile) {
+		if a.StateManager.IsRunning != nil && !a.StateManager.IsRunning(state.PID) {
+			if err := a.StateManager.Remove(stateKey); err != nil {
+				fmt.Fprintf(a.Err, "remove stale tunnel state: %v\n", err)
+				return 1
+			}
+		} else if state.SSHCommandFingerprint == "" || state.ProcessStartMarker == "" || state.IdentityFile == "" {
+			if !state.matchesLegacyProfile(profile) {
+				fmt.Fprintf(a.Err, "refusing to replace legacy live tunnel pid %d: %v\n", state.PID, legacyStateError("complete process identity"))
+				return 1
+			}
+			identity, err := a.StateManager.InspectExpectedProcess(state.PID, sshArgs)
+			if err != nil {
+				fmt.Fprintf(a.Err, "refusing to adopt legacy tunnel pid %d: %v; it cannot be safely killed\n", state.PID, err)
+				return 1
+			}
+			adopted := NewState(profile, state.PID, identity)
+			adopted.StartedAt = state.StartedAt
+			if err := a.StateManager.Save(adopted); err != nil {
+				fmt.Fprintf(a.Err, "save adopted legacy tunnel state: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(a.Out, "already started %s with pid %d (adopted legacy state)\n", stateKey, state.PID)
+			return 0
+		} else if state.Matches(profile) {
+			if err := a.StateManager.VerifyExpectedManagedProcess(state, sshArgs); err != nil {
+				fmt.Fprintf(a.Err, "refusing to reuse tunnel pid %d: %v\n", state.PID, err)
+				return 1
+			}
 			fmt.Fprintf(a.Out, "already started %s with pid %d\n", stateKey, state.PID)
 			return 0
-		}
-		if err := a.Runner.Stop(state.PID); err != nil {
+		} else if errs := a.Validator.ValidateProfileSyntax(profile); len(errs) > 0 {
+			printErrors(a.Err, errs)
+			return 1
+		} else if errs := a.Validator.ValidateAccess(profile); len(errs) > 0 {
+			printErrors(a.Err, errs)
+			return 1
+		} else if errs := a.Validator.ValidateNewLocalPorts(profile, state); len(errs) > 0 {
+			printErrors(a.Err, errs)
+			return 1
+		} else if err := a.StateManager.TerminateManagedProcess(state, a.Runner.Stop); err != nil {
 			fmt.Fprintf(a.Err, "stop mismatched managed tunnel pid %d: %v\n", state.PID, err)
 			return 1
-		}
-		if err := a.StateManager.Remove(stateKey); err != nil {
+		} else if err := a.StateManager.Remove(stateKey); err != nil {
 			fmt.Fprintf(a.Err, "remove mismatched managed tunnel state: %v\n", err)
 			return 1
 		}
@@ -70,18 +126,24 @@ func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintf(a.Err, "host key scan failed for %s: %s\n", profile.Host, check.Message)
 		return 1
 	}
-	sshArgs, err := SSHArgs(profile)
-	if err != nil {
-		fmt.Fprintln(a.Err, err)
-		return 1
-	}
 	pid, err := a.Runner.StartBackground(ctx, sshArgs)
 	if err != nil {
 		fmt.Fprintf(a.Err, "start ssh tunnel failed: %v\n", err)
 		return 1
 	}
-	if err := a.StateManager.Save(NewState(profile, pid)); err != nil {
-		fmt.Fprintf(a.Err, "save state: %v\n", err)
+	identity, err := a.StateManager.InspectExpectedProcess(pid, sshArgs)
+	if err != nil {
+		fmt.Fprintf(a.Err, "inspect started tunnel pid %d: %v; cannot safely terminate the unverified process, manually verify and terminate it\n", pid, err)
+		return 1
+	}
+	state := NewState(profile, pid, identity)
+	if err := a.StateManager.Save(state); err != nil {
+		cleanupErr := a.StateManager.TerminateManagedProcess(state, a.Runner.Stop)
+		if cleanupErr != nil {
+			fmt.Fprintf(a.Err, "save state for started tunnel pid %d: %v; cleanup failed: %v\n", pid, err, cleanupErr)
+		} else {
+			fmt.Fprintf(a.Err, "save state for started tunnel pid %d: %v; stopped unrecorded tunnel\n", pid, err)
+		}
 		return 1
 	}
 	fmt.Fprintf(a.Out, "started %s with pid %d\n", profile.Name, pid)
@@ -234,24 +296,45 @@ func (a App) runStop(args []string) int {
 		fmt.Fprintln(a.Err, "usage: cm stop <profile>")
 		return 2
 	}
-	state, ok, err := a.StateManager.Load(args[0])
+	code := 0
+	err := a.StateManager.WithProfileLock(args[0], func() error {
+		code = a.runStopLocked(args[0])
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(a.Err, "lock stop lifecycle: %v\n", err)
+		return 1
+	}
+	return code
+}
+
+func (a App) runStopLocked(profile string) int {
+	state, ok, err := a.StateManager.Load(profile)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
 	if !ok {
-		fmt.Fprintf(a.Err, "no running managed tunnel for %s\n", args[0])
+		fmt.Fprintf(a.Err, "no running managed tunnel for %s\n", profile)
 		return 1
 	}
-	if err := a.Runner.Stop(state.PID); err != nil {
+	if a.StateManager.IsRunning != nil && !a.StateManager.IsRunning(state.PID) {
+		if err := a.StateManager.Remove(profile); err != nil {
+			fmt.Fprintf(a.Err, "remove stale tunnel state: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(a.Err, "no running managed tunnel for %s (removed stale state)\n", profile)
+		return 1
+	}
+	if err := a.StateManager.TerminateManagedProcess(state, a.Runner.Stop); err != nil {
 		fmt.Fprintf(a.Err, "stop pid %d: %v\n", state.PID, err)
 		return 1
 	}
-	if err := a.StateManager.Remove(args[0]); err != nil {
+	if err := a.StateManager.Remove(profile); err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
-	fmt.Fprintf(a.Out, "stopped %s\n", args[0])
+	fmt.Fprintf(a.Out, "stopped %s\n", profile)
 	return 0
 }
 func (a App) runStatus() int {
