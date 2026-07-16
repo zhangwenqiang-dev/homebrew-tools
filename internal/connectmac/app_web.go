@@ -436,7 +436,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/release-reminders", a.requireWebRole(a.webReleaseRemindersHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/extend", a.requireWebRole(a.webReleaseReminderExtendHandler(), "operator", "admin"))
-	mux.HandleFunc("/api/release-reminder/auto-release", a.requireWebRole(a.webReleaseReminderAutoReleaseHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/release-reminder/auto-release", a.requireWebRole(a.webReleaseReminderAutoReleaseHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/cleanup", a.requireWebRole(a.webReleaseReminderCleanupHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profiles", a.requireWebRole(a.webManagedProfilesHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/managed-profile/save", a.requireWebRole(a.webManagedProfileSaveHandler(), "admin"))
@@ -1019,9 +1019,11 @@ func (a App) webReleaseRemindersHandler() http.HandlerFunc {
 var (
 	errAutomaticReleaseRunning = errors.New("automatic release is already running; wait for the release to finish")
 	errActiveDestroyJob        = errors.New("automatic release cannot be changed while an active aws-destroy job exists")
+	errAutoReleaseMacNotReady  = errors.New("automatic release requires a ready Mac")
+	errAutoReleaseOwnerMissing = errors.New("automatic release requires a profile owner")
 )
 
-func (a App) webReleaseReminderAutoReleaseHandler() http.HandlerFunc {
+func (a App) webReleaseReminderAutoReleaseHandler(configPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1055,6 +1057,32 @@ func (a App) webReleaseReminderAutoReleaseHandler() http.HandlerFunc {
 		}
 		enabled := *req.Enabled
 		nowTime := a.JobManager.normalize().Now().UTC()
+		reactivateReleased := false
+		var reactivationOwner PublicMember
+		if enabled {
+			current, ok, err := a.MemberStore.ReleaseReminder(profileName)
+			if err != nil {
+				writeReleaseReminderUpdateError(w, err)
+				return
+			}
+			if ok && (current.Status == ReleaseReminderStatusReleased || current.AutoReleaseState == ReleaseReminderAutoReleaseStateReleased) {
+				ready, err := a.webAWSProfileReady(r.Context(), r, configPath, profileName)
+				if err != nil || !ready {
+					writeReleaseReminderUpdateError(w, errAutoReleaseMacNotReady)
+					return
+				}
+				if owner, found, err := a.MemberStore.ProfileOwner(profileName); err != nil {
+					writeReleaseReminderUpdateError(w, err)
+					return
+				} else if found {
+					reactivationOwner = owner.Owner
+				} else if current.OwnerEmail == "" {
+					writeReleaseReminderUpdateError(w, errAutoReleaseOwnerMissing)
+					return
+				}
+				reactivateReleased = true
+			}
+		}
 		state := "disabled"
 		if enabled {
 			state = "enabled"
@@ -1083,6 +1111,16 @@ func (a App) webReleaseReminderAutoReleaseHandler() http.HandlerFunc {
 			var err error
 			reminder, err = a.MemberStore.UpdateReleaseReminderAndRecordEvent(profileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 				if enabled {
+					if reactivateReleased && (current.Status == ReleaseReminderStatusReleased || current.AutoReleaseState == ReleaseReminderAutoReleaseStateReleased) {
+						current.Status = ReleaseReminderStatusActive
+						current.ReleasedAt = ""
+						current.ReleaseDueAt = nowTime.Add(24 * time.Hour).Format(time.RFC3339)
+						if reactivationOwner.Email != "" {
+							current.OwnerEmail = reactivationOwner.Email
+							current.OwnerName = reactivationOwner.Name
+						}
+						current = resetAutoReleaseForNewCycle(current)
+					}
 					current.AutoReleaseEnabled = true
 					if current.Status == ReleaseReminderStatusDueNotified && current.AutoReleaseState == "" {
 						current.AutoReleaseAt = nowTime.Add(AutoReleaseGracePeriod).Format(time.RFC3339)
@@ -1195,6 +1233,8 @@ func writeReleaseReminderUpdateError(w http.ResponseWriter, err error) {
 		writeWebError(w, http.StatusNotFound, "release reminder not found")
 	case errors.Is(err, errAutomaticReleaseRunning), errors.Is(err, errActiveDestroyJob):
 		writeWebError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errAutoReleaseMacNotReady), errors.Is(err, errAutoReleaseOwnerMissing):
+		writeWebError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeWebError(w, http.StatusInternalServerError, err.Error())
 	}
@@ -1746,6 +1786,12 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 		return err
 	}
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
+		existing.OwnerEmail = owner.Email
+		existing.OwnerName = owner.Name
+		existing, err = a.MemberStore.UpsertReleaseReminder(existing)
+		if err != nil {
+			return err
+		}
 		a.notifyReleaseReminder("open", existing, owner.Name, "Mac 打开确认成功")
 		return nil
 	}

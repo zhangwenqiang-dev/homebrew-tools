@@ -212,7 +212,10 @@ func TestWebAutoReleaseMobileAndRoleContract(t *testing.T) {
 		`.auto-release-strip { align-items: stretch; flex-direction: column; }`,
 		`.auto-release-actions { width: 100%; }`,
 		`$("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());`,
-		`$("autoReleaseSummary").textContent = autoReleaseStateText(reminder);`,
+		`$("autoReleaseSummary").textContent = autoReleaseStateText(reminder, profile);`,
+		`const ready = !!(profile && profileReady(profile.name));`,
+		`!profile || !reminder || !ready || state.busy`,
+		`Mac 已运行，可重新设置自动释放`,
 		`$("extendReminderBtn").disabled =`,
 	} {
 		if !strings.Contains(html, want) {
@@ -281,6 +284,62 @@ func TestAppWebAutoReleaseToggleAdminEnableDisable(t *testing.T) {
 				t.Fatalf("events = %+v", events)
 			}
 		})
+	}
+}
+
+func TestAppWebAutoReleaseReactivatesReleasedReminderForReadyMac(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-ready",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+				Tags:                managedTestTags(),
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-ready", PublicIP: "54.1.2.3", AllocationID: "eipalloc-1"},
+		}}, nil
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:        "xcode-vnc",
+		AppleEmail:         "user@example.com",
+		HostID:             "h-1",
+		ReleaseDueAt:       "2026-07-01T08:00:00Z",
+		Status:             ReleaseReminderStatusReleased,
+		ReleasedAt:         "2026-07-01T09:00:00Z",
+		AutoReleaseEnabled: true,
+		AutoReleaseState:   ReleaseReminderAutoReleaseStateReleased,
+	}); err != nil {
+		t.Fatalf("seed released reminder: %v", err)
+	}
+
+	body := strings.NewReader(`{"profile":"xcode-vnc","enabled":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/auto-release", body)
+	addWebAuth(t, &app, req, "admin")
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "admin@example.com"); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := mustReleaseReminder(t, app, "xcode-vnc")
+	if got.Status != ReleaseReminderStatusActive || got.ReleasedAt != "" || !got.AutoReleaseEnabled || got.AutoReleaseState != "" {
+		t.Fatalf("released reminder was not reactivated: %+v", got)
+	}
+	if got.OwnerEmail != "admin@example.com" || got.OwnerName != "Test Admin" {
+		t.Fatalf("reactivated owner = %+v", got)
+	}
+	wantDue := time.Date(2026, 7, 2, 12, 30, 45, 0, time.UTC).Format(time.RFC3339)
+	if got.ReleaseDueAt != wantDue {
+		t.Fatalf("release due at = %q, want %q", got.ReleaseDueAt, wantDue)
 	}
 }
 

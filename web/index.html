@@ -1754,16 +1754,16 @@
       $("ownerValue").textContent = p ? (ownerNames(p).join(", ") || "-") : "-";
       $("hostCreatedValue").textContent = reminder?.host_created_at ? formatTime(reminder.host_created_at) : "-";
       $("reminderDueValue").textContent = reminder?.release_due_at ? formatTime(reminder.release_due_at) : "-";
-      $("reminderStatusValue").textContent = reminder ? reminderStatusText(reminder) : "-";
+      $("reminderStatusValue").textContent = reminder ? reminderStatusText(reminder, p) : "-";
       renderAutoRelease(reminder, p);
       renderAssignMemberOptions();
       applyRoleVisibility();
       renderUserPage();
     }
 
-    function reminderStatusText(reminder) {
+    function reminderStatusText(reminder, profile) {
       if (!reminder) return "-";
-      if (reminder.status === "released") return "已释放";
+      if (reminder.status === "released") return profile && profileReady(profile.name) ? "已运行，提醒待更新" : "已释放";
       if (reminder.status === "due_notified") return "已到期并通知";
       if (reminder.release_due_at && new Date(reminder.release_due_at).getTime() <= Date.now()) return "已到期";
       return "提醒中";
@@ -1774,9 +1774,11 @@
       return state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"));
     }
 
-    function autoReleaseStateText(reminder) {
+    function autoReleaseStateText(reminder, profile) {
       if (!reminder) return "未开启自动释放";
-      if (reminder.status === "released" || reminder.auto_release_state === "released") return "已释放";
+      if (reminder.status === "released" || reminder.auto_release_state === "released") {
+        return profile && profileReady(profile.name) ? "Mac 已运行，可重新设置自动释放" : "已释放";
+      }
       if (!reminder.auto_release_enabled) return "未开启自动释放";
       if (reminder.auto_release_state === "scheduled" && reminder.auto_release_at) return `将在 ${formatTime(reminder.auto_release_at)} 自动释放`;
       if (reminder.auto_release_state === "running") return "正在自动释放";
@@ -1790,9 +1792,10 @@
 
     function renderAutoRelease(reminder, profile) {
       const active = !!(profile && autoReleaseActive(reminder, profile.name));
-      const released = reminder?.status === "released" || reminder?.auto_release_state === "released";
+      const ready = !!(profile && profileReady(profile.name));
+      const released = (reminder?.status === "released" || reminder?.auto_release_state === "released") && !ready;
       const enabled = !!reminder?.auto_release_enabled;
-      $("autoReleaseSummary").textContent = autoReleaseStateText(reminder);
+      $("autoReleaseSummary").textContent = autoReleaseStateText(reminder, profile);
       $("autoReleaseTime").textContent = reminder?.auto_release_at ? "自动释放时间：" + formatTime(reminder.auto_release_at) : "";
       $("autoReleaseTime").classList.toggle("hidden", !reminder?.auto_release_at || reminder?.auto_release_state === "scheduled");
       const showError = !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");
@@ -1800,7 +1803,7 @@
       $("autoReleaseError").classList.toggle("hidden", !showError);
       $("autoReleaseToggleBtn").textContent = enabled ? "关闭自动释放" : "开启自动释放";
       $("autoReleaseToggleBtn").setAttribute("aria-pressed", String(enabled));
-      $("autoReleaseToggleBtn").disabled = !profile || !reminder || state.busy || state.autoReleaseSubmitting || active || released;
+      $("autoReleaseToggleBtn").disabled = !profile || !reminder || !ready || state.busy || state.autoReleaseSubmitting || active || released;
       $("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());
     }
 
@@ -1874,7 +1877,7 @@
     async function runAWS(command, confirm = false) {
       const p = selectedProfile();
       if (!p) return false;
-      const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : "";
+      const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : (state.auth?.member?.email || "");
       if (confirm && command === "open" && isAdmin() && !ownerEmail && !profileReady(p.name)) {
         setStatus("管理员确认打开前必须选择负责人");
         return false;
@@ -1916,7 +1919,7 @@
       setBusy(true, command === "open" ? "正在预览打开..." : "正在预览释放...");
       setStatus(command === "open" ? "预览打开中..." : "预览释放中...");
       try {
-        const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : "";
+        const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : (state.auth?.member?.email || "");
         const body = await api("/api/aws/" + command, {
           method: "POST",
           body: JSON.stringify({ profile: p.name, confirm: false, background: false, notify: true, owner_email: ownerEmail })

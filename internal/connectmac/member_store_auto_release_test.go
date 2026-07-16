@@ -208,6 +208,38 @@ func TestMemberStoreUpsertReleaseReminderPreservesAutoReleaseForSameCycle(t *tes
 	}
 }
 
+func TestMemberStoreUpsertReleaseReminderReactivatesReleasedSameHost(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	old := runningAutoReleaseReminder("old-owner@example.com")
+	old.Status = ReleaseReminderStatusReleased
+	old.ReleasedAt = "2026-07-14T09:00:00Z"
+	old.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	if _, err := store.UpsertReleaseReminder(old); err != nil {
+		t.Fatalf("upsert released reminder: %v", err)
+	}
+
+	updated := ReleaseReminder{
+		ProfileName:   old.ProfileName,
+		AppleEmail:    old.AppleEmail,
+		HostID:        old.HostID,
+		HostCreatedAt: "2026-07-13T08:00:00Z",
+		ReleaseDueAt:  "2026-07-17T08:00:00Z",
+		OwnerEmail:    "new-owner@example.com",
+		OwnerName:     "New Owner",
+		Status:        ReleaseReminderStatusActive,
+	}
+	got, err := store.UpsertReleaseReminder(updated)
+	if err != nil {
+		t.Fatalf("reactivate released reminder: %v", err)
+	}
+	if got.Status != ReleaseReminderStatusActive || got.ReleasedAt != "" || got.OwnerEmail != updated.OwnerEmail || got.ReleaseDueAt != updated.ReleaseDueAt {
+		t.Fatalf("released reminder was not reactivated: %+v", got)
+	}
+	if got.AutoReleaseEnabled || got.AutoReleaseAt != "" || got.AutoReleaseStartedAt != "" || got.AutoReleaseLastAttemptAt != "" || got.AutoReleaseAttempts != 0 || got.AutoReleaseLastError != "" || got.AutoReleaseState != "" {
+		t.Fatalf("released auto-release state leaked into active cycle: %+v", got)
+	}
+}
+
 func runningAutoReleaseReminder(ownerEmail string) ReleaseReminder {
 	return ReleaseReminder{
 		ProfileName:              "mac",

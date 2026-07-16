@@ -1980,7 +1980,9 @@ func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now stri
 
 func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) ReleaseReminder {
 	updated = normalizeReleaseReminderCallback(current, updated, now)
-	if current.HostID != updated.HostID || current.AppleEmail != updated.AppleEmail {
+	if current.HostID != updated.HostID ||
+		current.AppleEmail != updated.AppleEmail ||
+		(current.Status == ReleaseReminderStatusReleased && updated.Status != ReleaseReminderStatusReleased) {
 		return resetAutoReleaseForNewCycle(updated)
 	}
 	updated.AutoReleaseEnabled = current.AutoReleaseEnabled

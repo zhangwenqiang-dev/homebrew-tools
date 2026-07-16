@@ -2272,6 +2272,17 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 		t.Fatalf("admin open without owner body = %s", rec.Body.String())
 	}
 
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:  "xcode-vnc",
+		AppleEmail:   "user@example.com",
+		ReleaseDueAt: time.Now().Add(12 * time.Hour).Format(time.RFC3339),
+		OwnerEmail:   "old-owner@example.com",
+		OwnerName:    "Old Owner",
+		Status:       ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("seed active reminder: %v", err)
+	}
+
 	operator, err := app.MemberStore.AddMemberWithPassword("Operator", "operator@example.com", "operator", "password123")
 	if err != nil {
 		t.Fatalf("add operator: %v", err)
@@ -2309,6 +2320,11 @@ func TestAppWebOpenRequiresOwnerForAdminAndAutoAssignsOperator(t *testing.T) {
 		t.Fatalf("profile owner: %v", err)
 	} else if !ok || owner.Owner.Email != "operator@example.com" {
 		t.Fatalf("profile owner after operator open = %+v ok=%v", owner, ok)
+	}
+	if reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc"); err != nil {
+		t.Fatalf("release reminder: %v", err)
+	} else if !ok || reminder.OwnerEmail != "operator@example.com" || reminder.OwnerName != "Operator" || reminder.Status != ReleaseReminderStatusActive {
+		t.Fatalf("release reminder owner after operator open = %+v ok=%v", reminder, ok)
 	}
 }
 
