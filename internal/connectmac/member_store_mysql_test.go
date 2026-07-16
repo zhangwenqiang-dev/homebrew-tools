@@ -5,11 +5,14 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 type fakeMySQLReleaseReminderRow struct {
@@ -58,6 +61,53 @@ func (r *fakeMySQLReleaseReminderRows) Close() error {
 }
 
 func (r *fakeMySQLReleaseReminderRows) Err() error {
+	return r.err
+}
+
+type fakeMySQLTransferRows struct {
+	records  []TransferRecord
+	index    int
+	err      error
+	closeErr error
+}
+
+func (r *fakeMySQLTransferRows) Next() bool {
+	return r.index < len(r.records)
+}
+
+func (r *fakeMySQLTransferRows) Scan(dest ...any) error {
+	if r.index >= len(r.records) {
+		return errors.New("scan past transfer rows")
+	}
+	record := r.records[r.index]
+	r.index++
+	if len(dest) != len(mysqlTransferColumnNames) {
+		return errors.New("unexpected transfer scan destination count")
+	}
+	*dest[0].(*string) = record.ID
+	*dest[1].(*string) = record.MemberID
+	*dest[2].(*string) = record.MemberEmail
+	*dest[3].(*string) = record.ProfileName
+	*dest[4].(*string) = record.AppleEmail
+	*dest[5].(*string) = record.Direction
+	*dest[6].(*string) = record.LocalPath
+	*dest[7].(*string) = record.RemotePath
+	*dest[8].(*string) = record.LocalJobID
+	*dest[9].(*string) = record.Status
+	*dest[10].(*int) = record.Percent
+	*dest[11].(*string) = record.ErrorSummary
+	*dest[12].(*string) = record.CreatedAt
+	*dest[13].(*string) = record.StartedAt
+	*dest[14].(*string) = record.FinishedAt
+	*dest[15].(*string) = record.UpdatedAt
+	return nil
+}
+
+func (r *fakeMySQLTransferRows) Close() error {
+	return r.closeErr
+}
+
+func (r *fakeMySQLTransferRows) Err() error {
 	return r.err
 }
 
@@ -110,6 +160,7 @@ type fakeMySQLReleaseReminderTransaction struct {
 	lockVersion  uint64
 	queryRows    []ReleaseReminder
 	queryRowsErr error
+	transferRows []TransferRecord
 	operations   []string
 	ownerDeleted bool
 }
@@ -129,6 +180,9 @@ func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...an
 
 func (tx *fakeMySQLReleaseReminderTransaction) Query(query string, args ...any) (mysqlRows, error) {
 	tx.operations = append(tx.operations, "query:"+query)
+	if strings.Contains(query, "FROM cm_transfer_records") {
+		return &fakeMySQLTransferRows{records: tx.transferRows}, nil
+	}
 	return &fakeMySQLReleaseReminderRows{reminders: tx.queryRows, err: tx.queryRowsErr}, nil
 }
 
@@ -250,6 +304,483 @@ func TestMySQLStoreLockSchemaIsMigrationSafe(t *testing.T) {
 	if !strings.Contains(mysqlStoreLockSeedStatement, "ON DUPLICATE KEY UPDATE") {
 		t.Fatalf("store lock seed migration = %q", mysqlStoreLockSeedStatement)
 	}
+}
+
+func TestMySQLTransferSchemaIncludesMemberScopedIndexes(t *testing.T) {
+	joined := strings.Join(mysqlSchemaStatements(), "\n")
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS cm_transfer_records",
+		"INDEX idx_cm_transfer_member_profile (member_id, profile_name, updated_at)",
+		"INDEX idx_cm_transfer_member_job (member_id, local_job_id)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("transfer schema missing %q", want)
+		}
+	}
+}
+
+func TestMySQLCreateTransferUsesTransactionAndCryptographicID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 7, 16, 8, 0, 0, 0, time.UTC)
+	store := mysqlTransferTestStore(db, now)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(4))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlTransferInsertQuery)).
+		WithArgs(
+			sqlmock.AnyArg(), "member-a", "a@example.com", "iossupport-usw2", "",
+			TransferDirectionPush, "/tmp/App", "~/Documents/", "", TransferStatusCreated,
+			0, "", now.Format(time.RFC3339), "", "", now.Format(time.RFC3339),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	created, err := store.CreateTransferRecord("member-a", TransferRecord{
+		MemberID:    "member-a",
+		MemberEmail: " A@EXAMPLE.COM ",
+		ProfileName: "iossupport-usw2",
+		Direction:   TransferDirectionPush,
+		LocalPath:   "/tmp/App",
+		RemotePath:  "~/Documents/",
+		Status:      TransferStatusCreated,
+	})
+	if err != nil {
+		t.Fatalf("create transfer: %v", err)
+	}
+	if !strings.HasPrefix(created.ID, "transfer-") || len(created.ID) < len("transfer-")+16 {
+		t.Fatalf("created transfer ID = %q", created.ID)
+	}
+	if created.MemberEmail != "a@example.com" || created.CreatedAt != now.Format(time.RFC3339) || created.UpdatedAt != created.CreatedAt {
+		t.Fatalf("created transfer = %+v", created)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLListTransferRecordsScopesAndOrdersByMember(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	rows := sqlmock.NewRows(mysqlTransferColumnNames).
+		AddRow("transfer-2", "member-a", "a@example.com", "iossupport-usw2", "", TransferDirectionPush, "/tmp/App", "~/Documents/", "job-2", TransferStatusRunning, 50, "", "2026-07-16T08:00:00Z", "2026-07-16T08:01:00Z", "", "2026-07-16T08:02:00Z").
+		AddRow("transfer-1", "member-a", "a@example.com", "iossupport-usw2", "", TransferDirectionPush, "/tmp/App", "~/Documents/", "", TransferStatusCreated, 0, "", "2026-07-16T07:00:00Z", "", "", "2026-07-16T07:00:00Z")
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferListByProfileQuery)).
+		WithArgs("member-a", "iossupport-usw2").
+		WillReturnRows(rows)
+
+	records, err := store.ListTransferRecords("member-a", "iossupport-usw2")
+	if err != nil {
+		t.Fatalf("list transfers: %v", err)
+	}
+	if len(records) != 2 || records[0].ID != "transfer-2" || records[1].ID != "transfer-1" {
+		t.Fatalf("records = %+v", records)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLListTransferRecordsWithOnlyMemberIDUsesMemberQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	record := TransferRecord{
+		ID: "transfer-1", MemberID: "member-a", MemberEmail: "a@example.com",
+		ProfileName: "iossupport-usw2", AppleEmail: "apple@example.com",
+		Direction: TransferDirectionPull, LocalPath: "/tmp/App", RemotePath: "~/Documents/",
+		LocalJobID: "job-1", Status: TransferStatusSucceeded, Percent: 100,
+		CreatedAt: "2026-07-16T07:00:00Z", StartedAt: "2026-07-16T07:01:00Z",
+		FinishedAt: "2026-07-16T07:02:00Z", UpdatedAt: "2026-07-16T07:02:00Z",
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferListQuery)).
+		WithArgs("member-a").
+		WillReturnRows(mysqlTransferRows(record))
+
+	records, err := store.ListTransferRecords("member-a", "")
+	if err != nil {
+		t.Fatalf("list transfers: %v", err)
+	}
+	if !reflect.DeepEqual(records, []TransferRecord{record}) {
+		t.Fatalf("records = %+v, want %+v", records, record)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStoreLoadScansMembersAndTransferRecords(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	member := Member{
+		ID: "member-a", Name: "Member A", Email: "a@example.com", Username: "member-a",
+		Role: "member", Enabled: true, PasswordHash: "password-hash", PasswordSalt: "password-salt",
+		APITokenHash: "token-hash", APITokenAt: "2026-07-16T06:00:00Z",
+		CreatedAt: "2026-07-16T05:00:00Z", UpdatedAt: "2026-07-16T06:00:00Z",
+	}
+	record := TransferRecord{
+		ID: "transfer-1", MemberID: member.ID, MemberEmail: member.Email,
+		ProfileName: "iossupport-usw2", AppleEmail: "apple@example.com",
+		Direction: TransferDirectionPush, LocalPath: "/tmp/App", RemotePath: "~/Documents/",
+		LocalJobID: "job-1", Status: TransferStatusRunning, Percent: 50,
+		ErrorSummary: "still running", CreatedAt: "2026-07-16T07:00:00Z",
+		StartedAt: "2026-07-16T07:01:00Z", UpdatedAt: "2026-07-16T07:02:00Z",
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockVersionQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(9))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), COALESCE(api_token_hash, ''), COALESCE(api_token_at, ''), created_at, updated_at FROM cm_members ORDER BY email`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "username", "role", "enabled", "password_hash", "password_salt", "api_token_hash", "api_token_at", "created_at", "updated_at"}).
+			AddRow(member.ID, member.Name, member.Email, member.Username, member.Role, member.Enabled, member.PasswordHash, member.PasswordSalt, member.APITokenHash, member.APITokenAt, member.CreatedAt, member.UpdatedAt))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT apple_email, member_id, relation, created_at FROM cm_assignments ORDER BY apple_email, member_id`)).
+		WillReturnRows(sqlmock.NewRows([]string{"apple_email", "member_id", "relation", "created_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT profile_name, member_id, updated_at FROM cm_profile_owners ORDER BY profile_name`)).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_name", "member_id", "updated_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT name, COALESCE(apple_email, ''), enabled, profile_yaml, created_at, updated_at FROM cm_profiles ORDER BY name`)).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "apple_email", "enabled", "profile_yaml", "created_at", "updated_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT profile_name, member_id, created_at FROM cm_profile_members ORDER BY profile_name, member_id`)).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_name", "member_id", "created_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ` + mysqlReleaseReminderSelectColumns + ` FROM cm_release_reminders ORDER BY profile_name`)).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_name"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records ORDER BY updated_at DESC, id DESC`)).
+		WillReturnRows(mysqlTransferRows(record))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT setting_key, COALESCE(setting_value, '') FROM cm_settings`)).
+		WillReturnRows(sqlmock.NewRows([]string{"setting_key", "setting_value"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), COALESCE(member_email, ''), COALESCE(member_name, ''), confirmed, status, COALESCE(message, ''), created_at FROM cm_events ORDER BY created_at ASC LIMIT 500`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	data, err := store.Load()
+	if err != nil {
+		t.Fatalf("load member store: %v", err)
+	}
+	if !reflect.DeepEqual(data.Members, []Member{member}) {
+		t.Fatalf("members = %+v, want %+v", data.Members, member)
+	}
+	if !reflect.DeepEqual(data.TransferRecords, []TransferRecord{record}) {
+		t.Fatalf("transfer records = %+v, want %+v", data.TransferRecords, record)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStoreLoadReturnsTransferIterationError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	wantErr := errors.New("transfer rows interrupted")
+
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockVersionQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(9))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), COALESCE(api_token_hash, ''), COALESCE(api_token_at, ''), created_at, updated_at FROM cm_members ORDER BY email`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "username", "role", "enabled", "password_hash", "password_salt", "api_token_hash", "api_token_at", "created_at", "updated_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT apple_email, member_id, relation, created_at FROM cm_assignments ORDER BY apple_email, member_id`)).
+		WillReturnRows(sqlmock.NewRows([]string{"apple_email", "member_id", "relation", "created_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT profile_name, member_id, updated_at FROM cm_profile_owners ORDER BY profile_name`)).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_name", "member_id", "updated_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT name, COALESCE(apple_email, ''), enabled, profile_yaml, created_at, updated_at FROM cm_profiles ORDER BY name`)).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "apple_email", "enabled", "profile_yaml", "created_at", "updated_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT profile_name, member_id, created_at FROM cm_profile_members ORDER BY profile_name, member_id`)).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_name", "member_id", "created_at"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ` + mysqlReleaseReminderSelectColumns + ` FROM cm_release_reminders ORDER BY profile_name`)).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_name"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records ORDER BY updated_at DESC, id DESC`)).
+		WillReturnRows(mysqlTransferRows(TransferRecord{
+			ID: "transfer-1", MemberID: "member-a", MemberEmail: "a@example.com",
+			ProfileName: "iossupport-usw2", Direction: TransferDirectionPush,
+			LocalPath: "/tmp/App", RemotePath: "~/Documents/", Status: TransferStatusRunning,
+			CreatedAt: "2026-07-16T07:00:00Z", UpdatedAt: "2026-07-16T07:00:00Z",
+		}).RowError(0, wantErr))
+
+	if _, err := store.Load(); !errors.Is(err, wantErr) {
+		t.Fatalf("load error = %v, want %v", err, wantErr)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStoreSaveDeletesAndReinsertsMembersAndTransferRecords(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+	store := mysqlTransferTestStore(db, time.Time{})
+	member := Member{
+		ID: "member-a", Name: "Member A", Email: "a@example.com", Username: "member-a",
+		Role: "admin", Enabled: true, PasswordHash: "password-hash", PasswordSalt: "password-salt",
+		APITokenHash: "token-hash", APITokenAt: "2026-07-16T06:00:00Z",
+		CreatedAt: "2026-07-16T05:00:00Z", UpdatedAt: "2026-07-16T06:00:00Z",
+	}
+	record := TransferRecord{
+		ID: "transfer-1", MemberID: member.ID, MemberEmail: member.Email,
+		ProfileName: "iossupport-usw2", AppleEmail: "apple@example.com",
+		Direction: TransferDirectionPush, LocalPath: "/tmp/App", RemotePath: "~/Documents/",
+		LocalJobID: "job-1", Status: TransferStatusSucceeded, Percent: 100,
+		ErrorSummary: "", CreatedAt: "2026-07-16T07:00:00Z",
+		StartedAt: "2026-07-16T07:01:00Z", FinishedAt: "2026-07-16T07:02:00Z",
+		UpdatedAt: "2026-07-16T07:02:00Z",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(12))
+	for _, table := range []string{"cm_events", "cm_transfer_records", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM " + table)).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO cm_members (id, name, email, username, role, enabled, password_hash, password_salt, api_token_hash, api_token_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)).
+		WithArgs(member.ID, member.Name, member.Email, member.Username, member.Role, member.Enabled, member.PasswordHash, member.PasswordSalt, member.APITokenHash, member.APITokenAt, member.CreatedAt, member.UpdatedAt).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlTransferInsertQuery)).
+		WithArgs(
+			record.ID, record.MemberID, record.MemberEmail, record.ProfileName, record.AppleEmail,
+			record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status,
+			record.Percent, record.ErrorSummary, record.CreatedAt, record.StartedAt, record.FinishedAt, record.UpdatedAt,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	for _, setting := range []struct {
+		key   string
+		value string
+	}{
+		{key: "auth_secret", value: ""},
+		{key: "default_owner_email", value: ""},
+		{key: "default_status_filter", value: ""},
+		{key: "background_confirm", value: "true"},
+		{key: "show_released", value: "false"},
+	} {
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO cm_settings (setting_key, setting_value) VALUES (?, ?)`)).
+			WithArgs(setting.key, setting.value).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+	}
+	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err = store.Save(MemberData{
+		Members:          []Member{member},
+		TransferRecords:  []TransferRecord{record},
+		Settings:         defaultWebSettings(),
+		mutationRevision: 12,
+	})
+	if err != nil {
+		t.Fatalf("save member store: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLUpdateTransferLocksMemberRowAndEnforcesSemantics(t *testing.T) {
+	current := TransferRecord{
+		ID: "transfer-1", MemberID: "member-a", MemberEmail: "a@example.com",
+		ProfileName: "iossupport-usw2", Direction: TransferDirectionPush,
+		LocalPath: "/tmp/App", RemotePath: "~/Documents/", Status: TransferStatusRunning,
+		Percent: 50, LocalJobID: "job-a", CreatedAt: "2026-07-16T08:00:00Z",
+		StartedAt: "2026-07-16T08:01:00Z", UpdatedAt: "2026-07-16T08:02:00Z",
+	}
+	now := time.Date(2026, 7, 16, 8, 3, 0, 0, time.UTC)
+
+	t.Run("success", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		defer db.Close()
+		store := mysqlTransferTestStore(db, now)
+		unbound := current
+		unbound.LocalJobID = ""
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+			WithArgs(mysqlStoreLockName).
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(5))
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferSelectForUpdateQuery)).
+			WithArgs(current.ID, current.MemberID).
+			WillReturnRows(mysqlTransferRows(unbound))
+		mock.ExpectExec(regexp.QuoteMeta(mysqlTransferUpdateQuery)).
+			WithArgs(
+				current.MemberEmail, current.ProfileName, current.AppleEmail, current.Direction,
+				current.LocalPath, current.RemotePath, current.LocalJobID, TransferStatusSucceeded,
+				100, "", current.StartedAt, now.Format(time.RFC3339), now.Format(time.RFC3339),
+				current.ID, current.MemberID,
+			).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).
+			WithArgs(mysqlStoreLockName).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+
+		updated, err := store.UpdateTransferRecord(current.MemberID, current.ID, current.LocalJobID, func(record TransferRecord) (TransferRecord, error) {
+			record.LocalJobID = current.LocalJobID
+			record.Status = TransferStatusSucceeded
+			record.Percent = 100
+			record.FinishedAt = now.Format(time.RFC3339)
+			return record, nil
+		})
+		if err != nil {
+			t.Fatalf("update transfer: %v", err)
+		}
+		if updated.Status != TransferStatusSucceeded || updated.Percent != 100 || updated.UpdatedAt != now.Format(time.RFC3339) {
+			t.Fatalf("updated transfer = %+v", updated)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		memberID   string
+		localJobID string
+		current    TransferRecord
+		update     func(TransferRecord) (TransferRecord, error)
+		wantErr    string
+	}{
+		{
+			name: "wrong member", memberID: "member-b", localJobID: "job-a",
+			wantErr: ErrTransferRecordNotFound.Error(),
+		},
+		{
+			name: "wrong local job", memberID: "member-a", localJobID: "job-b", current: current,
+			wantErr: ErrTransferRecordNotFound.Error(),
+		},
+		{
+			name: "percent regression", memberID: "member-a", localJobID: "job-a", current: current,
+			update: func(record TransferRecord) (TransferRecord, error) {
+				record.Percent = 49
+				return record, nil
+			},
+			wantErr: "transfer percent cannot regress",
+		},
+		{
+			name: "terminal immutable", memberID: "member-a", localJobID: "job-a",
+			current: func() TransferRecord {
+				record := current
+				record.Status = TransferStatusFailed
+				return record
+			}(),
+			wantErr: "terminal transfer record cannot be updated",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			store := mysqlTransferTestStore(db, now)
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+				WithArgs(mysqlStoreLockName).
+				WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(5))
+			query := mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferSelectForUpdateQuery)).
+				WithArgs(current.ID, test.memberID)
+			if test.name == "wrong member" {
+				query.WillReturnError(sql.ErrNoRows)
+			} else {
+				query.WillReturnRows(mysqlTransferRows(test.current))
+			}
+			mock.ExpectRollback()
+			update := test.update
+			if update == nil {
+				update = func(record TransferRecord) (TransferRecord, error) { return record, nil }
+			}
+			_, err = store.UpdateTransferRecord(test.memberID, current.ID, test.localJobID, update)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("update error = %v, want %q", err, test.wantErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMySQLDeleteTransferScopesByMemberAndReturnsNotFound(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		affected int64
+		wantErr  error
+	}{
+		{name: "deleted", affected: 1},
+		{name: "wrong member", affected: 0, wantErr: ErrTransferRecordNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			store := mysqlTransferTestStore(db, time.Time{})
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+				WithArgs(mysqlStoreLockName).
+				WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(6))
+			mock.ExpectExec(regexp.QuoteMeta(mysqlTransferDeleteQuery)).
+				WithArgs("transfer-1", "member-a").
+				WillReturnResult(sqlmock.NewResult(0, test.affected))
+			if test.wantErr == nil {
+				mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).
+					WithArgs(mysqlStoreLockName).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+			err = store.DeleteTransferRecord("member-a", "transfer-1")
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("delete error = %v, want %v", err, test.wantErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func mysqlTransferTestStore(db *sql.DB, now time.Time) MySQLMemberStore {
+	return MySQLMemberStore{
+		DSN:         "sqlmock",
+		Now:         func() time.Time { return now },
+		schemaGuard: &mysqlSchemaGuard{success: true},
+		openDB:      func() (*sql.DB, error) { return db, nil },
+	}
+}
+
+func mysqlTransferRows(record TransferRecord) *sqlmock.Rows {
+	return sqlmock.NewRows(mysqlTransferColumnNames).AddRow(
+		record.ID, record.MemberID, record.MemberEmail, record.ProfileName, record.AppleEmail,
+		record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status,
+		record.Percent, record.ErrorSummary, record.CreatedAt, record.StartedAt, record.FinishedAt, record.UpdatedAt,
+	)
 }
 
 func TestMySQLReleaseReminderSelectColumnsIncludeAutoReleaseState(t *testing.T) {
@@ -397,9 +928,13 @@ func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testin
 	tx := &fakeMySQLReleaseReminderTransaction{
 		lockVersion: 7,
 		queryRows:   []ReleaseReminder{current},
+		transferRows: []TransferRecord{{
+			ID: "transfer-current", MemberID: "member-a", Status: TransferStatusRunning,
+		}},
 	}
 	data := MemberData{
 		Reminders:        []ReleaseReminder{{ProfileName: "apple-usw2"}},
+		TransferRecords:  []TransferRecord{{ID: "transfer-stale", MemberID: "member-a"}},
 		mutationRevision: 6,
 	}
 	got, err := prepareMySQLWholeStoreSave(tx, data)
@@ -409,7 +944,10 @@ func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testin
 	if !reflect.DeepEqual(got.Reminders, []ReleaseReminder{current}) {
 		t.Fatalf("stale save reminders = %+v, want %+v", got.Reminders, current)
 	}
-	if len(tx.operations) < 3 {
+	if !reflect.DeepEqual(got.TransferRecords, tx.transferRows) {
+		t.Fatalf("stale save transfers = %+v, want %+v", got.TransferRecords, tx.transferRows)
+	}
+	if len(tx.operations) < 4 {
 		t.Fatalf("whole-store operations = %v", tx.operations)
 	}
 	if tx.operations[0] != "query-row:"+mysqlStoreLockForUpdateQuery {
@@ -419,8 +957,12 @@ func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testin
 	if tx.operations[1] != wantReminderQuery {
 		t.Fatalf("second whole-store operation = %q, want %q", tx.operations[1], wantReminderQuery)
 	}
-	if tx.operations[2] != "exec:DELETE FROM cm_events" {
-		t.Fatalf("first delete operation = %q", tx.operations[2])
+	wantTransferQuery := "query:SELECT " + mysqlTransferSelectColumns + " FROM cm_transfer_records ORDER BY updated_at DESC, id DESC"
+	if tx.operations[2] != wantTransferQuery {
+		t.Fatalf("third whole-store operation = %q, want %q", tx.operations[2], wantTransferQuery)
+	}
+	if tx.operations[3] != "exec:DELETE FROM cm_events" {
+		t.Fatalf("first delete operation = %q", tx.operations[3])
 	}
 }
 

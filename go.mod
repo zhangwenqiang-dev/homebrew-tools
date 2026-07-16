@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.305.0
 	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.35.6
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.0
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/gorilla/websocket v1.5.3
 	golang.org/x/crypto v0.53.0
 )

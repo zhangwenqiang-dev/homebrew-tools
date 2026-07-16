@@ -18,7 +18,28 @@ type MySQLMemberStore struct {
 	Now           func() time.Time
 	schemaGuard   *mysqlSchemaGuard
 	mutationGuard *storeMutationGuard
+	openDB        func() (*sql.DB, error)
 }
+
+var mysqlTransferColumnNames = []string{
+	"id", "member_id", "member_email", "profile_name", "apple_email", "direction",
+	"local_path", "remote_path", "local_job_id", "status", "percent", "error_summary",
+	"created_at", "started_at", "finished_at", "updated_at",
+}
+
+const mysqlTransferSelectColumns = `id, member_id, member_email, profile_name, COALESCE(apple_email, ''), direction, local_path, remote_path, COALESCE(local_job_id, ''), status, percent, COALESCE(error_summary, ''), created_at, COALESCE(started_at, ''), COALESCE(finished_at, ''), updated_at`
+
+const mysqlTransferInsertQuery = `INSERT INTO cm_transfer_records (id, member_id, member_email, profile_name, apple_email, direction, local_path, remote_path, local_job_id, status, percent, error_summary, created_at, started_at, finished_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+const mysqlTransferListQuery = `SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records WHERE member_id = ? ORDER BY updated_at DESC, id DESC`
+
+const mysqlTransferListByProfileQuery = `SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records WHERE member_id = ? AND profile_name = ? ORDER BY updated_at DESC, id DESC`
+
+const mysqlTransferSelectForUpdateQuery = `SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records WHERE id = ? AND member_id = ? FOR UPDATE`
+
+const mysqlTransferUpdateQuery = `UPDATE cm_transfer_records SET member_email = ?, profile_name = ?, apple_email = ?, direction = ?, local_path = ?, remote_path = ?, local_job_id = ?, status = ?, percent = ?, error_summary = ?, started_at = ?, finished_at = ?, updated_at = ? WHERE id = ? AND member_id = ?`
+
+const mysqlTransferDeleteQuery = `DELETE FROM cm_transfer_records WHERE id = ? AND member_id = ?`
 
 const mysqlReleaseReminderSelectColumns = `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
 
@@ -140,6 +161,9 @@ func (s MySQLMemberStore) lockMutation() func() {
 }
 
 func (s MySQLMemberStore) open() (*sql.DB, error) {
+	if s.openDB != nil {
+		return s.openDB()
+	}
 	if strings.TrimSpace(s.DSN) == "" {
 		return nil, errors.New("mysql dsn is empty")
 	}
@@ -173,7 +197,30 @@ func (s MySQLMemberStore) ensureSchema() error {
 		return err
 	}
 	defer db.Close()
-	stmts := []string{
+	for _, stmt := range mysqlSchemaStatements() {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	migrations := []string{
+		`ALTER TABLE cm_members ADD COLUMN api_token_hash TEXT NULL`,
+		`ALTER TABLE cm_members ADD COLUMN api_token_at VARCHAR(64) NULL`,
+	}
+	migrations = append(migrations, mysqlReleaseReminderMigrationStatements...)
+	migrations = append(migrations, mysqlOperationEventMigrationStatements...)
+	for _, stmt := range migrations {
+		if _, err := db.Exec(stmt); err != nil && !mysqlColumnExistsError(err) {
+			return err
+		}
+	}
+	if _, err := db.Exec(mysqlStoreLockSeedStatement, mysqlStoreLockName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func mysqlSchemaStatements() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS cm_members (
 			id VARCHAR(128) PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
@@ -244,6 +291,26 @@ func (s MySQLMemberStore) ensureSchema() error {
 			INDEX idx_cm_release_reminders_due (status, release_due_at),
 			INDEX idx_cm_release_reminders_apple_email (apple_email)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS cm_transfer_records (
+			id VARCHAR(160) PRIMARY KEY,
+			member_id VARCHAR(128) NOT NULL,
+			member_email VARCHAR(255) NOT NULL,
+			profile_name VARCHAR(255) NOT NULL,
+			apple_email VARCHAR(255) NULL,
+			direction VARCHAR(16) NOT NULL,
+			local_path TEXT NOT NULL,
+			remote_path TEXT NOT NULL,
+			local_job_id VARCHAR(255) NULL,
+			status VARCHAR(32) NOT NULL,
+			percent INT NOT NULL DEFAULT 0,
+			error_summary TEXT NULL,
+			created_at VARCHAR(64) NOT NULL,
+			started_at VARCHAR(64) NULL,
+			finished_at VARCHAR(64) NULL,
+			updated_at VARCHAR(64) NOT NULL,
+			INDEX idx_cm_transfer_member_profile (member_id, profile_name, updated_at),
+			INDEX idx_cm_transfer_member_job (member_id, local_job_id)
+		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
 		mysqlStoreLockTableStatement,
 		`CREATE TABLE IF NOT EXISTS cm_settings (
 			setting_key VARCHAR(128) PRIMARY KEY,
@@ -265,26 +332,6 @@ func (s MySQLMemberStore) ensureSchema() error {
 			INDEX idx_cm_events_created_at (created_at)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
 	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	migrations := []string{
-		`ALTER TABLE cm_members ADD COLUMN api_token_hash TEXT NULL`,
-		`ALTER TABLE cm_members ADD COLUMN api_token_at VARCHAR(64) NULL`,
-	}
-	migrations = append(migrations, mysqlReleaseReminderMigrationStatements...)
-	migrations = append(migrations, mysqlOperationEventMigrationStatements...)
-	for _, stmt := range migrations {
-		if _, err := db.Exec(stmt); err != nil && !mysqlColumnExistsError(err) {
-			return err
-		}
-	}
-	if _, err := db.Exec(mysqlStoreLockSeedStatement, mysqlStoreLockName); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (s MySQLMemberStore) Load() (MemberData, error) {
@@ -297,7 +344,7 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 		return MemberData{}, err
 	}
 	defer db.Close()
-	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
+	out := MemberData{Members: []Member{}, Assignments: []AppleAccountMember{}, ProfileOwners: []ProfileOwner{}, Profiles: []ManagedProfile{}, ProfileAccess: []ProfileAccess{}, Reminders: []ReleaseReminder{}, TransferRecords: []TransferRecord{}, Events: []OperationEvent{}, Settings: defaultWebSettings()}
 	if err := db.QueryRow(mysqlStoreLockVersionQuery, mysqlStoreLockName).Scan(&out.mutationRevision); err != nil {
 		return MemberData{}, err
 	}
@@ -387,6 +434,25 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 			return MemberData{}, err
 		}
 		out.Reminders = append(out.Reminders, reminder)
+	}
+	if err := rows.Close(); err != nil {
+		return MemberData{}, err
+	}
+	rows, err = db.Query(`SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records ORDER BY updated_at DESC, id DESC`)
+	if err != nil {
+		return MemberData{}, err
+	}
+	for rows.Next() {
+		var record TransferRecord
+		if err := scanMySQLTransferRecord(rows, &record); err != nil {
+			rows.Close()
+			return MemberData{}, err
+		}
+		out.TransferRecords = append(out.TransferRecords, record)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return MemberData{}, err
 	}
 	if err := rows.Close(); err != nil {
 		return MemberData{}, err
@@ -498,6 +564,11 @@ func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
 			return err
 		}
 	}
+	for _, record := range data.TransferRecords {
+		if err := insertMySQLTransferRecord(sqlMySQLReleaseReminderTransaction{tx: tx}, record); err != nil {
+			return err
+		}
+	}
 	settings := map[string]string{
 		"auth_secret":           data.Settings.AuthSecret,
 		"default_owner_email":   data.Settings.DefaultOwnerEmail,
@@ -526,6 +597,142 @@ func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
 		return err
 	}
 	return nil
+}
+
+func (s MySQLMemberStore) CreateTransferRecord(memberID string, record TransferRecord) (created TransferRecord, err error) {
+	s = s.normalize()
+	memberID = strings.TrimSpace(memberID)
+	if memberID == "" {
+		return TransferRecord{}, errors.New("member ID is required")
+	}
+	if strings.TrimSpace(record.MemberID) != memberID {
+		return TransferRecord{}, errors.New("transfer record member ID does not match")
+	}
+	record.MemberID = memberID
+	record.MemberEmail = normalizeEmail(record.MemberEmail)
+	record.ProfileName = strings.TrimSpace(record.ProfileName)
+	record.AppleEmail = normalizeEmail(record.AppleEmail)
+	record.Direction = strings.TrimSpace(strings.ToLower(record.Direction))
+	record.Status = strings.TrimSpace(strings.ToLower(record.Status))
+	if err := validateTransferRecord(record); err != nil {
+		return TransferRecord{}, err
+	}
+	suffix, err := randomToken(12)
+	if err != nil {
+		return TransferRecord{}, fmt.Errorf("generate transfer record ID: %w", err)
+	}
+	now := s.currentTime()
+	record.ID = fmt.Sprintf("transfer-%d-%s", now.UnixNano(), suffix)
+	record.CreatedAt = now.Format(time.RFC3339)
+	record.UpdatedAt = record.CreatedAt
+
+	if err := s.EnsureSchema(); err != nil {
+		return TransferRecord{}, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	return createTransferRecordInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, record)
+}
+
+func (s MySQLMemberStore) ListTransferRecords(memberID, profileName string) ([]TransferRecord, error) {
+	s = s.normalize()
+	memberID = strings.TrimSpace(memberID)
+	if memberID == "" {
+		return nil, errors.New("member ID is required")
+	}
+	profileName = strings.TrimSpace(profileName)
+	if err := s.EnsureSchema(); err != nil {
+		return nil, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	query := mysqlTransferListQuery
+	args := []any{memberID}
+	if profileName != "" {
+		query = mysqlTransferListByProfileQuery
+		args = append(args, profileName)
+	}
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make([]TransferRecord, 0)
+	for rows.Next() {
+		var record TransferRecord
+		if err := scanMySQLTransferRecord(rows, &record); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s MySQLMemberStore) UpdateTransferRecord(memberID, recordID, localJobID string, update func(TransferRecord) (TransferRecord, error)) (TransferRecord, error) {
+	s = s.normalize()
+	memberID = strings.TrimSpace(memberID)
+	recordID = strings.TrimSpace(recordID)
+	localJobID = strings.TrimSpace(localJobID)
+	if memberID == "" {
+		return TransferRecord{}, errors.New("member ID is required")
+	}
+	if recordID == "" {
+		return TransferRecord{}, errors.New("transfer record ID is required")
+	}
+	if update == nil {
+		return TransferRecord{}, errors.New("transfer record update is required")
+	}
+	if err := s.EnsureSchema(); err != nil {
+		return TransferRecord{}, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	return updateTransferRecordInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, memberID, recordID, localJobID, s.currentTime(), update)
+}
+
+func (s MySQLMemberStore) DeleteTransferRecord(memberID, recordID string) error {
+	s = s.normalize()
+	memberID = strings.TrimSpace(memberID)
+	recordID = strings.TrimSpace(recordID)
+	if memberID == "" {
+		return errors.New("member ID is required")
+	}
+	if recordID == "" {
+		return errors.New("transfer record ID is required")
+	}
+	if err := s.EnsureSchema(); err != nil {
+		return err
+	}
+	db, err := s.open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	return deleteTransferRecordInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, memberID, recordID)
 }
 
 func (s MySQLMemberStore) ListMembers() ([]MemberWithAssignments, error) {
@@ -832,6 +1039,11 @@ type mysqlStoreTransaction interface {
 	Query(query string, args ...any) (mysqlRows, error)
 }
 
+type mysqlTransferDeleteTransaction interface {
+	mysqlReleaseReminderTransaction
+	ExecResult(query string, args ...any) (sql.Result, error)
+}
+
 type sqlMySQLReleaseReminderTransaction struct {
 	tx *sql.Tx
 }
@@ -847,6 +1059,10 @@ func (tx sqlMySQLReleaseReminderTransaction) Query(query string, args ...any) (m
 func (tx sqlMySQLReleaseReminderTransaction) Exec(query string, args ...any) error {
 	_, err := tx.tx.Exec(query, args...)
 	return err
+}
+
+func (tx sqlMySQLReleaseReminderTransaction) ExecResult(query string, args ...any) (sql.Result, error) {
+	return tx.tx.Exec(query, args...)
 }
 
 func (tx sqlMySQLReleaseReminderTransaction) Commit() error {
@@ -902,13 +1118,179 @@ func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (resu
 			return MemberData{}, closeErr
 		}
 		data.Reminders = reminders
+		rows, err = tx.Query(`SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records ORDER BY updated_at DESC, id DESC`)
+		if err != nil {
+			return MemberData{}, err
+		}
+		var transferRecords []TransferRecord
+		for rows.Next() {
+			var record TransferRecord
+			if err := scanMySQLTransferRecord(rows, &record); err != nil {
+				rows.Close()
+				return MemberData{}, err
+			}
+			transferRecords = append(transferRecords, record)
+		}
+		iterationErr = rows.Err()
+		closeErr = rows.Close()
+		if iterationErr != nil {
+			return MemberData{}, iterationErr
+		}
+		if closeErr != nil {
+			return MemberData{}, closeErr
+		}
+		data.TransferRecords = transferRecords
 	}
-	for _, table := range []string{"cm_events", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+	for _, table := range []string{"cm_events", "cm_transfer_records", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
 		if err := tx.Exec("DELETE FROM " + table); err != nil {
 			return MemberData{}, err
 		}
 	}
 	return data, nil
+}
+
+func insertMySQLTransferRecord(execer mysqlReleaseReminderExecer, record TransferRecord) error {
+	return execer.Exec(mysqlTransferInsertQuery,
+		record.ID, record.MemberID, record.MemberEmail, record.ProfileName, record.AppleEmail,
+		record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status,
+		record.Percent, record.ErrorSummary, record.CreatedAt, record.StartedAt, record.FinishedAt, record.UpdatedAt)
+}
+
+func createTransferRecordInMySQLTransaction(tx mysqlReleaseReminderTransaction, record TransferRecord) (created TransferRecord, err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return TransferRecord{}, err
+	}
+	if err = insertMySQLTransferRecord(tx, record); err != nil {
+		return TransferRecord{}, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return TransferRecord{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return TransferRecord{}, err
+	}
+	committed = true
+	return record, nil
+}
+
+func updateTransferRecordInMySQLTransaction(tx mysqlReleaseReminderTransaction, memberID, recordID, localJobID string, now time.Time, update func(TransferRecord) (TransferRecord, error)) (updated TransferRecord, err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return TransferRecord{}, err
+	}
+	var current TransferRecord
+	if err = scanMySQLTransferRecord(tx.QueryRow(mysqlTransferSelectForUpdateQuery, recordID, memberID), &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TransferRecord{}, ErrTransferRecordNotFound
+		}
+		return TransferRecord{}, err
+	}
+	if isTerminalTransferStatus(current.Status) {
+		return TransferRecord{}, errors.New("terminal transfer record cannot be updated")
+	}
+	if current.LocalJobID != "" && current.LocalJobID != localJobID {
+		return TransferRecord{}, ErrTransferRecordNotFound
+	}
+	updated, err = update(current)
+	if err != nil {
+		return TransferRecord{}, err
+	}
+	if updated.ID != current.ID {
+		return TransferRecord{}, errors.New("transfer record ID cannot change")
+	}
+	if updated.MemberID != memberID {
+		return TransferRecord{}, errors.New("transfer record member ID does not match")
+	}
+	updated.MemberEmail = normalizeEmail(updated.MemberEmail)
+	updated.ProfileName = strings.TrimSpace(updated.ProfileName)
+	updated.AppleEmail = normalizeEmail(updated.AppleEmail)
+	updated.LocalJobID = strings.TrimSpace(updated.LocalJobID)
+	if current.LocalJobID == "" {
+		if updated.LocalJobID != localJobID {
+			return TransferRecord{}, errors.New("transfer record local job ID does not match")
+		}
+	} else if updated.LocalJobID != current.LocalJobID {
+		return TransferRecord{}, errors.New("transfer record local job ID cannot change")
+	}
+	updated.Direction = strings.TrimSpace(strings.ToLower(updated.Direction))
+	updated.Status = strings.TrimSpace(strings.ToLower(updated.Status))
+	if err = validateTransferRecord(updated); err != nil {
+		return TransferRecord{}, err
+	}
+	if updated.Percent < current.Percent {
+		return TransferRecord{}, errors.New("transfer percent cannot regress")
+	}
+	if isTerminalTransferStatus(current.Status) && isActiveTransferStatus(updated.Status) {
+		return TransferRecord{}, errors.New("terminal transfer status cannot return to active")
+	}
+	updated.CreatedAt = current.CreatedAt
+	updated.UpdatedAt = now.Format(time.RFC3339)
+	if err = tx.Exec(mysqlTransferUpdateQuery,
+		updated.MemberEmail, updated.ProfileName, updated.AppleEmail, updated.Direction,
+		updated.LocalPath, updated.RemotePath, updated.LocalJobID, updated.Status,
+		updated.Percent, updated.ErrorSummary, updated.StartedAt, updated.FinishedAt, updated.UpdatedAt,
+		recordID, memberID); err != nil {
+		return TransferRecord{}, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return TransferRecord{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return TransferRecord{}, err
+	}
+	committed = true
+	return updated, nil
+}
+
+func deleteTransferRecordInMySQLTransaction(tx mysqlTransferDeleteTransaction, memberID, recordID string) (err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return err
+	}
+	result, err := tx.ExecResult(mysqlTransferDeleteQuery, recordID, memberID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrTransferRecordNotFound
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func insertMySQLReleaseReminder(execer mysqlReleaseReminderExecer, reminder ReleaseReminder) error {
@@ -1131,6 +1513,27 @@ func (s MySQLMemberStore) currentTime() time.Time {
 
 type mysqlReleaseReminderScanner interface {
 	Scan(dest ...any) error
+}
+
+func scanMySQLTransferRecord(scanner mysqlReleaseReminderScanner, record *TransferRecord) error {
+	return scanner.Scan(
+		&record.ID,
+		&record.MemberID,
+		&record.MemberEmail,
+		&record.ProfileName,
+		&record.AppleEmail,
+		&record.Direction,
+		&record.LocalPath,
+		&record.RemotePath,
+		&record.LocalJobID,
+		&record.Status,
+		&record.Percent,
+		&record.ErrorSummary,
+		&record.CreatedAt,
+		&record.StartedAt,
+		&record.FinishedAt,
+		&record.UpdatedAt,
+	)
 }
 
 func scanMySQLReleaseReminder(scanner mysqlReleaseReminderScanner, reminder *ReleaseReminder) error {

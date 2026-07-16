@@ -182,8 +182,7 @@ type TransferRecord struct {
 }
 
 var (
-	ErrTransferRecordNotFound     = errors.New("transfer record not found")
-	ErrTransferRecordsUnsupported = errors.New("transfer records are not supported by this repository")
+	ErrTransferRecordNotFound = errors.New("transfer record not found")
 )
 
 const (
@@ -404,23 +403,6 @@ func (s MemberStore) DeleteTransferRecord(memberID, recordID string) error {
 	}
 	defer unlock()
 	return deleteTransferRecordInStore(s.unlocked(), memberID, recordID)
-}
-
-// MySQL transfer persistence is implemented separately from the JSON repository.
-func (s MySQLMemberStore) CreateTransferRecord(memberID string, record TransferRecord) (TransferRecord, error) {
-	return TransferRecord{}, ErrTransferRecordsUnsupported
-}
-
-func (s MySQLMemberStore) ListTransferRecords(memberID, profileName string) ([]TransferRecord, error) {
-	return nil, ErrTransferRecordsUnsupported
-}
-
-func (s MySQLMemberStore) UpdateTransferRecord(memberID, recordID, localJobID string, update func(TransferRecord) (TransferRecord, error)) (TransferRecord, error) {
-	return TransferRecord{}, ErrTransferRecordsUnsupported
-}
-
-func (s MySQLMemberStore) DeleteTransferRecord(memberID, recordID string) error {
-	return ErrTransferRecordsUnsupported
 }
 
 func (s MemberStore) saveUnlocked(db MemberData) error {
