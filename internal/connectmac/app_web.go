@@ -459,8 +459,8 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/managed-profile/delete", a.requireWebRole(a.webManagedProfileDeleteHandler(), "admin"))
 	mux.HandleFunc("/api/managed-profile/access", a.requireWebRole(a.webManagedProfileAccessHandler(), "admin"))
 	mux.HandleFunc("/api/events", a.requireWebRole(a.webEventsHandler(), "viewer", "operator", "admin"))
-	mux.HandleFunc("/api/jobs", a.requireWebRole(a.webJobsHandler(), "viewer", "operator", "admin"))
-	mux.HandleFunc("/api/job/log", a.requireWebRole(a.webJobLogHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/jobs", a.requireWebRole(a.webJobsHandler(configPath), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/job/log", a.requireWebRole(a.webJobLogHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/debug/status-config", a.requireWebRole(a.webDebugStatusConfigHandler(configPath), "admin"))
 	mux.HandleFunc("/api/aws/status", a.requireWebRole(a.webAWSStatusHandler(configPath), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/aws/open", a.requireWebRole(a.webAWSActionHandler(configPath, "open"), "operator", "admin"))
@@ -468,8 +468,8 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/tunnel/start", a.requireWebRole(a.webTunnelStartHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/terminal/check", a.requireWebRole(a.webTerminalCheckHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/terminal/ws", a.requireWebRole(a.webTerminalWSHandler(configPath), "operator", "admin"))
-	mux.HandleFunc("/api/sync/history", a.requireWebRole(a.webSyncHistoryHandler(), "viewer", "operator", "admin"))
-	mux.HandleFunc("/api/sync/history/delete", a.requireWebRole(a.webSyncHistoryDeleteHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/sync/history", a.requireWebRole(a.webSyncHistoryHandler(), "admin"))
+	mux.HandleFunc("/api/sync/history/delete", a.requireWebRole(a.webSyncHistoryDeleteHandler(), "admin"))
 	mux.HandleFunc("/api/sync/push", a.requireWebRole(a.webSyncPushHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/sync/pull", a.requireWebRole(a.webSyncPullHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/transfer-records", a.requireWebRole(a.webTransferRecordsHandler(), "viewer", "operator", "admin"))
@@ -1475,16 +1475,30 @@ func (a App) webEventsHandler() http.HandlerFunc {
 	}
 }
 
-func (a App) webJobsHandler() http.HandlerFunc {
+func (a App) webJobsHandler(configPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		allowed, all, err := a.webJobProfileAccess(r, configPath)
+		if err != nil {
+			writeWebError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		jobs, err := a.JobManager.List()
 		if err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if !all {
+			filtered := jobs[:0]
+			for _, job := range jobs {
+				if _, ok := allowed[job.Profile]; ok {
+					filtered = append(filtered, job)
+				}
+			}
+			jobs = filtered
 		}
 		if jobs == nil {
 			jobs = []Job{}
@@ -1494,6 +1508,39 @@ func (a App) webJobsHandler() http.HandlerFunc {
 		})
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"jobs": jobs}})
 	}
+}
+
+func (a App) webJobProfileAccess(r *http.Request, configPath string) (map[string]struct{}, bool, error) {
+	if member, ok := a.currentWebMember(r); ok {
+		if member.Role == "admin" {
+			return nil, true, nil
+		}
+		profiles, err := a.MemberStore.ListManagedProfiles(member.Email)
+		if err != nil {
+			return nil, false, err
+		}
+		allowed := make(map[string]struct{}, len(profiles))
+		for _, profile := range profiles {
+			allowed[profile.Name] = struct{}{}
+		}
+		return allowed, false, nil
+	}
+	if !a.RemoteUserAPI {
+		return nil, false, errors.New("authentication required")
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return nil, false, err
+	}
+	profiles, err := a.fetchRemoteManagedProfiles(r, cfg.Server.UserAPI)
+	if err != nil {
+		return nil, false, err
+	}
+	allowed := make(map[string]struct{}, len(profiles))
+	for _, profile := range profiles {
+		allowed[profile.Name] = struct{}{}
+	}
+	return allowed, false, nil
 }
 
 func (a App) webDebugStatusConfigHandler(configPath string) http.HandlerFunc {
@@ -1931,10 +1978,15 @@ func displayNameEmail(name, email string) string {
 	return name + " <" + email + ">"
 }
 
-func (a App) webJobLogHandler() http.HandlerFunc {
+func (a App) webJobLogHandler(configPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		allowed, all, err := a.webJobProfileAccess(r, configPath)
+		if err != nil {
+			writeWebError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
@@ -1945,6 +1997,10 @@ func (a App) webJobLogHandler() http.HandlerFunc {
 		job, err := a.JobManager.Load(id)
 		if err != nil {
 			writeWebError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if _, ok := allowed[job.Profile]; !all && !ok {
+			writeWebError(w, http.StatusForbidden, "job profile is not assigned to the current member")
 			return
 		}
 		var out bytes.Buffer

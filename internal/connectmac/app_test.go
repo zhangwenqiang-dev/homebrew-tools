@@ -3253,6 +3253,80 @@ func TestAppWebJobsAPI(t *testing.T) {
 	}
 }
 
+func TestAppWebJobsAPIFiltersMemberProfiles(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	for _, name := range []string{"assigned-usw2", "private-usw2"} {
+		if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: name}); err != nil {
+			t.Fatalf("upsert managed profile %s: %v", name, err)
+		}
+	}
+	if _, err := app.JobManager.Create(Job{Type: "aws-open", Profile: "assigned-usw2", Status: JobStatusRunning}); err != nil {
+		t.Fatalf("create assigned job: %v", err)
+	}
+	if _, err := app.JobManager.Create(Job{Type: "aws-open", Profile: "private-usw2", Status: JobStatusRunning}); err != nil {
+		t.Fatalf("create private job: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	addWebAuth(t, &app, req, "viewer")
+	if _, err := app.MemberStore.AssignProfileAccess("assigned-usw2", "admin@example.com"); err != nil {
+		t.Fatalf("assign profile access: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "assigned-usw2") {
+		t.Fatalf("assigned job missing: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "private-usw2") {
+		t.Fatalf("unassigned job leaked: %s", rec.Body.String())
+	}
+}
+
+func TestAppWebJobsAPIRemoteUserModeUsesRemoteProfileAccess(t *testing.T) {
+	dir := t.TempDir()
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer remote-token" {
+			t.Fatalf("authorization header = %q", r.Header.Get("Authorization"))
+		}
+		writeWebJSON(w, webAPIResponse{
+			OK: true,
+			Data: map[string]interface{}{
+				"profiles": []webManagedProfile{{Name: "assigned-usw2", Enabled: true}},
+			},
+		})
+	}))
+	defer remote.Close()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("server:\n  user_api: "+remote.URL+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.RemoteUserAPI = true
+	for _, name := range []string{"assigned-usw2", "private-usw2"} {
+		if _, err := app.JobManager.Create(Job{Type: "aws-open", Profile: name, Status: JobStatusRunning}); err != nil {
+			t.Fatalf("create %s job: %v", name, err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req.Header.Set("Authorization", "Bearer remote-token")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(configPath).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "assigned-usw2") {
+		t.Fatalf("assigned remote job missing: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "private-usw2") {
+		t.Fatalf("unassigned remote job leaked: %s", rec.Body.String())
+	}
+}
+
 func TestAppWebStartupReconcilesInterruptedJob(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
@@ -4217,6 +4291,85 @@ func TestAppWebJobLogAPI(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "job log line") || !strings.Contains(rec.Body.String(), job.ID) {
 		t.Fatalf("job log body = %s", rec.Body.String())
+	}
+}
+
+func TestAppWebJobLogRequiresProfileAccess(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	for _, name := range []string{"assigned-usw2", "private-usw2"} {
+		if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: name}); err != nil {
+			t.Fatalf("upsert managed profile %s: %v", name, err)
+		}
+	}
+	assignedJob, err := app.JobManager.Create(Job{Type: "aws-open", Profile: "assigned-usw2", Status: JobStatusSuccess})
+	if err != nil {
+		t.Fatalf("create assigned job: %v", err)
+	}
+	privateJob, err := app.JobManager.Create(Job{Type: "aws-open", Profile: "private-usw2", Status: JobStatusSuccess})
+	if err != nil {
+		t.Fatalf("create private job: %v", err)
+	}
+	for _, job := range []Job{assignedJob, privateJob} {
+		if err := os.WriteFile(job.Log, []byte(job.Profile+" log\n"), 0o600); err != nil {
+			t.Fatalf("write %s log: %v", job.Profile, err)
+		}
+	}
+	baseReq := httptest.NewRequest(http.MethodGet, "/api/job/log?id="+assignedJob.ID, nil)
+	addWebAuth(t, &app, baseReq, "viewer")
+	if _, err := app.MemberStore.AssignProfileAccess("assigned-usw2", "admin@example.com"); err != nil {
+		t.Fatalf("assign profile access: %v", err)
+	}
+	cookies := baseReq.Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected auth cookie")
+	}
+	for _, tc := range []struct {
+		name string
+		job  Job
+		code int
+	}{
+		{name: "assigned", job: assignedJob, code: http.StatusOK},
+		{name: "unassigned", job: privateJob, code: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/job/log?id="+tc.job.ID, nil)
+			req.AddCookie(cookies[0])
+			rec := httptest.NewRecorder()
+			app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAppWebLegacyGlobalTransferEndpointsRequireAdmin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		role   string
+		body   string
+		code   int
+	}{
+		{name: "viewer list", method: http.MethodGet, path: "/api/sync/history", role: "viewer", code: http.StatusUnauthorized},
+		{name: "operator delete", method: http.MethodPost, path: "/api/sync/history/delete", role: "operator", body: `{"id":"missing"}`, code: http.StatusUnauthorized},
+		{name: "admin list", method: http.MethodGet, path: "/api/sync/history", role: "admin", code: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, dir)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			addWebAuth(t, &app, req, tc.role)
+			rec := httptest.NewRecorder()
+			app.newWebHandler(DefaultConfigPath).ServeHTTP(rec, req)
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
