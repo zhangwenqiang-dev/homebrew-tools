@@ -3476,7 +3476,18 @@
     }
 
     function jobPollingNeeded() {
-      return state.jobs.some((job) => job.status === "starting" || job.status === "running") || autoReleasePollingNeeded();
+      return state.jobs.some(lifecycleJobPollingNeeded) || autoReleasePollingNeeded();
+    }
+
+    function lifecycleJobPollingNeeded(job) {
+      return job?.status === "starting" || job?.status === "running" ||
+        job?.lifecycle_state === "pending" || job?.lifecycle_state === "waiting";
+    }
+
+    async function refreshLifecycleProfiles(jobs) {
+      const names = [...new Set(jobs.filter(lifecycleJobPollingNeeded).map((job) => job.profile).filter(Boolean))];
+      await Promise.all(names.map((name) => refreshStatus(name, false)));
+      await loadProfiles();
     }
 
     async function loadJobs(options = {}) {
@@ -3490,7 +3501,7 @@
         "<tr>" +
           "<td data-label=\"Job\">" + escapeHTML(job.id || "-") + "</td>" +
           "<td data-label=\"Profile\">" + escapeHTML(job.profile || "-") + "</td>" +
-          "<td data-label=\"状态\">" + jobBadge(job.status) + "</td>" +
+          "<td data-label=\"状态\">" + jobBadge(job) + "</td>" +
           "<td data-label=\"开始时间\">" + escapeHTML(formatTime(job.started_at)) + "</td>" +
           "<td data-label=\"操作\"><button data-job-log=\"" + escapeAttr(job.id || "") + "\">查看</button></td>" +
         "</tr>"
@@ -3510,7 +3521,9 @@
       jobRefreshTimer = setTimeout(async () => {
         jobRefreshTimer = null;
         try {
+          const lifecycleJobs = state.jobs.filter(lifecycleJobPollingNeeded);
           await loadJobs({ refreshReminders: true });
+          await refreshLifecycleProfiles(lifecycleJobs);
         } catch (err) {
           setStatus("任务状态刷新失败，将继续重试");
         } finally {
@@ -3538,7 +3551,16 @@
       }
     }
 
-    function jobBadge(status) {
+    function jobBadge(job) {
+      const status = job?.status;
+      const lifecycle = job?.lifecycle_state;
+      if (lifecycle === "failed") return "<span class=\"badge blocked\">失败</span>";
+      if (lifecycle === "finalized") return "<span class=\"badge ready\">已完成</span>";
+      if (lifecycle === "waiting") {
+        const label = job?.type === "aws-destroy" ? "等待释放完成" : "等待 Mac ready";
+        return "<span class=\"badge wait\">" + escapeHTML(label) + "</span>";
+      }
+      if (lifecycle === "pending") return "<span class=\"badge wait\">后台任务运行中</span>";
       const special = {
         starting: { label: "启动中", cls: "wait" },
         interrupted: { label: "已中断", cls: "blocked" }

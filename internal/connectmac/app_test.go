@@ -3447,10 +3447,26 @@ func TestWebJobBadgesIncludeStartingAndInterruptedLabels(t *testing.T) {
 		t.Fatalf("read web index: %v", err)
 	}
 	html := string(data)
-	for _, want := range []string{`starting: { label: "启动中", cls: "wait" }`, `interrupted: { label: "已中断", cls: "blocked" }`, `job.status === "starting" || job.status === "running"`} {
+	for _, want := range []string{
+		`starting: { label: "启动中", cls: "wait" }`,
+		`interrupted: { label: "已中断", cls: "blocked" }`,
+		`function lifecycleJobPollingNeeded(job)`,
+		`job?.lifecycle_state === "pending" || job?.lifecycle_state === "waiting"`,
+		`async function refreshLifecycleProfiles(jobs)`,
+		`await Promise.all(names.map((name) => refreshStatus(name, false)))`,
+		`await loadProfiles()`,
+		`const lifecycleJobs = state.jobs.filter(lifecycleJobPollingNeeded)`,
+		`await refreshLifecycleProfiles(lifecycleJobs)`,
+		`"等待释放完成" : "等待 Mac ready"`,
+		`后台任务运行中`,
+		`已完成`,
+	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web index missing %q", want)
 		}
+	}
+	if strings.Contains(extractWebSource(t, html, "async function refreshLifecycleProfiles(jobs)", "async function loadJobs(options = {})"), "window.location.reload") {
+		t.Fatal("lifecycle refresh must not reload the page")
 	}
 }
 
