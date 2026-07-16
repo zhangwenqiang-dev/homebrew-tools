@@ -3221,6 +3221,39 @@ func TestAppWebCancelWaitsForServeAndReminderWorker(t *testing.T) {
 	}
 }
 
+func TestAppWebLifecycleWorkerScansImmediatelyOnTickAndStops(t *testing.T) {
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	lifecycleTicks := make(chan time.Time)
+	reminderTicks := make(chan time.Time)
+	scans := make(chan string, 3)
+	app.WebAWSLifecycleScan = func(_ context.Context, configPath string) error {
+		scans <- configPath
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.runWebBackgroundWorker(ctx, "test-config.yaml", lifecycleTicks, reminderTicks)
+	}()
+
+	if got := <-scans; got != "test-config.yaml" {
+		t.Fatalf("immediate scan config = %q", got)
+	}
+	lifecycleTicks <- time.Now()
+	if got := <-scans; got != "test-config.yaml" {
+		t.Fatalf("tick scan config = %q", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle worker did not stop after cancellation")
+	}
+}
+
 func TestAppWebShutdownTimeoutForcesClose(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer

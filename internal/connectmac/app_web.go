@@ -213,14 +213,29 @@ func waitForWebWorker(done <-chan struct{}, timeout time.Duration) bool {
 }
 
 func (a App) runReleaseReminderWorker(ctx context.Context, configPath string) {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
+	lifecycleTicker := time.NewTicker(10 * time.Second)
+	reminderTicker := time.NewTicker(time.Minute)
+	defer lifecycleTicker.Stop()
+	defer reminderTicker.Stop()
+	a.runWebBackgroundWorker(ctx, configPath, lifecycleTicker.C, reminderTicker.C)
+}
+
+func (a App) runWebBackgroundWorker(ctx context.Context, configPath string, lifecycleTicks, reminderTicks <-chan time.Time) {
+	scan := a.WebAWSLifecycleScan
+	if scan == nil {
+		scan = func(ctx context.Context, configPath string) error {
+			return a.reconcileWebAWSLifecycles(ctx, configPath)
+		}
+	}
+	_ = scan(ctx, configPath)
 	a.advanceAutoReleaseReminders(ctx, configPath, time.Now())
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
+		case <-lifecycleTicks:
+			_ = scan(ctx, configPath)
+		case now := <-reminderTicks:
 			a.advanceAutoReleaseReminders(ctx, configPath, now)
 		}
 	}
