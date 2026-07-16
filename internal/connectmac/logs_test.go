@@ -16,9 +16,9 @@ func TestLogManagerWriteCleanAndExport(t *testing.T) {
 		return time.Date(2026, 7, 2, 10, 30, 0, 0, time.UTC)
 	}
 	if err := manager.Write(LogEntry{
-		Level:   "error",
-		Action:  "web.aws.status",
-		Profile: "iossupport-usw2",
+		Level: "error", Action: "web.aws.status", Profile: "iossupport-usw2",
+		MemberEmail: "member@example.com", TransferID: "transfer-1", LocalJobID: "job-1",
+		Direction: "push", Status: "running", Percent: 50, ElapsedMS: 1234,
 		Message: "aws status failed with password=secret-token",
 	}); err != nil {
 		t.Fatalf("write log: %v", err)
@@ -29,6 +29,11 @@ func TestLogManagerWriteCleanAndExport(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "iossupport-usw2") || strings.Contains(string(data), "password=secret-token") {
 		t.Fatalf("unexpected log data: %s", data)
+	}
+	for _, field := range []string{`"member_email":"member@example.com"`, `"transfer_id":"transfer-1"`, `"local_job_id":"job-1"`, `"direction":"push"`, `"status":"running"`, `"percent":50`, `"elapsed_ms":1234`} {
+		if !strings.Contains(string(data), field) {
+			t.Fatalf("missing structured field %s in %s", field, data)
+		}
 	}
 	oldPath := filepath.Join(dir, "cm-2026-05-01.log")
 	if err := os.WriteFile(oldPath, []byte("old\n"), 0o600); err != nil {

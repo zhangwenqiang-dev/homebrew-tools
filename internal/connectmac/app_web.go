@@ -472,6 +472,10 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/sync/history/delete", a.requireWebRole(a.webSyncHistoryDeleteHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/sync/push", a.requireWebRole(a.webSyncPushHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/sync/pull", a.requireWebRole(a.webSyncPullHandler(configPath), "operator", "admin"))
+	mux.HandleFunc("/api/transfer-records", a.requireWebRole(a.webTransferRecordsHandler(), "viewer", "operator", "admin"))
+	mux.HandleFunc("/api/transfer-record/start", a.requireWebRole(a.webTransferRecordStartHandler(configPath), "operator", "admin"))
+	mux.HandleFunc("/api/transfer-record/update", a.requireWebRole(a.webTransferRecordUpdateHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/transfer-record/delete", a.requireWebRole(a.webTransferRecordDeleteHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/local/list", a.requireWebRole(a.webLocalListHandler(), "operator", "admin"))
 	return mux
 }
