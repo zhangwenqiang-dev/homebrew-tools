@@ -975,6 +975,210 @@ func TestLocalAgentLaunchAgentPlist(t *testing.T) {
 	}
 }
 
+func TestLocalAgentKeychainTrustInstallCommands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	var calls [][]string
+	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return nil, nil
+	}
+
+	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 0 {
+		t.Fatalf("install code = %d, err = %q", code, errOut.String())
+	}
+	material := localAgentTLSPaths(home)
+	want := [][]string{
+		{"find-certificate", "-a", "-Z", filepath.Join(home, "Library", "Keychains", "login.keychain-db")},
+		{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", filepath.Join(home, "Library", "Keychains", "login.keychain-db"), material.CACertPath},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("security commands = %#v, want %#v", calls, want)
+	}
+}
+
+func TestLocalAgentKeychainTrustSkipsAlreadyTrustedCA(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha1Fingerprint, sha256Fingerprint, err := localAgentCAFingerprints(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		output string
+	}{
+		{name: "SHA-1", output: "SHA-1 hash: " + strings.ToUpper(sha1Fingerprint[:2]) + ":" + strings.ToUpper(sha1Fingerprint[2:])},
+		{name: "SHA-256", output: "SHA-256 hash: " + strings.ToUpper(sha256Fingerprint[:2]) + ":" + strings.ToUpper(sha256Fingerprint[2:])},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, home)
+			var calls [][]string
+			app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string(nil), args...))
+				return []byte(tt.output + "\n"), nil
+			}
+
+			if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 0 {
+				t.Fatalf("install code = %d, err = %q", code, errOut.String())
+			}
+			if len(calls) != 1 || !reflect.DeepEqual(calls[0], []string{"find-certificate", "-a", "-Z", filepath.Join(home, "Library", "Keychains", "login.keychain-db")}) {
+				t.Fatalf("security commands = %#v", calls)
+			}
+		})
+	}
+}
+
+func TestLocalAgentKeychainTrustInstallFailureAndCancellation(t *testing.T) {
+	tests := []struct {
+		name    string
+		command func([]string) ([]byte, error)
+		want    string
+	}{
+		{
+			name: "failure includes safe command output",
+			command: func(args []string) ([]byte, error) {
+				if args[0] == "add-trusted-cert" {
+					return []byte("User interaction is not allowed\n-----BEGIN PRIVATE KEY-----\nnot-a-real-key"), errors.New("exit status 1")
+				}
+				return nil, nil
+			},
+			want: "User interaction is not allowed",
+		},
+		{
+			name: "cancellation does not report install success",
+			command: func(args []string) ([]byte, error) {
+				if args[0] == "add-trusted-cert" {
+					return nil, context.Canceled
+				}
+				return nil, nil
+			},
+			want: "canceled",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, home)
+			app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+				return tt.command(args)
+			}
+
+			if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+				t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+			}
+			if !strings.Contains(strings.ToLower(errOut.String()), strings.ToLower(tt.want)) || strings.Contains(out.String(), "installed") {
+				t.Fatalf("out = %q, err = %q", out.String(), errOut.String())
+			}
+			if strings.Contains(errOut.String(), "not-a-real-key") {
+				t.Fatalf("error leaked key material: %q", errOut.String())
+			}
+			if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "com.connectmac.local-agent.plist")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("plist exists after failed trust: %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalAgentUninstallTLSDeletesExactTrustedCA(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installTestLaunchctl(t)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	var calls [][]string
+	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return nil, nil
+	}
+
+	if code := app.uninstallLocalAgentLaunchAgent(context.Background(), localAgentOptions{Force: true}); code != 0 {
+		t.Fatalf("uninstall code = %d, err = %q", code, errOut.String())
+	}
+	want := [][]string{{"delete-certificate", "-Z", fingerprint, "-t", filepath.Join(home, "Library", "Keychains", "login.keychain-db")}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("security commands = %#v, want %#v", calls, want)
+	}
+	if _, err := os.Stat(material.Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("TLS directory remains: %v", err)
+	}
+}
+
+func TestLocalAgentUninstallTLSMissingTrustIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installTestLaunchctl(t)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte("The specified item could not be found in the keychain."), errors.New("exit status 1")
+	}
+
+	if code := app.uninstallLocalAgentLaunchAgent(context.Background(), localAgentOptions{Force: true}); code != 0 {
+		t.Fatalf("uninstall code = %d, err = %q", code, errOut.String())
+	}
+	if _, err := os.Stat(material.Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("TLS directory remains: %v", err)
+	}
+}
+
+func TestLocalAgentUninstallTLSRetainsFilesWhenTrustDeletionFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installTestLaunchctl(t)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte("access denied"), errors.New("exit status 1")
+	}
+
+	if code := app.uninstallLocalAgentLaunchAgent(context.Background(), localAgentOptions{Force: true}); code != 1 {
+		t.Fatalf("uninstall code = %d, err = %q", code, errOut.String())
+	}
+	if _, err := os.Stat(material.Dir); err != nil {
+		t.Fatalf("TLS directory was removed: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "access denied") {
+		t.Fatalf("error = %q", errOut.String())
+	}
+}
+
+func installTestLaunchctl(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	launchctl := filepath.Join(binDir, "launchctl")
+	writeFile(t, launchctl, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(launchctl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
 func TestLocalAgentRecoversInstalledAddressAndHonorsExplicitOptions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

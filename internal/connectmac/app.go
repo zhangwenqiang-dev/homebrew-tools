@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -26,30 +27,31 @@ type Runner interface {
 type ExecRunner struct{}
 
 type App struct {
-	In                       io.Reader
-	Out                      io.Writer
-	Err                      io.Writer
-	Version                  string
-	Runner                   Runner
-	Validator                Validator
-	StateManager             StateManager
-	JobManager               JobManager
-	AWSService               AWSService
-	WebDir                   string
-	MemberStore              MemberRepository
-	LogManager               LogManager
-	SyncHistory              SyncHistoryStore
-	LocalTransfers           *LocalTransferJobManager
-	KnownHosts               string
-	RemoteUserAPI            bool
-	LoginConfigCleanup       bool
-	Listen                   func(network, address string) (net.Listener, error)
-	WebHandler               http.Handler
-	WebReminderWorker        func(context.Context)
-	WebAWSLifecycleNotifier  func(event string, reminder ReleaseReminder, operator, description string) error
-	WebAWSLifecycleScan      func(context.Context, string) error
-	WebShutdownTimeout       time.Duration
-	WebWorkerShutdownTimeout time.Duration
+	In                        io.Reader
+	Out                       io.Writer
+	Err                       io.Writer
+	Version                   string
+	Runner                    Runner
+	Validator                 Validator
+	StateManager              StateManager
+	JobManager                JobManager
+	AWSService                AWSService
+	WebDir                    string
+	MemberStore               MemberRepository
+	LogManager                LogManager
+	SyncHistory               SyncHistoryStore
+	LocalTransfers            *LocalTransferJobManager
+	KnownHosts                string
+	RemoteUserAPI             bool
+	LoginConfigCleanup        bool
+	Listen                    func(network, address string) (net.Listener, error)
+	WebHandler                http.Handler
+	WebReminderWorker         func(context.Context)
+	WebAWSLifecycleNotifier   func(event string, reminder ReleaseReminder, operator, description string) error
+	WebAWSLifecycleScan       func(context.Context, string) error
+	WebShutdownTimeout        time.Duration
+	WebWorkerShutdownTimeout  time.Duration
+	LocalAgentSecurityCommand func(context.Context, ...string) ([]byte, error)
 }
 
 func NewApp(out, err io.Writer) App {
@@ -72,6 +74,9 @@ func NewApp(out, err io.Writer) App {
 		Listen:                   net.Listen,
 		WebShutdownTimeout:       5 * time.Second,
 		WebWorkerShutdownTimeout: 5 * time.Second,
+		LocalAgentSecurityCommand: func(ctx context.Context, args ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, "security", args...).CombinedOutput()
+		},
 	}
 }
 

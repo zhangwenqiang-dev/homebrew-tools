@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -136,7 +137,7 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 	}
 	switch command {
 	case "install":
-		return a.installLocalAgentLaunchAgent(opts)
+		return a.installLocalAgentLaunchAgent(ctx, opts)
 	case "start":
 		return a.startLocalAgentLaunchAgent(ctx)
 	case "stop":
@@ -149,20 +150,7 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 	case "status":
 		return a.statusLocalAgent(ctx, opts)
 	case "uninstall":
-		if code := a.stopLocalAgentLaunchAgent(ctx, opts, true); code != 0 {
-			return code
-		}
-		path, err := ExpandPath(localAgentPlistPath)
-		if err != nil {
-			fmt.Fprintln(a.Err, err)
-			return 1
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(a.Err, "remove %s: %v\n", path, err)
-			return 1
-		}
-		fmt.Fprintf(a.Out, "uninstalled %s\n", path)
-		return 0
+		return a.uninstallLocalAgentLaunchAgent(ctx, opts)
 	default:
 		fmt.Fprintf(a.Err, "unknown local-agent command %q\n", command)
 		return 2
@@ -266,7 +254,21 @@ func decodePlistStringArray(decoder *xml.Decoder) ([]string, error) {
 	}
 }
 
-func (a App) installLocalAgentLaunchAgent(opts localAgentOptions) int {
+func (a App) installLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptions) int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
+		return 1
+	}
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		fmt.Fprintf(a.Err, "prepare local-agent TLS material: %v\n", err)
+		return 1
+	}
+	if err := a.ensureLocalAgentCATrust(ctx, home, material); err != nil {
+		fmt.Fprintf(a.Err, "trust local-agent CA: %v\n", err)
+		return 1
+	}
 	executable, err := exec.LookPath("cm")
 	if err != nil || executable == "" {
 		executable, err = os.Executable()
@@ -274,11 +276,6 @@ func (a App) installLocalAgentLaunchAgent(opts localAgentOptions) int {
 			fmt.Fprintf(a.Err, "resolve cm executable: %v\n", err)
 			return 1
 		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
-		return 1
 	}
 	logDir := filepath.Join(home, ".connectmac", "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
@@ -302,6 +299,167 @@ func (a App) installLocalAgentLaunchAgent(opts localAgentOptions) int {
 	fmt.Fprintf(a.Out, "installed %s\n", path)
 	fmt.Fprintln(a.Out, "start with: cm local-agent start")
 	return 0
+}
+
+func (a App) uninstallLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptions) int {
+	if code := a.stopLocalAgentLaunchAgent(ctx, opts, true); code != 0 {
+		return code
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
+		return 1
+	}
+	material := localAgentTLSPaths(home)
+	if _, err := os.Lstat(material.Dir); err == nil {
+		if err := a.removeLocalAgentCATrust(ctx, home, material); err != nil {
+			fmt.Fprintf(a.Err, "remove local-agent CA trust: %v\n", err)
+			return 1
+		}
+		if err := os.RemoveAll(material.Dir); err != nil {
+			fmt.Fprintf(a.Err, "remove local-agent TLS directory %s: %v\n", material.Dir, err)
+			return 1
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(a.Err, "inspect local-agent TLS directory %s: %v\n", material.Dir, err)
+		return 1
+	}
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(a.Err, "remove %s: %v\n", path, err)
+		return 1
+	}
+	fmt.Fprintf(a.Out, "uninstalled %s\n", path)
+	return 0
+}
+
+func (a App) ensureLocalAgentCATrust(ctx context.Context, home string, material localAgentTLSMaterial) error {
+	sha1Fingerprint, sha256Fingerprint, err := localAgentCAFingerprints(material.CACertPath)
+	if err != nil {
+		return fmt.Errorf("read local-agent CA fingerprint: %w", err)
+	}
+	keychain := localAgentLoginKeychainPath(home)
+	output, err := a.runLocalAgentSecurityCommand(ctx, "find-certificate", "-a", "-Z", keychain)
+	if err != nil {
+		return localAgentSecurityCommandError("inspect current-user login keychain", err, output)
+	}
+	if localAgentKeychainContainsFingerprint(output, sha1Fingerprint, sha256Fingerprint) {
+		return nil
+	}
+	output, err = a.runLocalAgentSecurityCommand(ctx, "add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, material.CACertPath)
+	if err != nil {
+		return localAgentSecurityCommandError("add local-agent CA trust", err, output)
+	}
+	return nil
+}
+
+func (a App) removeLocalAgentCATrust(ctx context.Context, home string, material localAgentTLSMaterial) error {
+	if err := checkLocalAgentTLSNonSymlink(material.Dir, true); err != nil {
+		return err
+	}
+	if err := checkLocalAgentTLSNonSymlink(material.CACertPath, false); err != nil {
+		return err
+	}
+	fingerprint, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		return fmt.Errorf("read local-agent CA fingerprint: %w", err)
+	}
+	output, err := a.runLocalAgentSecurityCommand(ctx, "delete-certificate", "-Z", fingerprint, "-t", localAgentLoginKeychainPath(home))
+	if err == nil || localAgentSecurityOutputIndicatesNotFound(output) {
+		return nil
+	}
+	return localAgentSecurityCommandError("delete local-agent CA trust", err, output)
+}
+
+func (a App) runLocalAgentSecurityCommand(ctx context.Context, args ...string) ([]byte, error) {
+	if a.LocalAgentSecurityCommand != nil {
+		return a.LocalAgentSecurityCommand(ctx, args...)
+	}
+	return exec.CommandContext(ctx, "security", args...).CombinedOutput()
+}
+
+func localAgentLoginKeychainPath(home string) string {
+	return filepath.Join(home, "Library", "Keychains", "login.keychain-db")
+}
+
+func localAgentCAFingerprints(path string) (string, string, error) {
+	sha1Fingerprint, err := localAgentCAFingerprint(path)
+	if err != nil {
+		return "", "", err
+	}
+	certificate, err := readLocalAgentTLSCertificate(path)
+	if err != nil {
+		return "", "", err
+	}
+	sha256Fingerprint := sha256.Sum256(certificate.Raw)
+	return sha1Fingerprint, fmt.Sprintf("%x", sha256Fingerprint), nil
+}
+
+var localAgentKeychainFingerprintPattern = regexp.MustCompile(`(?im)^\s*SHA-(1|256)\s+hash:\s*([0-9a-f:]+)\s*$`)
+
+func localAgentKeychainContainsFingerprint(output []byte, sha1Fingerprint, sha256Fingerprint string) bool {
+	for _, match := range localAgentKeychainFingerprintPattern.FindAllStringSubmatch(string(output), -1) {
+		fingerprint := normalizeLocalAgentFingerprint(match[2])
+		switch match[1] {
+		case "1":
+			if fingerprint == normalizeLocalAgentFingerprint(sha1Fingerprint) {
+				return true
+			}
+		case "256":
+			if fingerprint == normalizeLocalAgentFingerprint(sha256Fingerprint) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeLocalAgentFingerprint(fingerprint string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fingerprint), ":", ""))
+}
+
+func localAgentSecurityOutputIndicatesNotFound(output []byte) bool {
+	text := strings.ToLower(strings.TrimSpace(string(output)))
+	return strings.Contains(text, "not found") || strings.Contains(text, "could not be found") || strings.Contains(text, "not in the keychain")
+}
+
+func localAgentSecurityCommandError(action string, err error, output []byte) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s canceled", action)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s timed out", action)
+	}
+	if detail := safeLocalAgentSecurityOutput(output); detail != "" {
+		return fmt.Errorf("%s: %w: %s", action, err, detail)
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
+func safeLocalAgentSecurityOutput(output []byte) string {
+	text := strings.TrimSpace(string(output))
+	if text == "" {
+		return ""
+	}
+	var safe []string
+	for _, line := range strings.Split(text, "\n") {
+		upper := strings.ToUpper(line)
+		if strings.Contains(upper, "PRIVATE KEY") || strings.Contains(upper, "BEGIN") && strings.Contains(upper, "KEY") {
+			safe = append(safe, "[redacted key material]")
+			break
+		}
+		safe = append(safe, line)
+	}
+	text = strings.Join(safe, "\n")
+	const maxOutput = 4096
+	if len(text) > maxOutput {
+		return text[:maxOutput] + "..."
+	}
+	return text
 }
 
 func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
