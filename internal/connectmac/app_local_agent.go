@@ -371,6 +371,9 @@ func (a App) ensureLocalAgentCATrust(ctx context.Context, home string, material 
 	if err != nil {
 		return fmt.Errorf("read local-agent CA fingerprint: %w", err)
 	}
+	if err := writeLocalAgentTrustedCAFingerprints(home, appendLocalAgentFingerprint(append([]string(nil), ledger...), sha1Fingerprint)); err != nil {
+		return fmt.Errorf("write local-agent trusted CA ledger: %w", err)
+	}
 	keychain := localAgentLoginKeychainPath(home)
 	output, err := a.runLocalAgentSecurityCommand(ctx, "find-certificate", "-a", "-Z", keychain)
 	if err != nil {
@@ -398,7 +401,7 @@ func (a App) ensureLocalAgentCATrust(ctx context.Context, home string, material 
 }
 
 func (a App) verifyLocalAgentCATrust(ctx context.Context, material localAgentTLSMaterial, keychain string) ([]byte, error) {
-	return a.runLocalAgentSecurityCommand(ctx, "verify-cert", "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L", material.ServerCertPath)
+	return a.runLocalAgentSecurityCommand(ctx, "verify-cert", "-c", material.ServerCertPath, "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L")
 }
 
 func (a App) reconcileLocalAgentTrustedCAFingerprints(ctx context.Context, home, current string, ledger []string) error {

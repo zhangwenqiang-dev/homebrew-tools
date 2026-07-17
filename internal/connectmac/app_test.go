@@ -993,7 +993,7 @@ func TestLocalAgentKeychainTrustInstallCommands(t *testing.T) {
 	want := [][]string{
 		{"find-certificate", "-a", "-Z", filepath.Join(home, "Library", "Keychains", "login.keychain-db")},
 		{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", filepath.Join(home, "Library", "Keychains", "login.keychain-db"), material.CACertPath},
-		{"verify-cert", "-p", "ssl", "-n", "127.0.0.1", "-k", filepath.Join(home, "Library", "Keychains", "login.keychain-db"), "-L", material.ServerCertPath},
+		{"verify-cert", "-c", material.ServerCertPath, "-p", "ssl", "-n", "127.0.0.1", "-k", filepath.Join(home, "Library", "Keychains", "login.keychain-db"), "-L"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("security commands = %#v, want %#v", calls, want)
@@ -1032,7 +1032,7 @@ func TestLocalAgentKeychainTrustSkipsAlreadyTrustedCA(t *testing.T) {
 			}
 			want := [][]string{
 				{"find-certificate", "-a", "-Z", filepath.Join(home, "Library", "Keychains", "login.keychain-db")},
-				{"verify-cert", "-p", "ssl", "-n", "127.0.0.1", "-k", filepath.Join(home, "Library", "Keychains", "login.keychain-db"), "-L", material.ServerCertPath},
+				{"verify-cert", "-c", material.ServerCertPath, "-p", "ssl", "-n", "127.0.0.1", "-k", filepath.Join(home, "Library", "Keychains", "login.keychain-db"), "-L"},
 			}
 			if !reflect.DeepEqual(calls, want) {
 				t.Fatalf("security commands = %#v", calls)
@@ -1081,9 +1081,9 @@ func TestLocalAgentKeychainTrustVerifiesPresentCertificateAndRepairsTrust(t *tes
 	keychain := filepath.Join(home, "Library", "Keychains", "login.keychain-db")
 	want := [][]string{
 		{"find-certificate", "-a", "-Z", keychain},
-		{"verify-cert", "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L", material.ServerCertPath},
+		{"verify-cert", "-c", material.ServerCertPath, "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L"},
 		{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, material.CACertPath},
-		{"verify-cert", "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L", material.ServerCertPath},
+		{"verify-cert", "-c", material.ServerCertPath, "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("security commands = %#v, want %#v", calls, want)
@@ -1128,8 +1128,9 @@ func TestLocalAgentKeychainTrustFailsWhenVerificationStillFails(t *testing.T) {
 	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
-	if _, err := os.Stat(localAgentTrustedCAFingerprintLedgerPath(home)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("ledger exists after failed verification: %v", err)
+	ledger, err := os.ReadFile(localAgentTrustedCAFingerprintLedgerPath(home))
+	if err != nil || strings.TrimSpace(string(ledger)) != fingerprint {
+		t.Fatalf("ledger after failed verification = %q, err = %v", ledger, err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "com.connectmac.local-agent.plist")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("plist exists after failed verification: %v", err)
@@ -1235,20 +1236,79 @@ func TestLocalAgentKeychainTrustKeepsLedgerWhenStaleCleanupFails(t *testing.T) {
 	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
-	ledger, err := os.ReadFile(localAgentTrustedCAFingerprintLedgerPath(home))
-	if err != nil || strings.TrimSpace(string(ledger)) != oldFingerprint {
-		t.Fatalf("ledger after failed cleanup = %q, err = %v", ledger, err)
+	ledger, err := readLocalAgentTrustedCAFingerprints(home)
+	currentFingerprint, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil || len(ledger) != 2 || (ledger[0] != oldFingerprint && ledger[1] != oldFingerprint) ||
+		(ledger[0] != currentFingerprint && ledger[1] != currentFingerprint) {
+		t.Fatalf("ledger after failed cleanup = %#v, err = %v", ledger, err)
 	}
 	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 0 {
 		t.Fatalf("retry install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
-	currentFingerprint, err := localAgentCAFingerprint(material.CACertPath)
+	currentFingerprint, err = localAgentCAFingerprint(material.CACertPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger, err = os.ReadFile(localAgentTrustedCAFingerprintLedgerPath(home))
-	if err != nil || strings.TrimSpace(string(ledger)) != currentFingerprint {
-		t.Fatalf("ledger after retry = %q, err = %v", ledger, err)
+	ledger, err = readLocalAgentTrustedCAFingerprints(home)
+	if err != nil || !reflect.DeepEqual(ledger, []string{currentFingerprint}) {
+		t.Fatalf("ledger after retry = %#v, err = %v", ledger, err)
+	}
+}
+
+func TestLocalAgentKeychainTrustWritesAheadBeforeCanceledMutationAndRecoversWithoutTLS(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	ledgerRecordedBeforeMutation := false
+	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "find-certificate":
+			return nil, nil
+		case "add-trusted-cert":
+			ledger, readErr := os.ReadFile(localAgentTrustedCAFingerprintLedgerPath(home))
+			ledgerRecordedBeforeMutation = readErr == nil && strings.TrimSpace(string(ledger)) == fingerprint
+			cancel()
+			return []byte("signal: killed"), errors.New("signal: killed")
+		default:
+			t.Fatalf("unexpected security command: %#v", args)
+			return nil, nil
+		}
+	}
+
+	if code := app.installLocalAgentLaunchAgent(ctx, localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !ledgerRecordedBeforeMutation {
+		t.Fatal("current fingerprint was not recorded before trust mutation")
+	}
+	if err := os.RemoveAll(material.Dir); err != nil {
+		t.Fatal(err)
+	}
+	installTestLaunchctl(t)
+	var deleted []string
+	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] != "delete-certificate" {
+			t.Fatalf("unexpected security command: %#v", args)
+		}
+		deleted = append(deleted, args[2])
+		return nil, nil
+	}
+	if code := app.uninstallLocalAgentLaunchAgent(context.Background(), localAgentOptions{Force: true}); code != 0 {
+		t.Fatalf("uninstall code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !reflect.DeepEqual(deleted, []string{fingerprint}) {
+		t.Fatalf("deleted fingerprints = %#v", deleted)
 	}
 }
 
@@ -1300,6 +1360,14 @@ func TestLocalAgentKeychainTrustInstallFailureAndCancellation(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "com.connectmac.local-agent.plist")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("plist exists after failed trust: %v", err)
+			}
+			fingerprint, err := localAgentCAFingerprint(localAgentTLSPaths(home).CACertPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger, err := readLocalAgentTrustedCAFingerprints(home)
+			if err != nil || !reflect.DeepEqual(ledger, []string{fingerprint}) {
+				t.Fatalf("ledger after failed trust = %#v, err = %v", ledger, err)
 			}
 		})
 	}
