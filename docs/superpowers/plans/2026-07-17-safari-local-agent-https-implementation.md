@@ -164,6 +164,7 @@ git commit -m "feat: manage local agent certificate trust"
 ### Task 3: Serve HTTPS and Use It in Service Management
 
 **Files:**
+- Modify: `internal/connectmac/app.go`
 - Modify: `internal/connectmac/app_local_agent.go`
 - Modify: `internal/connectmac/app_test.go`
 
@@ -214,7 +215,7 @@ poll HTTPS /health with a bounded timeout
 report installed and ready
 ```
 
-Before this sequence, recover the installed host and port from the existing plist whenever the user did not pass explicit overrides. Repeated install must reuse valid certificates, avoid duplicate trust entries, preserve custom host/port options, and restart safely. Health failure must return nonzero and print the HTTPS endpoint and log files.
+Before this sequence, recover the installed host and port from the existing plist whenever the user did not pass explicit overrides. Preserve custom ports. Because the certificate is intentionally limited to `localhost`, `127.0.0.1`, and `::1`, automatically migrate an older unsupported loopback host to `127.0.0.1`; reject an explicitly supplied unsupported host with an actionable error. Repeated install must reuse valid certificates, avoid duplicate trust entries, and restart safely. Inject the `launchctl` command boundary in `internal/connectmac/app.go` so install error handling is deterministic in tests. Health failure must return nonzero and print the HTTPS endpoint and log files.
 
 - [ ] **Step 6: Run tests and commit**
 
