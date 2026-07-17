@@ -26,8 +26,8 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 		Event:         "open",
 		Profile:       "apple-usw2",
 		AppleEmail:    "apple@example.com",
-		Owner:         "User",
-		Operator:      "Admin",
+		Owner:         "Profile Owner",
+		Operator:      "Operation Actor",
 		HostID:        "h-123",
 		HostCreatedAt: "2026-07-16T08:03:24Z",
 		DueAt:         "2026-07-17T16:00:00Z",
@@ -49,12 +49,18 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 		"ConnectMac",
 		"apple-usw2",
 		"apple@example.com",
+		"操作人：Operation Actor",
 		"https://cm.example.com",
 		"Host 创建时间：2026-07-16 16:03:24（北京时间）",
 		"释放提醒时间：2026-07-18 00:00:00（北京时间）",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("content missing %q:\n%s", want, content)
+		}
+	}
+	for _, forbidden := range []string{"负责人", "Profile Owner"} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("content contains forbidden owner value %q:\n%s", forbidden, content)
 		}
 	}
 	for _, unexpected := range []string{"T08:03:24Z", "T16:00:00Z"} {

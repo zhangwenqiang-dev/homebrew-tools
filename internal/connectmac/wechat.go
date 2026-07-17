@@ -93,7 +93,6 @@ func (n WechatNotifier) markdown(notification WechatNotification) string {
 	fmt.Fprintf(&b, "## ConnectMac %s\n", title)
 	writeWechatField(&b, "Profile", notification.Profile)
 	writeWechatField(&b, "Apple", notification.AppleEmail)
-	writeWechatField(&b, "负责人", notification.Owner)
 	writeWechatField(&b, "操作人", notification.Operator)
 	writeWechatField(&b, "Host", notification.HostID)
 	writeWechatField(&b, "Host 创建时间", formatBeijingDisplayTime(notification.HostCreatedAt))
