@@ -3388,7 +3388,7 @@
         $("apiTokenOutput").textContent = "server:\n  user_api: " + userAPI + "\n  token: " + token + "\n";
         $("copyAPITokenBtn").disabled = false;
       } else if (member.has_api_token) {
-        $("apiTokenOutput").textContent = "令牌已生成" + (member.api_token_at ? "\n生成时间: " + member.api_token_at : "") + "\n\n出于安全原因，旧 token 明文不会再次显示。";
+        $("apiTokenOutput").textContent = "令牌已生成" + (member.api_token_at ? "\n生成时间: " + formatTime(member.api_token_at) : "") + "\n\n出于安全原因，旧 token 明文不会再次显示。";
         $("copyAPITokenBtn").disabled = true;
       } else {
         $("apiTokenOutput").textContent = "还没有生成令牌。";

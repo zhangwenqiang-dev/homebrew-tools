@@ -4329,6 +4329,64 @@ assert.equal(beijingDateTimeLocalToISOString("2026-07-17T16:00:00"), null);
 	}
 }
 
+func TestAppWebBeijingTokenTimestampBehavior(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	helpers := extractWebSource(t, html, "const beijingTimeFormatter", "\n    async function cleanupLocalRecords")
+	showToken := extractWebSource(t, html, "function showAPIToken(member, token)", "\n    function closeAPIToken()")
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for embedded token timestamp behavior test: %v", err)
+	}
+	harness := `
+import assert from "node:assert/strict";
+
+const elements = new Map();
+function $(id) {
+  if (!elements.has(id)) {
+    elements.set(id, {
+      textContent: "",
+      disabled: false,
+      classList: { remove() {} }
+    });
+  }
+  return elements.get(id);
+}
+const state = {
+  auth: { member: { email: "member@example.com" } },
+  clientConfig: { user_api: "https://manager.example.com/" }
+};
+const window = { location: { origin: "https://fallback.example.com" } };
+
+` + helpers + "\n" + showToken + `
+
+showAPIToken({
+  name: "Member",
+  email: "member@example.com",
+  has_api_token: true,
+  api_token_at: "2026-07-16T08:03:24Z"
+}, "");
+
+assert.equal(
+  $("apiTokenOutput").textContent,
+  "令牌已生成\n生成时间: 2026-07-16 16:03:24（北京时间）\n\n出于安全原因，旧 token 明文不会再次显示。"
+);
+assert.equal($("apiTokenOutput").textContent.includes("Z"), false);
+`
+	script := filepath.Join(t.TempDir(), "beijing_token_timestamp_test.mjs")
+	if err := os.WriteFile(script, []byte(harness), 0o600); err != nil {
+		t.Fatalf("write node harness: %v", err)
+	}
+	output, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("token timestamp node behavior test failed: %v\n%s", err, output)
+	}
+}
+
 func TestAppWebJobLogAPI(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
