@@ -1121,7 +1121,7 @@ func TestLocalAgentUninstallTLSDeletesExactTrustedCA(t *testing.T) {
 	}
 }
 
-func TestLocalAgentUninstallTLSMissingTrustIsIdempotent(t *testing.T) {
+func TestLocalAgentUninstallTLSExplicitItemNotFoundIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	material, _, err := ensureLocalAgentTLS(home, time.Now())
@@ -1132,7 +1132,7 @@ func TestLocalAgentUninstallTLSMissingTrustIsIdempotent(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
 	app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
-		return []byte("The specified item could not be found in the keychain."), errors.New("exit status 1")
+		return []byte("security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain."), errors.New("exit status 1")
 	}
 
 	if code := app.uninstallLocalAgentLaunchAgent(context.Background(), localAgentOptions{Force: true}); code != 0 {
@@ -1140,6 +1140,55 @@ func TestLocalAgentUninstallTLSMissingTrustIsIdempotent(t *testing.T) {
 	}
 	if _, err := os.Stat(material.Dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("TLS directory remains: %v", err)
+	}
+}
+
+func TestLocalAgentUninstallTLSRetainsFilesOnUnrelatedKeychainErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		err    error
+	}{
+		{
+			name:   "unrelated not found output",
+			output: "security: authorization helper not found",
+			err:    errors.New("exit status 1"),
+		},
+		{
+			name:   "user interaction error",
+			output: "User interaction is not allowed",
+			err:    errors.New("exit status 1"),
+		},
+		{
+			name: "cancellation",
+			err:  context.Canceled,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			material, _, err := ensureLocalAgentTLS(home, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			installTestLaunchctl(t)
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, home)
+			app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+				return []byte(tt.output), tt.err
+			}
+
+			if code := app.uninstallLocalAgentLaunchAgent(context.Background(), localAgentOptions{Force: true}); code != 1 {
+				t.Fatalf("uninstall code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+			}
+			if _, err := os.Stat(material.Dir); err != nil {
+				t.Fatalf("TLS directory was removed: %v", err)
+			}
+			if strings.Contains(out.String(), "uninstalled") {
+				t.Fatalf("uninstall reported success: %q", out.String())
+			}
+		})
 	}
 }
 

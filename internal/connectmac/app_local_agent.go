@@ -423,8 +423,14 @@ func normalizeLocalAgentFingerprint(fingerprint string) string {
 }
 
 func localAgentSecurityOutputIndicatesNotFound(output []byte) bool {
-	text := strings.ToLower(strings.TrimSpace(string(output)))
-	return strings.Contains(text, "not found") || strings.Contains(text, "could not be found") || strings.Contains(text, "not in the keychain")
+	text := strings.TrimSpace(string(output))
+	for _, prefix := range []string{"security:", "SecKeychainSearchCopyNext:"} {
+		if len(text) >= len(prefix) && strings.EqualFold(text[:len(prefix)], prefix) {
+			text = strings.TrimSpace(text[len(prefix):])
+		}
+	}
+	text = strings.TrimSpace(strings.TrimSuffix(text, "."))
+	return strings.EqualFold(text, "The specified item could not be found in the keychain")
 }
 
 func localAgentSecurityCommandError(action string, err error, output []byte) error {
