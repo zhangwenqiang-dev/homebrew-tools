@@ -1497,7 +1497,6 @@
       const body = await api("/api/managed-profiles");
       state.managedProfiles = body.data?.profiles || [];
       renderManagedProfiles();
-      renderManagedProfileStatusOptions();
       renderMembers();
     }
 
