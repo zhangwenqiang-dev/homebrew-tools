@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -975,18 +976,300 @@ func TestLocalAgentLaunchAgentPlist(t *testing.T) {
 	}
 }
 
+func TestLocalAgentEndpoint(t *testing.T) {
+	opts := localAgentOptions{Host: "127.0.0.1", Port: 18765}
+	if got := localAgentEndpoint(opts, true, "/health"); got != "https://127.0.0.1:18765/health" {
+		t.Fatalf("HTTPS endpoint = %q", got)
+	}
+	if got := localAgentEndpoint(opts, false, "activity"); got != "http://127.0.0.1:18765/activity" {
+		t.Fatalf("HTTP endpoint = %q", got)
+	}
+}
+
+func TestLocalAgentHTTPSClientVerifiesGeneratedCA(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, stop := startLocalAgentTLSServer(t, "127.0.0.1:0", material, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
+	}))
+	defer stop()
+
+	opts := localAgentOptionsForAddr(t, listener.Addr().String())
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, localAgentEndpoint(opts, true, "/health"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := localAgentHTTPSClient(material).Do(req)
+	if err != nil {
+		t.Fatalf("verified HTTPS request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %s", resp.Status)
+	}
+}
+
+func TestLocalAgentStatusAndDrainUseInstalledTLS(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, stop := startLocalAgentTLSServer(t, "127.0.0.1:0", material, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			writeWebJSON(w, webAPIResponse{OK: true})
+		case "/activity/drain":
+			writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"draining": true, "active": []LocalTransferJob{}}})
+		case "/activity/resume":
+			writeWebJSON(w, webAPIResponse{OK: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer stop()
+
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	opts := localAgentOptionsForAddr(t, listener.Addr().String())
+	if code := app.statusLocalAgent(context.Background(), opts); code != 0 {
+		t.Fatalf("status code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "https://") {
+		t.Fatalf("status did not report HTTPS: %q", out.String())
+	}
+	if drained, allowed := app.prepareLocalAgentShutdown(context.Background(), opts); !drained || !allowed {
+		t.Fatalf("prepare TLS shutdown = (%v, %v), err = %q", drained, allowed, errOut.String())
+	}
+	app.resumeLocalAgentActivity(opts)
+}
+
+func TestLocalAgentServiceFallsBackToLegacyHTTPDuringMigration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if _, _, err := ensureLocalAgentTLS(home, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true})
+	}))
+	defer server.Close()
+
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	if code := app.statusLocalAgent(context.Background(), localAgentOptionsForURL(t, server.URL)); code != 0 {
+		t.Fatalf("status code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), server.URL) {
+		t.Fatalf("status did not fall back to HTTP: %q", out.String())
+	}
+}
+
+func TestLocalAgentManualStartupUsesTLSOrLegacyHTTP(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		prepare    func(t *testing.T, home string) localAgentTLSMaterial
+		wantScheme string
+		wantCode   int
+	}{
+		{
+			name:       "legacy HTTP without TLS directory",
+			wantScheme: "http://",
+		},
+		{
+			name: "HTTPS with valid TLS material",
+			prepare: func(t *testing.T, home string) localAgentTLSMaterial {
+				t.Helper()
+				material, _, err := ensureLocalAgentTLS(home, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				return material
+			},
+			wantScheme: "https://",
+		},
+		{
+			name: "invalid TLS material is refused",
+			prepare: func(t *testing.T, home string) localAgentTLSMaterial {
+				t.Helper()
+				material := localAgentTLSPaths(home)
+				writeFile(t, material.CACertPath, "not a certificate")
+				return material
+			},
+			wantCode: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			material := localAgentTLSMaterial{}
+			if tt.prepare != nil {
+				material = tt.prepare(t, home)
+			}
+			opts := localAgentUnusedOptions(t)
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, home)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan int, 1)
+			go func() {
+				result <- app.runLocalAgent(ctx, []string{"--host", opts.Host, "--port", strconv.Itoa(opts.Port)})
+			}()
+			if tt.wantCode != 0 {
+				if code := <-result; code != tt.wantCode {
+					t.Fatalf("code = %d, err = %q", code, errOut.String())
+				}
+				if !strings.Contains(errOut.String(), "cm local-agent install") {
+					t.Fatalf("invalid TLS error = %q", errOut.String())
+				}
+				return
+			}
+			endpoint := localAgentEndpoint(opts, tt.wantScheme == "https://", "/health")
+			waitForLocalAgentEndpoint(t, endpoint, material)
+			if !strings.Contains(out.String(), tt.wantScheme) {
+				t.Fatalf("startup output = %q", out.String())
+			}
+			cancel()
+			if code := <-result; code != 0 {
+				t.Fatalf("code = %d, err = %q", code, errOut.String())
+			}
+		})
+	}
+}
+
+func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	opts := localAgentUnusedOptions(t)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	var serverStop func()
+	defer func() {
+		if serverStop != nil {
+			serverStop()
+		}
+	}()
+	var launchCalls [][]string
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) error {
+		launchCalls = append(launchCalls, append([]string(nil), args...))
+		switch args[0] {
+		case "bootout":
+			if serverStop != nil {
+				serverStop()
+				serverStop = nil
+			}
+		case "kickstart":
+			material := localAgentTLSPaths(home)
+			listener, stop := startLocalAgentTLSServer(t, net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)), material, app.newLocalAgentHandler())
+			if listener.Addr().String() != net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)) {
+				stop()
+				t.Fatalf("listener = %s, want %s", listener.Addr(), net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
+			}
+			serverStop = stop
+		}
+		return nil
+	}
+	securityCalls := 0
+	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		securityCalls++
+		if args[0] == "find-certificate" && securityCalls > 1 {
+			fingerprint, err := localAgentCAFingerprint(localAgentTLSPaths(home).CACertPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return []byte("SHA-1 hash: " + fingerprint), nil
+		}
+		return nil, nil
+	}
+
+	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
+		t.Fatalf("first install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "ready at https://") {
+		t.Fatalf("install output = %q", out.String())
+	}
+	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
+		t.Fatalf("second install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if len(launchCalls) != 6 {
+		t.Fatalf("launchctl calls = %#v", launchCalls)
+	}
+	if serverStop != nil {
+		serverStop()
+		serverStop = nil
+	}
+
+	failing := testApp(&out, &errOut, home)
+	failing.LocalAgentServiceCommand = func(_ context.Context, _ ...string) error { return nil }
+	failing.LocalAgentSecurityCommand = app.LocalAgentSecurityCommand
+	out.Reset()
+	errOut.Reset()
+	if code := failing.installLocalAgentLaunchAgent(context.Background(), opts); code != 1 {
+		t.Fatalf("health failure code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "https://") || !strings.Contains(errOut.String(), "local-agent.err.log") {
+		t.Fatalf("health failure error = %q", errOut.String())
+	}
+}
+
+func TestLocalAgentInstallKeychainCancellationKeepsExistingServiceRunning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", localAgentOptions{Host: "127.0.0.9", Port: 29876}, "/tmp/out", "/tmp/err")
+	writeFile(t, path, original)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+		return nil, context.Canceled
+	}
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) error {
+		t.Fatalf("launchctl must not run after keychain cancellation: %#v", args)
+		return nil
+	}
+
+	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+		t.Fatalf("install code = %d, err = %q", code, errOut.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatalf("plist changed after cancellation:\n%s", got)
+	}
+}
+
 func TestLocalAgentKeychainTrustInstallCommands(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
+	opts := localAgentUnusedOptions(t)
+	stop := configureLocalAgentInstallService(t, &app, home, opts)
+	defer stop()
 	var calls [][]string
 	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		return nil, nil
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 0 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
 		t.Fatalf("install code = %d, err = %q", code, errOut.String())
 	}
 	material := localAgentTLSPaths(home)
@@ -1021,13 +1304,16 @@ func TestLocalAgentKeychainTrustSkipsAlreadyTrustedCA(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var out, errOut bytes.Buffer
 			app := testApp(&out, &errOut, home)
+			opts := localAgentUnusedOptions(t)
+			stop := configureLocalAgentInstallService(t, &app, home, opts)
+			defer stop()
 			var calls [][]string
 			app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
 				calls = append(calls, append([]string(nil), args...))
 				return []byte(tt.output + "\n"), nil
 			}
 
-			if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 0 {
+			if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
 				t.Fatalf("install code = %d, err = %q", code, errOut.String())
 			}
 			want := [][]string{
@@ -1774,6 +2060,100 @@ func localAgentOptionsForURL(t *testing.T, rawURL string) localAgentOptions {
 		t.Fatal(err)
 	}
 	return localAgentOptions{Host: host, Port: port, HostExplicit: true, PortExplicit: true}
+}
+
+func localAgentOptionsForAddr(t *testing.T, address string) localAgentOptions {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return localAgentOptions{Host: host, Port: port, HostExplicit: true, PortExplicit: true}
+}
+
+func localAgentUnusedOptions(t *testing.T) localAgentOptions {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := localAgentOptionsForAddr(t, listener.Addr().String())
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return opts
+}
+
+func startLocalAgentTLSServer(t *testing.T, address string, material localAgentTLSMaterial, handler http.Handler) (net.Listener, func()) {
+	t.Helper()
+	certificate, err := tls.LoadX509KeyPair(material.ServerCertPath, material.ServerKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: handler, TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}}}
+	done := make(chan struct{})
+	go func() {
+		_ = server.ServeTLS(listener, "", "")
+		close(done)
+	}()
+	return listener, func() {
+		_ = server.Close()
+		<-done
+	}
+}
+
+func configureLocalAgentInstallService(t *testing.T, app *App, home string, opts localAgentOptions) func() {
+	t.Helper()
+	var stop func()
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) error {
+		switch args[0] {
+		case "bootout":
+			if stop != nil {
+				stop()
+				stop = nil
+			}
+		case "kickstart":
+			_, stop = startLocalAgentTLSServer(t, net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)), localAgentTLSPaths(home), app.newLocalAgentHandler())
+		}
+		return nil
+	}
+	return func() {
+		if stop != nil {
+			stop()
+		}
+	}
+}
+
+func waitForLocalAgentEndpoint(t *testing.T, endpoint string, material localAgentTLSMaterial) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, endpoint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := localAgentHTTPClient()
+		if strings.HasPrefix(endpoint, "https://") {
+			client = localAgentHTTPSClient(material)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("local agent did not respond at %s", endpoint)
 }
 
 func TestLocalAgentDrainEndpointsAreAtomic(t *testing.T) {

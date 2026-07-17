@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -57,15 +59,30 @@ func (a App) runLocalAgent(ctx context.Context, args []string) int {
 		return 2
 	}
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
+		return 1
+	}
+	material, tlsInstalled, err := localAgentInstalledTLS(home, time.Now())
+	if err != nil {
+		fmt.Fprintf(a.Err, "local-agent TLS material is invalid: %v\nrun: cm local-agent install\n", err)
+		return 1
+	}
 	server := &http.Server{Addr: addr, Handler: a.newLocalAgentHandler()}
 	go func() {
 		<-ctx.Done()
 		_ = server.Shutdown(context.Background())
 	}()
-	fmt.Fprintf(a.Out, "ConnectMac local agent: http://%s\n", addr)
+	fmt.Fprintf(a.Out, "ConnectMac local agent: %s\n", localAgentEndpoint(opts, tlsInstalled, ""))
 	fmt.Fprintln(a.Out, "Use this on your own computer for web Connect/VNC/Transfer actions.")
 	fmt.Fprintln(a.Out, "Press Ctrl+C to stop.")
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if tlsInstalled {
+		err = server.ListenAndServeTLS(material.ServerCertPath, material.ServerKeyPath)
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(a.Err, "local agent failed: %v\n", err)
 		return 1
 	}
@@ -129,7 +146,7 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 		fmt.Fprintln(a.Err, "--force is only supported for local-agent stop, restart, and uninstall")
 		return 2
 	}
-	if !opts.Force && (command == "status" || command == "stop" || command == "restart" || command == "uninstall") {
+	if !opts.Force && (command == "install" || command == "status" || command == "stop" || command == "restart" || command == "uninstall") {
 		opts, err = resolveInstalledLocalAgentOptions(opts)
 		if err != nil {
 			fmt.Fprintf(a.Err, "read installed local-agent options: %v\n", err)
@@ -297,8 +314,19 @@ func (a App) installLocalAgentLaunchAgent(ctx context.Context, opts localAgentOp
 		fmt.Fprintf(a.Err, "write %s: %v\n", path, err)
 		return 1
 	}
+	if code := a.stopLocalAgentLaunchAgent(ctx, opts, true); code != 0 {
+		return code
+	}
+	if code := a.startLocalAgentLaunchAgent(ctx); code != 0 {
+		return code
+	}
+	endpoint := localAgentEndpoint(opts, true, "/health")
+	if err := a.waitForLocalAgentHealth(ctx, opts, material); err != nil {
+		fmt.Fprintf(a.Err, "local-agent HTTPS health check failed at %s: %v\nlogs: %s, %s\n", endpoint, err, filepath.Join(logDir, "local-agent.out.log"), filepath.Join(logDir, "local-agent.err.log"))
+		return 1
+	}
 	fmt.Fprintf(a.Out, "installed %s\n", path)
-	fmt.Fprintln(a.Out, "start with: cm local-agent start")
+	fmt.Fprintf(a.Out, "local-agent ready at %s\n", endpoint)
 	return 0
 }
 
@@ -732,10 +760,10 @@ func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
 		return 1
 	}
 	domain := localAgentLaunchDomain()
-	if err := exec.CommandContext(ctx, "launchctl", "bootstrap", domain, path).Run(); err != nil {
+	if err := a.runLocalAgentServiceCommand(ctx, "bootstrap", domain, path); err != nil {
 		fmt.Fprintf(a.Out, "launch agent may already be loaded: %v\n", err)
 	}
-	if err := exec.CommandContext(ctx, "launchctl", "kickstart", "-k", domain+"/"+localAgentLaunchLabel).Run(); err != nil {
+	if err := a.runLocalAgentServiceCommand(ctx, "kickstart", "-k", domain+"/"+localAgentLaunchLabel); err != nil {
 		fmt.Fprintf(a.Err, "start launch agent: %v\n", err)
 		return 1
 	}
@@ -756,7 +784,7 @@ func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptio
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
-	err = exec.CommandContext(ctx, "launchctl", "bootout", localAgentLaunchDomain(), path).Run()
+	err = a.runLocalAgentServiceCommand(ctx, "bootout", localAgentLaunchDomain(), path)
 	if err != nil {
 		if drained {
 			a.resumeLocalAgentActivity(opts)
@@ -777,13 +805,7 @@ func (a App) prepareLocalAgentShutdown(ctx context.Context, opts localAgentOptio
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	endpoint := fmt.Sprintf("http://%s/activity/drain", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
-	req, err := http.NewRequestWithContext(checkCtx, http.MethodPost, endpoint, nil)
-	if err != nil {
-		fmt.Fprintf(a.Err, "unable to verify local-agent activity: create drain request: %v\n", err)
-		return false, false
-	}
-	resp, err := localAgentHTTPClient().Do(req)
+	resp, _, err := a.localAgentRequest(checkCtx, opts, http.MethodPost, "/activity/drain", true)
 	if err != nil {
 		if localAgentConnectionUnavailable(err) {
 			return false, true
@@ -816,12 +838,7 @@ func (a App) prepareLocalAgentShutdown(ctx context.Context, opts localAgentOptio
 func (a App) resumeLocalAgentActivity(opts localAgentOptions) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	endpoint := fmt.Sprintf("http://%s/activity/resume", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-	if err != nil {
-		return
-	}
-	resp, err := localAgentHTTPClient().Do(req)
+	resp, _, err := a.localAgentRequest(ctx, opts, http.MethodPost, "/activity/resume", true)
 	if err == nil {
 		_ = resp.Body.Close()
 	}
@@ -830,13 +847,7 @@ func (a App) resumeLocalAgentActivity(opts localAgentOptions) {
 func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions) bool {
 	checkCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	endpoint := fmt.Sprintf("http://%s/activity", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
-	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		fmt.Fprintf(a.Err, "unable to verify local-agent activity: create request: %v\n", err)
-		return false
-	}
-	resp, err := localAgentHTTPClient().Do(req)
+	resp, _, err := a.localAgentRequest(checkCtx, opts, http.MethodGet, "/activity", true)
 	if err != nil {
 		if localAgentConnectionUnavailable(err) {
 			return true
@@ -868,6 +879,132 @@ func localAgentHTTPClient() *http.Client {
 	}}
 }
 
+func localAgentEndpoint(opts localAgentOptions, secure bool, path string) string {
+	scheme := "http"
+	if secure {
+		scheme = "https"
+	}
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return scheme + "://" + net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)) + path
+}
+
+func localAgentInstalledTLS(home string, now time.Time) (localAgentTLSMaterial, bool, error) {
+	material := localAgentTLSPaths(home)
+	if _, err := os.Lstat(material.Dir); errors.Is(err, os.ErrNotExist) {
+		return material, false, nil
+	} else if err != nil {
+		return material, false, fmt.Errorf("inspect local-agent TLS directory: %w", err)
+	}
+	material, err := loadLocalAgentTLS(home, now)
+	if err != nil {
+		return material, true, err
+	}
+	return material, true, nil
+}
+
+func localAgentHTTPSClient(material localAgentTLSMaterial) *http.Client {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	certificate, err := os.ReadFile(material.CACertPath)
+	if err != nil || !pool.AppendCertsFromPEM(certificate) {
+		return localAgentHTTPClient()
+	}
+	client := localAgentHTTPClient()
+	client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+	return client
+}
+
+func (a App) localAgentRequest(ctx context.Context, opts localAgentOptions, method, path string, allowLegacyFallback bool) (*http.Response, string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve home: %w", err)
+	}
+	material, tlsInstalled, err := localAgentInstalledTLS(home, time.Now())
+	if err != nil {
+		return nil, "", err
+	}
+	secure := tlsInstalled
+	endpoint := localAgentEndpoint(opts, secure, path)
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if err != nil {
+		return nil, endpoint, err
+	}
+	client := localAgentHTTPClient()
+	if secure {
+		client = localAgentHTTPSClient(material)
+	}
+	response, err := client.Do(request)
+	if err == nil || !secure || !allowLegacyFallback || !localAgentConnectionUnavailable(err) {
+		return response, endpoint, err
+	}
+	endpoint = localAgentEndpoint(opts, false, path)
+	request, requestErr := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if requestErr != nil {
+		return nil, endpoint, requestErr
+	}
+	response, err = localAgentHTTPClient().Do(request)
+	return response, endpoint, err
+}
+
+func (a App) waitForLocalAgentHealth(ctx context.Context, opts localAgentOptions, material localAgentTLSMaterial) error {
+	deadline := time.Now().Add(5 * time.Second)
+	endpoint := localAgentEndpoint(opts, true, "/health")
+	var lastErr error
+	for time.Now().Before(deadline) {
+		requestCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
+		if err == nil {
+			resp, requestErr := localAgentHTTPSClient(material).Do(req)
+			if requestErr == nil {
+				body, readErr := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if readErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					var envelope struct {
+						OK bool `json:"ok"`
+					}
+					if json.Unmarshal(body, &envelope) == nil && envelope.OK {
+						cancel()
+						return nil
+					}
+					lastErr = fmt.Errorf("unexpected health response")
+				} else if readErr != nil {
+					lastErr = readErr
+				} else {
+					lastErr = fmt.Errorf("HTTP status %s", resp.Status)
+				}
+			} else {
+				lastErr = requestErr
+			}
+		} else {
+			lastErr = err
+		}
+		cancel()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out")
+	}
+	return lastErr
+}
+
+func (a App) runLocalAgentServiceCommand(ctx context.Context, args ...string) error {
+	if a.LocalAgentServiceCommand != nil {
+		return a.LocalAgentServiceCommand(ctx, args...)
+	}
+	return exec.CommandContext(ctx, "launchctl", args...).Run()
+}
+
 func localAgentConnectionUnavailable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -877,7 +1014,10 @@ func localAgentConnectionUnavailable(err error) bool {
 		return !opErr.Timeout()
 	}
 	var dnsErr *net.DNSError
-	return errors.As(err, &dnsErr) && !dnsErr.Timeout()
+	if errors.As(err, &dnsErr) && !dnsErr.Timeout() {
+		return true
+	}
+	return strings.Contains(err.Error(), "server gave HTTP response to HTTPS client")
 }
 
 func decodeLocalAgentActivityResponse(resp *http.Response) ([]LocalTransferJob, error) {
@@ -932,15 +1072,9 @@ func decodeLocalAgentDrainResponse(resp *http.Response) (bool, []LocalTransferJo
 }
 
 func (a App) statusLocalAgent(ctx context.Context, opts localAgentOptions) int {
-	url := fmt.Sprintf("http://%s/health", net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, endpoint, err := a.localAgentRequest(ctx, opts, http.MethodGet, "/health", true)
 	if err != nil {
-		fmt.Fprintln(a.Err, err)
-		return 1
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Fprintf(a.Out, "local-agent is not responding at %s\n", url)
+		fmt.Fprintf(a.Out, "local-agent is not responding at %s\n", endpoint)
 		return 1
 	}
 	defer resp.Body.Close()
@@ -949,7 +1083,7 @@ func (a App) statusLocalAgent(ctx context.Context, opts localAgentOptions) int {
 		fmt.Fprintf(a.Out, "local-agent status %s: %s\n", resp.Status, strings.TrimSpace(string(body)))
 		return 1
 	}
-	fmt.Fprintf(a.Out, "local-agent is running at %s\n%s\n", url, strings.TrimSpace(string(body)))
+	fmt.Fprintf(a.Out, "local-agent is running at %s\n%s\n", endpoint, strings.TrimSpace(string(body)))
 	return 0
 }
 
