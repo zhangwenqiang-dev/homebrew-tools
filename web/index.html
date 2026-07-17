@@ -389,6 +389,17 @@
       .sync-grid { grid-template-columns: 1fr; }
       pre { max-height: 420px; }
     }
+    .app-layout.container-fluid { width: 100%; max-width: 2400px; margin-inline: auto; }
+    .table-scroll { min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
+    .profile-table-scroll table { min-width: 960px; }
+    .member-table-scroll table { min-width: 900px; }
+    .picker-card { min-width: 0; max-width: calc(100vw - 36px); }
+    .profile-form-grid { min-height: 0; }
+    input[type="datetime-local"] { min-width: 0; }
+    .terminal-surface { height: clamp(420px, 62vh, 720px); min-height: 0; max-height: none; }
+    main, .view, .section-head > *, .toolbar, .row-actions { min-width: 0; }
+    .picker-layer { overflow: auto; }
+    .xterm, .xterm-screen, .xterm-viewport { max-width: 100%; }
     @media (max-width: 720px) {
       body { font-size: 13px; }
       header { gap: 10px; padding: 10px 12px; }
@@ -397,6 +408,8 @@
       .section-head { align-items: stretch; flex-direction: column; }
       .toolbar, .row-actions { width: 100%; }
       .toolbar input, .toolbar select, .toolbar button { width: 100%; }
+      .profile-table-scroll table, .member-table-scroll table { min-width: 0; }
+      .table-scroll { overflow-x: visible; }
       table, thead, tbody, tr, th, td { display: block; width: 100%; }
       thead { display: none; }
       tr {
@@ -739,19 +752,21 @@
               <span id="profileCount" class="pill">0</span>
             </div>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 20%">Profile</th>
-                <th style="width: 20%">Apple</th>
-                <th style="width: 14%">负责人</th>
-                <th style="width: 10%">Region</th>
-                <th style="width: 10%">状态</th>
-                <th style="width: 26%">操作</th>
-              </tr>
-            </thead>
-            <tbody id="profiles"></tbody>
-          </table>
+          <div class="table-scroll profile-table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 20%">Profile</th>
+                  <th style="width: 20%">Apple</th>
+                  <th style="width: 14%">负责人</th>
+                  <th style="width: 10%">Region</th>
+                  <th style="width: 10%">状态</th>
+                  <th style="width: 26%">操作</th>
+                </tr>
+              </thead>
+              <tbody id="profiles"></tbody>
+            </table>
+          </div>
         </section>
 
         <section id="operationsView" class="view hidden card shadow-sm">
@@ -911,17 +926,19 @@
               <button id="refreshMembers">刷新成员</button>
             </div>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 30%">成员</th>
-                <th style="width: 14%">角色</th>
-                <th style="width: 14%">状态</th>
-                <th style="width: 42%">操作</th>
-              </tr>
-            </thead>
-            <tbody id="members"></tbody>
-          </table>
+          <div class="table-scroll member-table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 30%">成员</th>
+                  <th style="width: 14%">角色</th>
+                  <th style="width: 14%">状态</th>
+                  <th style="width: 42%">操作</th>
+                </tr>
+              </thead>
+              <tbody id="members"></tbody>
+            </table>
+          </div>
           <div class="section-head">
             <h2>Settings</h2>
             <button id="saveSettingsBtn" class="admin-only">保存设置</button>

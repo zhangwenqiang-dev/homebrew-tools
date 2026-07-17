@@ -7409,6 +7409,57 @@ func TestAppUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestAppWebDesktopLayoutStabilizationContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	page := string(data)
+
+	for _, want := range []string{
+		`<div class="table-scroll profile-table-scroll">`,
+		`<tbody id="profiles"></tbody>`,
+		`<div class="table-scroll member-table-scroll">`,
+		`<tbody id="members"></tbody>`,
+		`<div class="jobs">`,
+		`.app-layout.container-fluid { width: 100%; max-width: 2400px; margin-inline: auto; }`,
+		`.table-scroll { min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }`,
+		`.profile-table-scroll table { min-width: 960px; }`,
+		`.member-table-scroll table { min-width: 900px; }`,
+		`.picker-card { min-width: 0; max-width: calc(100vw - 36px); }`,
+		`.profile-form-grid { min-height: 0; }`,
+		`input[type="datetime-local"] { min-width: 0; }`,
+		`.terminal-surface { height: clamp(420px, 62vh, 720px); min-height: 0; max-height: none; }`,
+		`main, .view, .section-head > *, .toolbar, .row-actions { min-width: 0; }`,
+		`.picker-layer { overflow: auto; }`,
+		`.xterm, .xterm-screen, .xterm-viewport { max-width: 100%; }`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web desktop layout contract missing %q", want)
+		}
+	}
+
+	mobileStart := strings.Index(page, "@media (max-width: 720px) {")
+	if mobileStart < 0 {
+		t.Fatal("mobile layout contract block is missing")
+	}
+	mobileEnd := strings.Index(page[mobileStart:], "    }\n    /* Bootstrap 5.3")
+	if mobileEnd < 0 {
+		t.Fatal("mobile layout contract block is missing")
+	}
+	mobile := page[mobileStart : mobileStart+mobileEnd]
+	for _, want := range []string{
+		`.profile-table-scroll table, .member-table-scroll table { min-width: 0; }`,
+		`.table-scroll { overflow-x: visible; }`,
+		`.local-action { display: none !important; }`,
+		`table, thead, tbody, tr, th, td { display: block; width: 100%; }`,
+	} {
+		if !strings.Contains(mobile, want) {
+			t.Errorf("web mobile layout contract missing %q", want)
+		}
+	}
+}
+
 func TestAppLogsCommands(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
