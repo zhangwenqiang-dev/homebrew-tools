@@ -361,6 +361,57 @@ func TestLocalAgentTLSLoadRecoversValidBackup(t *testing.T) {
 	}
 }
 
+func TestLocalAgentTLSLoadRecoversUsableBackupDuringCARotation(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := generateLocalAgentTLSCA(localAgentTLSTestNow.AddDate(-9, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localAgentTLSCAHasFullServerLifetime(ca, localAgentTLSTestNow) {
+		t.Fatal("test CA unexpectedly has a full server lifetime remaining")
+	}
+	serverCertificate, serverKey, err := generateLocalAgentTLSServer(ca, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCertificatePEM, caKeyPEM, err := encodeLocalAgentTLSCA(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCertificatePEM, serverKeyPEM, err := encodeLocalAgentTLSServer(serverCertificate, serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(material.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(material.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalAgentTLSFiles(material, caCertificatePEM, caKeyPEM, serverCertificatePEM, serverKeyPEM); err != nil {
+		t.Fatal(err)
+	}
+	before := readLocalAgentTLSFiles(t, material)
+	backup := material.Dir + ".backup"
+	if err := os.Rename(material.Dir, backup); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadLocalAgentTLS(home, localAgentTLSTestNow); err != nil {
+		t.Fatalf("loadLocalAgentTLS discarded a usable interrupted CA-rotation backup: %v", err)
+	}
+	after := readLocalAgentTLSFiles(t, material)
+	for path, want := range before {
+		if got := after[path]; !bytes.Equal(got, want) {
+			t.Fatalf("backup recovery changed %s", path)
+		}
+	}
+}
+
 func TestLocalAgentTLSLoadWaitsForRenewalTransaction(t *testing.T) {
 	home := t.TempDir()
 	_, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
@@ -410,7 +461,10 @@ func TestLocalAgentTLSStagingDirectoryModeIgnoresUmask(t *testing.T) {
 	}
 	previousUmask := syscall.Umask(0o777)
 	t.Cleanup(func() { syscall.Umask(previousUmask) })
+	stageHookRan := false
+	stop := errors.New("stop after staging mode check")
 	localAgentTLSStageHook = func(staged localAgentTLSMaterial) error {
+		stageHookRan = true
 		info, err := os.Stat(staged.Dir)
 		if err != nil {
 			return err
@@ -418,11 +472,14 @@ func TestLocalAgentTLSStagingDirectoryModeIgnoresUmask(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o700 {
 			return fmt.Errorf("staging mode = %o, want 700", got)
 		}
-		return errors.New("stop after staging mode check")
+		return stop
 	}
 	t.Cleanup(func() { localAgentTLSStageHook = nil })
-	if _, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0)); err == nil {
-		t.Fatal("expected staging hook to stop replacement")
+	if _, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0)); err != stop {
+		t.Fatalf("staging hook error = %v, want exact sentinel %v", err, stop)
+	}
+	if !stageHookRan {
+		t.Fatal("staging hook did not run")
 	}
 }
 

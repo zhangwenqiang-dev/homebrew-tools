@@ -135,9 +135,6 @@ func validateLocalAgentTLSSet(material localAgentTLSMaterial, now time.Time) err
 	if err != nil {
 		return err
 	}
-	if !localAgentTLSCAHasFullServerLifetime(ca, now) {
-		return invalidLocalAgentTLSError("local-agent CA cannot issue a full server certificate lifetime")
-	}
 	if _, err := validateLocalAgentTLSServerCertificate(material, ca, now); err != nil {
 		return err
 	}
@@ -231,11 +228,11 @@ func recoverLocalAgentTLS(material localAgentTLSMaterial, now time.Time) (bool, 
 	if err != nil || !backupExists {
 		return changed, err
 	}
-	backupValid, err := localAgentTLSMaterialValid(localAgentTLSPathsForDir(backup), now)
+	backupValid, err := localAgentTLSMaterialUsable(localAgentTLSPathsForDir(backup), now)
 	if err != nil {
 		return false, err
 	}
-	activeValid, err := localAgentTLSMaterialValid(material, now)
+	activeValid, err := localAgentTLSMaterialUsable(material, now)
 	if err != nil {
 		return false, err
 	}
@@ -264,7 +261,7 @@ func recoverLocalAgentTLS(material localAgentTLSMaterial, now time.Time) (bool, 
 	return true, nil
 }
 
-func localAgentTLSMaterialValid(material localAgentTLSMaterial, now time.Time) (bool, error) {
+func localAgentTLSMaterialUsable(material localAgentTLSMaterial, now time.Time) (bool, error) {
 	if exists, err := localAgentTLSPathExists(material.Dir); err != nil || !exists {
 		return false, err
 	}
@@ -277,9 +274,6 @@ func localAgentTLSMaterialValid(material localAgentTLSMaterial, now time.Time) (
 			return false, nil
 		}
 		return false, err
-	}
-	if !localAgentTLSCAHasFullServerLifetime(ca, now) {
-		return false, nil
 	}
 	if _, err := validateLocalAgentTLSServerCertificate(material, ca, now); err != nil {
 		if localAgentTLSRecoverableError(err) {
