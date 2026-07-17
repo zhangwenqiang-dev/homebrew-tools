@@ -20,8 +20,8 @@ func TestFormatBeijingDisplayTime(t *testing.T) {
 		},
 		{
 			name:  "already Beijing time",
-			input: "2026-07-16T16:03:24+08:00",
-			want:  "2026-07-16 16:03:24（北京时间）",
+			input: "2026-07-16T16:00:00+08:00",
+			want:  "2026-07-16 16:00:00（北京时间）",
 		},
 		{
 			name:  "empty",
@@ -32,6 +32,16 @@ func TestFormatBeijingDisplayTime(t *testing.T) {
 			name:  "invalid",
 			input: "not-a-time",
 			want:  "not-a-time",
+		},
+		{
+			name:  "whitespace-only invalid",
+			input: "   ",
+			want:  "   ",
+		},
+		{
+			name:  "whitespace-wrapped invalid",
+			input: "  not-a-time  ",
+			want:  "  not-a-time  ",
 		},
 	}
 

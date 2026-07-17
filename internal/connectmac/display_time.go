@@ -1,19 +1,15 @@
 package connectmac
 
-import (
-	"strings"
-	"time"
-)
+import "time"
 
 var beijingDisplayLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 func formatBeijingDisplayTime(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
+	if value == "" {
 		return ""
 	}
 
-	parsed, err := time.Parse(time.RFC3339, trimmed)
+	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return value
 	}
