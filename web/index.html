@@ -2077,8 +2077,8 @@
         setStatus("请选择新的提醒时间。");
         return;
       }
-      const dueAt = new Date(value);
-      if (Number.isNaN(dueAt.getTime())) {
+      const dueAt = beijingDateTimeLocalToISOString(value);
+      if (!dueAt) {
         setStatus("提醒时间格式不正确。");
         return;
       }
@@ -2086,7 +2086,7 @@
       try {
         await api("/api/release-reminder/extend", {
           method: "POST",
-          body: JSON.stringify({ profile: p.name, release_due_at: dueAt.toISOString() })
+          body: JSON.stringify({ profile: p.name, release_due_at: dueAt })
         });
         await loadReleaseReminders();
         closeReleaseReminderEditor();
@@ -2100,11 +2100,58 @@
       }
     }
 
+    const beijingTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    });
+
+    function beijingTimeParts(date) {
+      return Object.fromEntries(
+        beijingTimeFormatter.formatToParts(date)
+          .filter((part) => part.type !== "literal")
+          .map((part) => [part.type, part.value])
+      );
+    }
+
+    function formatTime(value) {
+      if (!value) return "-";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      const parts = beijingTimeParts(date);
+      return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}（北京时间）`;
+    }
+
     function toDateTimeLocal(value) {
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return "";
-      const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-      return offsetDate.toISOString().slice(0, 16);
+      const parts = beijingTimeParts(date);
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    }
+
+    function beijingDateTimeLocalToISOString(value) {
+      const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+      if (!match) return null;
+      const [, yearText, monthText, dayText, hourText, minuteText] = match;
+      const year = Number(yearText);
+      const month = Number(monthText);
+      const day = Number(dayText);
+      const hour = Number(hourText);
+      const minute = Number(minuteText);
+      const localDate = new Date(Date.UTC(year, month - 1, day, hour, minute));
+      if (
+        localDate.getUTCFullYear() !== year ||
+        localDate.getUTCMonth() !== month - 1 ||
+        localDate.getUTCDate() !== day ||
+        localDate.getUTCHours() !== hour ||
+        localDate.getUTCMinutes() !== minute
+      ) return null;
+      return new Date(Date.UTC(year, month - 1, day, hour - 8, minute)).toISOString();
     }
 
     async function cleanupLocalRecords() {
@@ -3812,13 +3859,6 @@
 
     function ownerNames(profile) {
       return (profile?.owners || []).filter((member) => member.enabled !== false).map((member) => member.name || member.email);
-    }
-
-    function formatTime(value) {
-      if (!value) return "-";
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return value;
-      return date.toLocaleString();
     }
 
     function escapeHTML(value) {

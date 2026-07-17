@@ -4271,6 +4271,64 @@ assert.equal(statuses.includes("VNC 打开失败"), false);
 	}
 }
 
+func TestAppWebBeijingTimeContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`Intl.DateTimeFormat("zh-CN", {`,
+		`timeZone: "Asia/Shanghai"`,
+		`hourCycle: "h23"`,
+		`formatToParts`,
+		`function formatTime(value)`,
+		`function toDateTimeLocal(value)`,
+		`function beijingDateTimeLocalToISOString(value)`,
+		`const dueAt = beijingDateTimeLocalToISOString(value);`,
+		`release_due_at: dueAt`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web index missing %q", want)
+		}
+	}
+}
+
+func TestAppWebBeijingDateTimeBehavior(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	helpers := extractWebSource(t, string(data), "const beijingTimeFormatter", "\n    async function cleanupLocalRecords")
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for embedded Beijing datetime behavior test: %v", err)
+	}
+	harness := `
+import assert from "node:assert/strict";
+
+` + helpers + `
+
+assert.equal(formatTime("2026-07-16T08:03:24Z"), "2026-07-16 16:03:24（北京时间）");
+assert.equal(formatTime("2026-07-16T18:30:00Z"), "2026-07-17 02:30:00（北京时间）");
+assert.equal(formatTime("not-a-date"), "not-a-date");
+assert.equal(toDateTimeLocal("2026-07-17T08:00:00Z"), "2026-07-17T16:00");
+assert.equal(beijingDateTimeLocalToISOString("2026-07-17T16:00"), "2026-07-17T08:00:00.000Z");
+assert.equal(beijingDateTimeLocalToISOString("2026-02-29T12:00"), null);
+assert.equal(beijingDateTimeLocalToISOString("2026-07-17 16:00"), null);
+assert.equal(beijingDateTimeLocalToISOString("2026-07-17T16:00:00"), null);
+`
+	script := filepath.Join(t.TempDir(), "beijing_datetime_test.mjs")
+	if err := os.WriteFile(script, []byte(harness), 0o600); err != nil {
+		t.Fatalf("write node harness: %v", err)
+	}
+	output, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Beijing datetime node behavior test failed: %v\n%s", err, output)
+	}
+}
+
 func TestAppWebJobLogAPI(t *testing.T) {
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
