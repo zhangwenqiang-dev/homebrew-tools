@@ -1163,6 +1163,16 @@ func TestLocalAgentUninstallTLSRetainsFilesOnUnrelatedKeychainErrors(t *testing.
 			name: "cancellation",
 			err:  context.Canceled,
 		},
+		{
+			name:   "cancellation with item not found output",
+			output: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.",
+			err:    context.Canceled,
+		},
+		{
+			name:   "deadline with item not found output",
+			output: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.",
+			err:    context.DeadlineExceeded,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

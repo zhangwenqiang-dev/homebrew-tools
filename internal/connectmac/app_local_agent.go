@@ -369,7 +369,13 @@ func (a App) removeLocalAgentCATrust(ctx context.Context, home string, material 
 		return fmt.Errorf("read local-agent CA fingerprint: %w", err)
 	}
 	output, err := a.runLocalAgentSecurityCommand(ctx, "delete-certificate", "-Z", fingerprint, "-t", localAgentLoginKeychainPath(home))
-	if err == nil || localAgentSecurityOutputIndicatesNotFound(output) {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return localAgentSecurityCommandError("delete local-agent CA trust", err, output)
+	}
+	if localAgentSecurityOutputIndicatesNotFound(output) {
 		return nil
 	}
 	return localAgentSecurityCommandError("delete local-agent CA trust", err, output)
