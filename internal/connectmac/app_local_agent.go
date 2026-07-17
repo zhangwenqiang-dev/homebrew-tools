@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -311,9 +312,33 @@ func (a App) uninstallLocalAgentLaunchAgent(ctx context.Context, opts localAgent
 		return 1
 	}
 	material := localAgentTLSPaths(home)
-	if _, err := os.Lstat(material.Dir); err == nil {
-		if err := a.removeLocalAgentCATrust(ctx, home, material); err != nil {
+	ledger, err := readLocalAgentTrustedCAFingerprints(home)
+	if err != nil {
+		fmt.Fprintf(a.Err, "read local-agent trusted CA ledger: %v\n", err)
+		return 1
+	}
+	currentFingerprint, available, err := localAgentCurrentCAFingerprint(material)
+	if err != nil {
+		fmt.Fprintf(a.Err, "read local-agent CA fingerprint: %v\n", err)
+		return 1
+	}
+	fingerprints := append([]string(nil), ledger...)
+	if available {
+		fingerprints = appendLocalAgentFingerprint(fingerprints, currentFingerprint)
+	}
+	for _, fingerprint := range fingerprints {
+		if err := a.deleteLocalAgentCATrust(ctx, home, fingerprint); err != nil {
 			fmt.Fprintf(a.Err, "remove local-agent CA trust: %v\n", err)
+			return 1
+		}
+	}
+	if err := removeLocalAgentTrustedCAFingerprintLedger(home); err != nil {
+		fmt.Fprintf(a.Err, "remove local-agent trusted CA ledger: %v\n", err)
+		return 1
+	}
+	if _, err := os.Lstat(material.Dir); err == nil {
+		if err := checkLocalAgentTLSNonSymlink(material.Dir, true); err != nil {
+			fmt.Fprintf(a.Err, "inspect local-agent TLS directory %s: %v\n", material.Dir, err)
 			return 1
 		}
 		if err := os.RemoveAll(material.Dir); err != nil {
@@ -338,6 +363,10 @@ func (a App) uninstallLocalAgentLaunchAgent(ctx context.Context, opts localAgent
 }
 
 func (a App) ensureLocalAgentCATrust(ctx context.Context, home string, material localAgentTLSMaterial) error {
+	ledger, err := readLocalAgentTrustedCAFingerprints(home)
+	if err != nil {
+		return fmt.Errorf("read local-agent trusted CA ledger: %w", err)
+	}
 	sha1Fingerprint, sha256Fingerprint, err := localAgentCAFingerprints(material.CACertPath)
 	if err != nil {
 		return fmt.Errorf("read local-agent CA fingerprint: %w", err)
@@ -347,27 +376,47 @@ func (a App) ensureLocalAgentCATrust(ctx context.Context, home string, material 
 	if err != nil {
 		return localAgentSecurityCommandError("inspect current-user login keychain", err, output)
 	}
-	if localAgentKeychainContainsFingerprint(output, sha1Fingerprint, sha256Fingerprint) {
-		return nil
+	present := localAgentKeychainContainsFingerprint(output, sha1Fingerprint, sha256Fingerprint)
+	if present {
+		output, err = a.verifyLocalAgentCATrust(ctx, material, keychain)
+		if err == nil {
+			return a.reconcileLocalAgentTrustedCAFingerprints(ctx, home, sha1Fingerprint, ledger)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return localAgentSecurityCommandError("verify local-agent CA trust", err, output)
+		}
 	}
 	output, err = a.runLocalAgentSecurityCommand(ctx, "add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, material.CACertPath)
 	if err != nil {
 		return localAgentSecurityCommandError("add local-agent CA trust", err, output)
 	}
+	output, err = a.verifyLocalAgentCATrust(ctx, material, keychain)
+	if err != nil {
+		return localAgentSecurityCommandError("verify local-agent CA trust", err, output)
+	}
+	return a.reconcileLocalAgentTrustedCAFingerprints(ctx, home, sha1Fingerprint, ledger)
+}
+
+func (a App) verifyLocalAgentCATrust(ctx context.Context, material localAgentTLSMaterial, keychain string) ([]byte, error) {
+	return a.runLocalAgentSecurityCommand(ctx, "verify-cert", "-p", "ssl", "-n", "127.0.0.1", "-k", keychain, "-L", material.ServerCertPath)
+}
+
+func (a App) reconcileLocalAgentTrustedCAFingerprints(ctx context.Context, home, current string, ledger []string) error {
+	for _, fingerprint := range ledger {
+		if fingerprint == current {
+			continue
+		}
+		if err := a.deleteLocalAgentCATrust(ctx, home, fingerprint); err != nil {
+			return fmt.Errorf("remove stale local-agent CA trust: %w", err)
+		}
+	}
+	if err := writeLocalAgentTrustedCAFingerprints(home, []string{current}); err != nil {
+		return fmt.Errorf("write local-agent trusted CA ledger: %w", err)
+	}
 	return nil
 }
 
-func (a App) removeLocalAgentCATrust(ctx context.Context, home string, material localAgentTLSMaterial) error {
-	if err := checkLocalAgentTLSNonSymlink(material.Dir, true); err != nil {
-		return err
-	}
-	if err := checkLocalAgentTLSNonSymlink(material.CACertPath, false); err != nil {
-		return err
-	}
-	fingerprint, err := localAgentCAFingerprint(material.CACertPath)
-	if err != nil {
-		return fmt.Errorf("read local-agent CA fingerprint: %w", err)
-	}
+func (a App) deleteLocalAgentCATrust(ctx context.Context, home, fingerprint string) error {
 	output, err := a.runLocalAgentSecurityCommand(ctx, "delete-certificate", "-Z", fingerprint, "-t", localAgentLoginKeychainPath(home))
 	if err == nil {
 		return nil
@@ -382,10 +431,201 @@ func (a App) removeLocalAgentCATrust(ctx context.Context, home string, material 
 }
 
 func (a App) runLocalAgentSecurityCommand(ctx context.Context, args ...string) ([]byte, error) {
+	var output []byte
+	var err error
 	if a.LocalAgentSecurityCommand != nil {
-		return a.LocalAgentSecurityCommand(ctx, args...)
+		output, err = a.LocalAgentSecurityCommand(ctx, args...)
+	} else {
+		output, err = exec.CommandContext(ctx, "security", args...).CombinedOutput()
 	}
-	return exec.CommandContext(ctx, "security", args...).CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return output, ctxErr
+	}
+	return output, err
+}
+
+const localAgentTrustedCAFingerprintLedgerName = "trusted-ca-fingerprints"
+
+func localAgentTrustedCAFingerprintLedgerPath(home string) string {
+	return filepath.Join(home, ".connectmac", "local-agent", localAgentTrustedCAFingerprintLedgerName)
+}
+
+func readLocalAgentTrustedCAFingerprints(home string) ([]string, error) {
+	if _, err := ensureLocalAgentTLSParent(home); err != nil {
+		return nil, err
+	}
+	path := localAgentTrustedCAFingerprintLedgerPath(home)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect local-agent trusted CA ledger: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refuse symlink for local-agent trusted CA ledger: %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("local-agent trusted CA ledger is not a regular file: %s", path)
+	}
+	if info.Mode().Perm() != 0o600 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, fmt.Errorf("chmod local-agent trusted CA ledger: %w", err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read local-agent trusted CA ledger: %w", err)
+	}
+	var fingerprints []string
+	for _, line := range strings.Split(string(data), "\n") {
+		fingerprint := strings.TrimSpace(line)
+		if fingerprint == "" {
+			continue
+		}
+		if !localAgentFingerprintValid(fingerprint) {
+			return nil, fmt.Errorf("invalid local-agent trusted CA fingerprint")
+		}
+		fingerprints = appendLocalAgentFingerprint(fingerprints, fingerprint)
+	}
+	return fingerprints, nil
+}
+
+func writeLocalAgentTrustedCAFingerprints(home string, fingerprints []string) error {
+	parent, err := ensureLocalAgentTLSParent(home)
+	if err != nil {
+		return err
+	}
+	path := localAgentTrustedCAFingerprintLedgerPath(home)
+	if err := localAgentTrustedCAFingerprintLedgerPathSafe(path); err != nil {
+		return err
+	}
+	var canonical []string
+	for _, fingerprint := range fingerprints {
+		if !localAgentFingerprintValid(fingerprint) {
+			return fmt.Errorf("invalid local-agent trusted CA fingerprint")
+		}
+		canonical = appendLocalAgentFingerprint(canonical, fingerprint)
+	}
+	sort.Strings(canonical)
+	data := []byte(strings.Join(canonical, "\n") + "\n")
+	temporary, err := os.CreateTemp(parent, "."+localAgentTrustedCAFingerprintLedgerName+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create local-agent trusted CA ledger temporary file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	cleanup := true
+	defer func() {
+		_ = temporary.Close()
+		if cleanup {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod local-agent trusted CA ledger temporary file: %w", err)
+	}
+	if _, err := temporary.Write(data); err != nil {
+		return fmt.Errorf("write local-agent trusted CA ledger: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync local-agent trusted CA ledger: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close local-agent trusted CA ledger temporary file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace local-agent trusted CA ledger: %w", err)
+	}
+	cleanup = false
+	if err := syncDirectory(parent); err != nil {
+		return fmt.Errorf("sync local-agent trusted CA ledger directory: %w", err)
+	}
+	return nil
+}
+
+func removeLocalAgentTrustedCAFingerprintLedger(home string) error {
+	parent, err := ensureLocalAgentTLSParent(home)
+	if err != nil {
+		return err
+	}
+	path := localAgentTrustedCAFingerprintLedgerPath(home)
+	if err := localAgentTrustedCAFingerprintLedgerPathSafe(path); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove local-agent trusted CA ledger: %w", err)
+	}
+	if err := syncDirectory(parent); err != nil {
+		return fmt.Errorf("sync local-agent trusted CA ledger directory: %w", err)
+	}
+	return nil
+}
+
+func localAgentTrustedCAFingerprintLedgerPathSafe(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect local-agent trusted CA ledger: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refuse symlink for local-agent trusted CA ledger: %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("local-agent trusted CA ledger is not a regular file: %s", path)
+	}
+	return nil
+}
+
+func localAgentCurrentCAFingerprint(material localAgentTLSMaterial) (string, bool, error) {
+	info, err := os.Lstat(material.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect local-agent TLS directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", false, fmt.Errorf("unsafe local-agent TLS directory: %s", material.Dir)
+	}
+	info, err = os.Lstat(material.CACertPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect local-agent CA certificate: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", false, fmt.Errorf("unsafe local-agent CA certificate: %s", material.CACertPath)
+	}
+	fingerprint, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		return "", false, err
+	}
+	return fingerprint, true, nil
+}
+
+func appendLocalAgentFingerprint(fingerprints []string, fingerprint string) []string {
+	fingerprint = strings.ToLower(fingerprint)
+	for _, existing := range fingerprints {
+		if existing == fingerprint {
+			return fingerprints
+		}
+	}
+	return append(fingerprints, fingerprint)
+}
+
+func localAgentFingerprintValid(fingerprint string) bool {
+	if len(fingerprint) != 40 || fingerprint != strings.ToLower(fingerprint) {
+		return false
+	}
+	for _, character := range fingerprint {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func localAgentLoginKeychainPath(home string) string {
