@@ -1231,7 +1231,7 @@ func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 			writeReleaseReminderUpdateError(w, err)
 			return
 		}
-		a.notifyReleaseReminder("extend", reminder, member.Name, "释放提醒已延长（原时间："+oldDueAt+"）")
+		a.notifyReleaseReminder("extend", reminder, member.Name, "释放提醒已延长（原时间："+formatBeijingDisplayTime(oldDueAt)+"）")
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"reminder": reminder}})
 	}
 }

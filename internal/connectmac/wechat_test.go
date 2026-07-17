@@ -23,15 +23,16 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 
 	notifier := WechatNotifier{WebhookURL: server.URL, WebBaseURL: "https://cm.example.com"}
 	result, err := notifier.Send(WechatNotification{
-		Event:       "open",
-		Profile:     "apple-usw2",
-		AppleEmail:  "apple@example.com",
-		Owner:       "User",
-		Operator:    "Admin",
-		HostID:      "h-123",
-		DueAt:       "2026-07-02T08:00:00Z",
-		Management:  true,
-		Description: "打开成功",
+		Event:         "open",
+		Profile:       "apple-usw2",
+		AppleEmail:    "apple@example.com",
+		Owner:         "User",
+		Operator:      "Admin",
+		HostID:        "h-123",
+		HostCreatedAt: "2026-07-16T08:03:24Z",
+		DueAt:         "2026-07-17T16:00:00Z",
+		Management:    true,
+		Description:   "打开成功",
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
@@ -44,9 +45,21 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 	}
 	markdown := got["markdown"].(map[string]interface{})
 	content := markdown["content"].(string)
-	for _, want := range []string{"ConnectMac", "apple-usw2", "apple@example.com", "https://cm.example.com"} {
+	for _, want := range []string{
+		"ConnectMac",
+		"apple-usw2",
+		"apple@example.com",
+		"https://cm.example.com",
+		"Host 创建时间：2026-07-16 16:03:24（北京时间）",
+		"释放提醒时间：2026-07-18 00:00:00（北京时间）",
+	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("content missing %q:\n%s", want, content)
+		}
+	}
+	for _, unexpected := range []string{"T08:03:24Z", "T16:00:00Z"} {
+		if strings.Contains(content, unexpected) {
+			t.Fatalf("content leaked UTC timestamp %q:\n%s", unexpected, content)
 		}
 	}
 }

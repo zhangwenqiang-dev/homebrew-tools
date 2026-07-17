@@ -96,8 +96,8 @@ func (n WechatNotifier) markdown(notification WechatNotification) string {
 	writeWechatField(&b, "负责人", notification.Owner)
 	writeWechatField(&b, "操作人", notification.Operator)
 	writeWechatField(&b, "Host", notification.HostID)
-	writeWechatField(&b, "Host 创建时间", notification.HostCreatedAt)
-	writeWechatField(&b, "释放提醒时间", notification.DueAt)
+	writeWechatField(&b, "Host 创建时间", formatBeijingDisplayTime(notification.HostCreatedAt))
+	writeWechatField(&b, "释放提醒时间", formatBeijingDisplayTime(notification.DueAt))
 	if notification.Management && strings.TrimSpace(n.WebBaseURL) != "" {
 		writeWechatField(&b, "管理页", strings.TrimRight(n.WebBaseURL, "/"))
 	}

@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -512,6 +513,59 @@ func TestAppWebReleaseReminderExtendBoundaryAndCycleReset(t *testing.T) {
 	got := mustReleaseReminder(t, app, "xcode-vnc")
 	if got.ReleaseDueAt != dueAt.Format(time.RFC3339) || got.LastExtendedAt != serverNow.Format(time.RFC3339) || got.Status != ReleaseReminderStatusActive || got.LastNotifiedAt != "" || !got.AutoReleaseEnabled || got.AutoReleaseAt != "" || got.AutoReleaseStartedAt != "" || got.AutoReleaseLastAttemptAt != "" || got.AutoReleaseAttempts != 0 || got.AutoReleaseLastError != "" || got.AutoReleaseState != "" {
 		t.Fatalf("extended reminder = %+v", got)
+	}
+}
+
+func TestAppWebReleaseReminderExtendNotificationUsesBeijingDisplayTime(t *testing.T) {
+	var markdown string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Markdown struct {
+				Content string `json:"content"`
+			} `json:"markdown"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode webhook payload: %v", err)
+		}
+		markdown = payload.Markdown.Content
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+	t.Setenv(envWechatWebhookURL, server.URL)
+
+	app := newWebAutoReleaseTestApp(t)
+	reminder := seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
+	reminder.ReleaseDueAt = "2026-07-17T09:17:07Z"
+	if _, err := app.MemberStore.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("update reminder: %v", err)
+	}
+
+	dueAt := time.Date(2026, 7, 17, 16, 0, 0, 0, time.UTC)
+	rec := postWebExtension(t, &app, "admin", dueAt)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(markdown, "释放提醒已延长（原时间：2026-07-17 17:17:07（北京时间））") {
+		t.Fatalf("notification description = %q", markdown)
+	}
+	if strings.Contains(markdown, "T09:17:07Z") {
+		t.Fatalf("notification description leaked UTC timestamp: %q", markdown)
+	}
+
+	var response struct {
+		Data struct {
+			Reminder ReleaseReminder `json:"reminder"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	wantDueAt := dueAt.Format(time.RFC3339)
+	if response.Data.Reminder.ReleaseDueAt != wantDueAt {
+		t.Fatalf("response release_due_at = %q, want %q", response.Data.Reminder.ReleaseDueAt, wantDueAt)
+	}
+	if persisted := mustReleaseReminder(t, app, reminder.ProfileName); persisted.ReleaseDueAt != wantDueAt {
+		t.Fatalf("persisted release_due_at = %q, want %q", persisted.ReleaseDueAt, wantDueAt)
 	}
 }
 
