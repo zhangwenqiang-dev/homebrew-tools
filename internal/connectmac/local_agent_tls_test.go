@@ -2,10 +2,19 @@ package connectmac
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"math/big"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -196,6 +205,272 @@ func TestLocalAgentTLSLoadRejectsExpiredServerCertificate(t *testing.T) {
 	}
 }
 
+func TestLocalAgentTLSCAConstraintsRejectArbitraryNamesAndIntermediates(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := parseLocalAgentTLSCertificate(t, material.CACertPath)
+	if !ca.MaxPathLenZero || !ca.PermittedDNSDomainsCritical || !equalStrings(ca.PermittedDNSDomains, []string{"localhost"}) {
+		t.Fatalf("unexpected CA constraints: MaxPathLenZero=%v critical=%v DNS=%#v", ca.MaxPathLenZero, ca.PermittedDNSDomainsCritical, ca.PermittedDNSDomains)
+	}
+	if !hasLocalAgentTLSIPConstraint(ca.PermittedIPRanges, "127.0.0.1/32") || !hasLocalAgentTLSIPConstraint(ca.PermittedIPRanges, "::1/128") || len(ca.PermittedIPRanges) != 2 {
+		t.Fatalf("unexpected CA IP constraints: %#v", ca.PermittedIPRanges)
+	}
+
+	caKey, err := readLocalAgentTLSECDSAKey(material.CAKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbitraryLeaf, arbitraryKey := createLocalAgentTLSTestCertificate(t, localAgentTLSTestNow, ca, caKey, false, "example.com")
+	assertLocalAgentTLSVerificationFails(t, arbitraryLeaf, ca, nil, localAgentTLSTestNow, "example.com")
+
+	intermediate, intermediateKey := createLocalAgentTLSTestCertificate(t, localAgentTLSTestNow, ca, caKey, true, "")
+	leaf, _ := createLocalAgentTLSTestCertificate(t, localAgentTLSTestNow, intermediate, intermediateKey, false, "localhost")
+	pool := x509.NewCertPool()
+	pool.AddCert(intermediate)
+	assertLocalAgentTLSVerificationFails(t, leaf, ca, pool, localAgentTLSTestNow, "localhost")
+	_ = arbitraryKey
+}
+
+func TestLocalAgentTLSRollsBackFailedDirectoryReplacement(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readLocalAgentTLSFiles(t, material)
+	localAgentTLSTransactionHook = func(stage string) error {
+		if stage == "after-backup" {
+			return errors.New("injected replacement failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { localAgentTLSTransactionHook = nil })
+	if _, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0)); err == nil {
+		t.Fatal("expected injected directory replacement failure")
+	}
+	localAgentTLSTransactionHook = nil
+	after := readLocalAgentTLSFiles(t, material)
+	for path, want := range before {
+		if got := after[path]; !bytes.Equal(got, want) {
+			t.Fatalf("rollback changed %s", path)
+		}
+	}
+	if _, err := loadLocalAgentTLS(home, localAgentTLSTestNow); err != nil {
+		t.Fatalf("rolled back material is invalid: %v", err)
+	}
+}
+
+func TestLocalAgentTLSRecoversValidBackup(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := material.Dir + ".backup"
+	if err := os.Rename(material.Dir, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(material.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(material.ServerCertPath, []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("recovering the valid backup must report changed")
+	}
+	if _, err := loadLocalAgentTLS(home, localAgentTLSTestNow); err != nil {
+		t.Fatalf("recovered backup is invalid: %v", err)
+	}
+}
+
+func TestLocalAgentTLSConcurrentEnsureProducesOneValidSet(t *testing.T) {
+	home := t.TempDir()
+	const callers = 8
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var group sync.WaitGroup
+	for range callers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+			errs <- err
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := loadLocalAgentTLS(home, localAgentTLSTestNow); err != nil {
+		t.Fatalf("concurrent ensure left invalid material: %v", err)
+	}
+}
+
+func TestLocalAgentTLSRepairsModesBeforeReuse(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readLocalAgentTLSFiles(t, material)
+	if err := os.Chmod(material.CAKeyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(material.ServerKeyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("mode repair must report changed")
+	}
+	assertLocalAgentTLSModes(t, material)
+	for path, want := range before {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("mode repair changed %s", path)
+		}
+	}
+}
+
+func TestLocalAgentTLSPropagatesUnexpectedFilesystemErrors(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(material.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(material.Dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := ensureLocalAgentTLS(home, localAgentTLSTestNow); err == nil || changed {
+		t.Fatalf("unexpected filesystem error must propagate without regeneration: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestLocalAgentTLSRejectsManagedPathSymlink(t *testing.T) {
+	for _, name := range []string{"connectmac", "tls", "staging", "backup"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			target := t.TempDir()
+			parent := filepath.Join(home, ".connectmac", "local-agent")
+			path := filepath.Join(home, ".connectmac")
+			if name != "connectmac" {
+				if err := os.MkdirAll(parent, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				path = filepath.Join(parent, "tls")
+				if name == "staging" {
+					path += ".staging"
+				}
+				if name == "backup" {
+					path += ".backup"
+				}
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Skipf("symlink creation unavailable: %v", err)
+			}
+			if _, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow); err == nil {
+				t.Fatal("managed path symlink must be rejected")
+			}
+			if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+				t.Fatalf("symlink target was modified: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestLocalAgentTLSDoesNotReuseCAThatCannotIssueFullServerLifetime(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caBefore, err := os.ReadFile(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nearExpiry := localAgentTLSTestNow.AddDate(9, 0, 0)
+	_, changed, err := ensureLocalAgentTLS(home, nearExpiry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("CA without a full server lifetime remaining must rotate")
+	}
+	caAfter, err := os.ReadFile(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(caAfter, caBefore) {
+		t.Fatal("near-expiry CA was reused")
+	}
+	leaf := parseLocalAgentTLSCertificate(t, material.ServerCertPath)
+	ca := parseLocalAgentTLSCertificate(t, material.CACertPath)
+	if leaf.NotAfter.After(ca.NotAfter) {
+		t.Fatalf("leaf expires after issuer: leaf=%s CA=%s", leaf.NotAfter, ca.NotAfter)
+	}
+}
+
+func TestLocalAgentTLSServerRenewalBoundary(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(material.ServerCertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, -1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("server with more than 30 days remaining must be reused")
+	}
+	after, err := os.ReadFile(material.ServerCertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("server renewed before the 30-day boundary")
+	}
+}
+
+func TestLocalAgentTLSPKCS8ParseErrorIsReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "key.pem")
+	der := []byte{1, 2, 3}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, want := x509.ParsePKCS8PrivateKey(der)
+	_, err := readLocalAgentTLSECDSAKey(path)
+	if err == nil || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("key parse error = %v, want PKCS#8 error %v", err, want)
+	}
+}
+
 func assertLocalAgentTLSModes(t *testing.T, material localAgentTLSMaterial) {
 	t.Helper()
 	assertLocalAgentTLSMode(t, material.Dir, 0o700)
@@ -286,4 +561,64 @@ func readLocalAgentTLSFiles(t *testing.T, material localAgentTLSMaterial) map[st
 		files[path] = data
 	}
 	return files
+}
+
+func hasLocalAgentTLSIPConstraint(ranges []*net.IPNet, want string) bool {
+	for _, ipRange := range ranges {
+		if ipRange.String() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func equalStrings(got, want []string) bool {
+	return len(got) == len(want) && (len(got) == 0 || got[0] == want[0])
+}
+
+func createLocalAgentTLSTestCertificate(t *testing.T, now time.Time, parent *x509.Certificate, parentKey *ecdsa.PrivateKey, isCA bool, dnsName string) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     now.AddDate(0, 1, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	if isCA {
+		template.IsCA = true
+		template.BasicConstraintsValid = true
+		template.KeyUsage |= x509.KeyUsageCertSign
+	} else {
+		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		template.DNSNames = []string{dnsName}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, parentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return certificate, key
+}
+
+func assertLocalAgentTLSVerificationFails(t *testing.T, certificate, ca *x509.Certificate, intermediates *x509.CertPool, now time.Time, dnsName string) {
+	t.Helper()
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	if _, err := certificate.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		CurrentTime:   now,
+		DNSName:       dnsName,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err == nil {
+		t.Fatal("certificate verification unexpectedly succeeded")
+	}
 }
