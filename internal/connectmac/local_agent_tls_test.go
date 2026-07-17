@@ -9,12 +9,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -234,6 +236,53 @@ func TestLocalAgentTLSCAConstraintsRejectArbitraryNamesAndIntermediates(t *testi
 	_ = arbitraryKey
 }
 
+func TestLocalAgentTLSRejectsClientAuthOnlyStagedCA(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readLocalAgentTLSFiles(t, material)
+	fingerprintBefore, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localAgentTLSStageHook = func(staged localAgentTLSMaterial) error {
+		ca := createLocalAgentTLSClientAuthCA(t, localAgentTLSTestNow.AddDate(0, 11, 0))
+		serverCertificate, serverKey, err := generateLocalAgentTLSServer(ca, localAgentTLSTestNow.AddDate(0, 11, 0))
+		if err != nil {
+			return err
+		}
+		caCertificatePEM, caKeyPEM, err := encodeLocalAgentTLSCA(ca)
+		if err != nil {
+			return err
+		}
+		serverCertificatePEM, serverKeyPEM, err := encodeLocalAgentTLSServer(serverCertificate, serverKey)
+		if err != nil {
+			return err
+		}
+		return writeLocalAgentTLSFiles(staged, caCertificatePEM, caKeyPEM, serverCertificatePEM, serverKeyPEM)
+	}
+	t.Cleanup(func() { localAgentTLSStageHook = nil })
+	if _, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0)); err == nil {
+		t.Fatal("ensure accepted a staged ClientAuth-only CA")
+	}
+	localAgentTLSStageHook = nil
+	after := readLocalAgentTLSFiles(t, material)
+	for path, want := range before {
+		if got := after[path]; !bytes.Equal(got, want) {
+			t.Fatalf("rejected staged CA changed %s", path)
+		}
+	}
+	fingerprintAfter, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprintAfter != fingerprintBefore {
+		t.Fatalf("rejected staged CA changed fingerprint: before=%s after=%s", fingerprintBefore, fingerprintAfter)
+	}
+}
+
 func TestLocalAgentTLSRollsBackFailedDirectoryReplacement(t *testing.T) {
 	home := t.TempDir()
 	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
@@ -291,6 +340,92 @@ func TestLocalAgentTLSRecoversValidBackup(t *testing.T) {
 	}
 }
 
+func TestLocalAgentTLSLoadRecoversValidBackup(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := material.Dir + ".backup"
+	if err := os.Rename(material.Dir, backup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadLocalAgentTLS(home, localAgentTLSTestNow); err != nil {
+		t.Fatalf("loadLocalAgentTLS did not recover a valid backup: %v", err)
+	}
+	if _, err := os.Stat(material.Dir); err != nil {
+		t.Fatalf("active TLS directory was not restored: %v", err)
+	}
+	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("TLS backup was not consumed: %v", err)
+	}
+}
+
+func TestLocalAgentTLSLoadWaitsForRenewalTransaction(t *testing.T) {
+	home := t.TempDir()
+	_, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	continueTransaction := make(chan struct{})
+	localAgentTLSTransactionHook = func(stage string) error {
+		if stage == "after-backup" {
+			close(entered)
+			<-continueTransaction
+		}
+		return nil
+	}
+	t.Cleanup(func() { localAgentTLSTransactionHook = nil })
+	ensureDone := make(chan error, 1)
+	go func() {
+		_, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0))
+		ensureDone <- err
+	}()
+	<-entered
+	loadDone := make(chan error, 1)
+	go func() {
+		_, err := loadLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0))
+		loadDone <- err
+	}()
+	select {
+	case err := <-loadDone:
+		t.Fatalf("load returned during an active replacement: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(continueTransaction)
+	if err := <-ensureDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-loadDone; err != nil {
+		t.Fatalf("load after renewal: %v", err)
+	}
+}
+
+func TestLocalAgentTLSStagingDirectoryModeIgnoresUmask(t *testing.T) {
+	home := t.TempDir()
+	_, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousUmask := syscall.Umask(0o777)
+	t.Cleanup(func() { syscall.Umask(previousUmask) })
+	localAgentTLSStageHook = func(staged localAgentTLSMaterial) error {
+		info, err := os.Stat(staged.Dir)
+		if err != nil {
+			return err
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			return fmt.Errorf("staging mode = %o, want 700", got)
+		}
+		return errors.New("stop after staging mode check")
+	}
+	t.Cleanup(func() { localAgentTLSStageHook = nil })
+	if _, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow.AddDate(0, 11, 0)); err == nil {
+		t.Fatal("expected staging hook to stop replacement")
+	}
+}
+
 func TestLocalAgentTLSConcurrentEnsureProducesOneValidSet(t *testing.T) {
 	home := t.TempDir()
 	const callers = 8
@@ -319,17 +454,21 @@ func TestLocalAgentTLSConcurrentEnsureProducesOneValidSet(t *testing.T) {
 	}
 }
 
-func TestLocalAgentTLSRepairsModesBeforeReuse(t *testing.T) {
+func TestLocalAgentTLSRepairsUnreadableKeyBeforeReuse(t *testing.T) {
 	home := t.TempDir()
 	material, _, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := readLocalAgentTLSFiles(t, material)
-	if err := os.Chmod(material.CAKeyPath, 0o644); err != nil {
+	fingerprintBefore, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(material.ServerKeyPath, 0o644); err != nil {
+	if err := os.Chmod(material.CAKeyPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(material.ServerKeyPath, 0o000); err != nil {
 		t.Fatal(err)
 	}
 	_, changed, err := ensureLocalAgentTLS(home, localAgentTLSTestNow)
@@ -348,6 +487,13 @@ func TestLocalAgentTLSRepairsModesBeforeReuse(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("mode repair changed %s", path)
 		}
+	}
+	fingerprintAfter, err := localAgentCAFingerprint(material.CACertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprintAfter != fingerprintBefore {
+		t.Fatalf("unreadable-key repair rotated CA: before=%s after=%s", fingerprintBefore, fingerprintAfter)
 	}
 }
 
@@ -621,4 +767,43 @@ func assertLocalAgentTLSVerificationFails(t *testing.T, certificate, ca *x509.Ce
 	}); err == nil {
 		t.Fatal("certificate verification unexpectedly succeeded")
 	}
+}
+
+func createLocalAgentTLSClientAuthCA(t *testing.T, now time.Time) localAgentTLSCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ipv4Range, err := net.ParseCIDR("127.0.0.1/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ipv6Range, err := net.ParseCIDR("::1/128")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:                big.NewInt(2),
+		Subject:                     pkix.Name{CommonName: "Client-only test CA"},
+		NotBefore:                   now.Add(-time.Minute),
+		NotAfter:                    now.AddDate(2, 0, 0),
+		IsCA:                        true,
+		BasicConstraintsValid:       true,
+		MaxPathLenZero:              true,
+		KeyUsage:                    x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:                 []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         []string{"localhost"},
+		PermittedIPRanges:           []*net.IPNet{ipv4Range, ipv6Range},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return localAgentTLSCA{certificate: certificate, key: key}
 }

@@ -26,6 +26,9 @@ var (
 
 	// localAgentTLSTransactionHook makes transaction rollback deterministic in tests.
 	localAgentTLSTransactionHook func(string) error
+
+	// localAgentTLSStageHook permits deterministic staged-set validation tests.
+	localAgentTLSStageHook func(localAgentTLSMaterial) error
 )
 
 type localAgentTLSMaterial struct {
@@ -99,20 +102,46 @@ func ensureLocalAgentTLS(home string, now time.Time) (localAgentTLSMaterial, boo
 
 func loadLocalAgentTLS(home string, now time.Time) (localAgentTLSMaterial, error) {
 	material := localAgentTLSPaths(home)
-	if err := checkLocalAgentTLSReadPaths(home, material); err != nil {
-		return material, err
-	}
-	ca, err := loadLocalAgentTLSCA(material, now)
+	parent, err := ensureLocalAgentTLSParent(home)
 	if err != nil {
 		return material, err
 	}
-	if !localAgentTLSCAHasFullServerLifetime(ca, now) {
-		return material, invalidLocalAgentTLSError("local-agent CA cannot issue a full server certificate lifetime")
+	release, err := lockLocalAgentTLS(parent)
+	if err != nil {
+		return material, err
 	}
-	if _, err := validateLocalAgentTLSServerCertificate(material, ca, now); err != nil {
+	defer release()
+	if _, err := recoverLocalAgentTLS(material, now); err != nil {
+		return material, err
+	}
+	return loadLocalAgentTLSUnlocked(home, material, now)
+}
+
+func loadLocalAgentTLSUnlocked(home string, material localAgentTLSMaterial, now time.Time) (localAgentTLSMaterial, error) {
+	if err := checkLocalAgentTLSReadPaths(home, material); err != nil {
+		return material, err
+	}
+	if err := validateLocalAgentTLSSet(material, now); err != nil {
 		return material, err
 	}
 	return material, nil
+}
+
+func validateLocalAgentTLSSet(material localAgentTLSMaterial, now time.Time) error {
+	if err := checkLocalAgentTLSMaterialPaths(material); err != nil {
+		return err
+	}
+	ca, err := loadLocalAgentTLSCA(material, now)
+	if err != nil {
+		return err
+	}
+	if !localAgentTLSCAHasFullServerLifetime(ca, now) {
+		return invalidLocalAgentTLSError("local-agent CA cannot issue a full server certificate lifetime")
+	}
+	if _, err := validateLocalAgentTLSServerCertificate(material, ca, now); err != nil {
+		return err
+	}
+	return nil
 }
 
 func localAgentCAFingerprint(path string) (string, error) {
@@ -340,7 +369,7 @@ func replaceLocalAgentTLSWithNewCA(material localAgentTLSMaterial, now time.Time
 	if err != nil {
 		return material, false, err
 	}
-	if err := replaceLocalAgentTLSMaterial(material, caCertificatePEM, caKeyPEM, serverCertificatePEM, serverKeyPEM); err != nil {
+	if err := replaceLocalAgentTLSMaterial(material, caCertificatePEM, caKeyPEM, serverCertificatePEM, serverKeyPEM, now); err != nil {
 		return material, false, err
 	}
 	return material, true, nil
@@ -363,13 +392,13 @@ func replaceLocalAgentTLSServer(material localAgentTLSMaterial, ca localAgentTLS
 	if err != nil {
 		return material, false, err
 	}
-	if err := replaceLocalAgentTLSMaterial(material, caCertificatePEM, caKeyPEM, serverCertificatePEM, serverKeyPEM); err != nil {
+	if err := replaceLocalAgentTLSMaterial(material, caCertificatePEM, caKeyPEM, serverCertificatePEM, serverKeyPEM, now); err != nil {
 		return material, false, err
 	}
 	return material, true, nil
 }
 
-func replaceLocalAgentTLSMaterial(material localAgentTLSMaterial, caCertificate, caKey, serverCertificate, serverKey []byte) error {
+func replaceLocalAgentTLSMaterial(material localAgentTLSMaterial, caCertificate, caKey, serverCertificate, serverKey []byte, now time.Time) error {
 	parent := filepath.Dir(material.Dir)
 	staging := material.Dir + ".staging"
 	backup := material.Dir + ".backup"
@@ -386,14 +415,26 @@ func replaceLocalAgentTLSMaterial(material localAgentTLSMaterial, caCertificate,
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		return fmt.Errorf("create local-agent TLS staging directory: %w", err)
 	}
+	if err := os.Chmod(staging, 0o700); err != nil {
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("chmod local-agent TLS staging directory: %w", err)
+	}
 	staged := localAgentTLSPathsForDir(staging)
 	if err := writeLocalAgentTLSFiles(staged, caCertificate, caKey, serverCertificate, serverKey); err != nil {
+		_ = os.RemoveAll(staging)
+		return err
+	}
+	if err := runLocalAgentTLSStageHook(staged); err != nil {
 		_ = os.RemoveAll(staging)
 		return err
 	}
 	if err := syncDirectory(staging); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("sync local-agent TLS staging directory: %w", err)
+	}
+	if err := validateLocalAgentTLSSet(staged, now); err != nil {
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("validate staged local-agent TLS material: %w", err)
 	}
 
 	activeExists, err := localAgentTLSPathExists(material.Dir)
@@ -453,6 +494,13 @@ func runLocalAgentTLSTransactionHook(stage string) error {
 		return nil
 	}
 	return localAgentTLSTransactionHook(stage)
+}
+
+func runLocalAgentTLSStageHook(material localAgentTLSMaterial) error {
+	if localAgentTLSStageHook == nil {
+		return nil
+	}
+	return localAgentTLSStageHook(material)
 }
 
 func writeLocalAgentTLSFiles(material localAgentTLSMaterial, caCertificate, caKey, serverCertificate, serverKey []byte) error {
@@ -539,6 +587,9 @@ func validateLocalAgentTLSCA(certificate *x509.Certificate, key *ecdsa.PrivateKe
 	if certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
 		return invalidLocalAgentTLSError("local-agent CA certificate cannot sign certificates")
 	}
+	if !localAgentTLSCAUsageValid(certificate) {
+		return invalidLocalAgentTLSError("local-agent CA certificate has incompatible extended key usage")
+	}
 	if !localAgentTLSCAConstraintsValid(certificate) {
 		return invalidLocalAgentTLSError("local-agent CA certificate has invalid name constraints")
 	}
@@ -549,6 +600,18 @@ func validateLocalAgentTLSCA(certificate *x509.Certificate, key *ecdsa.PrivateKe
 		return invalidLocalAgentTLSError("verify local-agent CA self-signature: %v", err)
 	}
 	return nil
+}
+
+func localAgentTLSCAUsageValid(certificate *x509.Certificate) bool {
+	if len(certificate.UnknownExtKeyUsage) != 0 {
+		return false
+	}
+	for _, usage := range certificate.ExtKeyUsage {
+		if usage != x509.ExtKeyUsageAny && usage != x509.ExtKeyUsageServerAuth {
+			return false
+		}
+	}
+	return true
 }
 
 func localAgentTLSCAConstraintsValid(certificate *x509.Certificate) bool {
