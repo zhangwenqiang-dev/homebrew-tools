@@ -151,7 +151,6 @@
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.danger { background: var(--danger-quiet); border-color: #fecdca; color: var(--danger); }
     button:disabled { opacity: .55; cursor: default; }
-    body.local-agent-off .local-action { display: none !important; }
     .local-agent-status { font-size: 12px; color: var(--muted); }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th, td {
@@ -993,7 +992,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { url: "http://127.0.0.1:18765", online: false }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const transferMissingGraceMS = 10000;
     const transferMissingReloadDelayMS = 3000;
     const transferMissingMaxReloads = 4;
@@ -1089,6 +1088,9 @@
     }
 
     async function localAgentAPI(path, options = {}) {
+      if (!state.localAgent.online || !state.localAgent.url) {
+        throw new Error(state.localAgent.errorReason || "本机代理未连接，请运行 cm local-agent install");
+      }
       const res = await fetch(state.localAgent.url + path, {
         headers: { "Content-Type": "application/json" },
         ...options
@@ -1102,14 +1104,49 @@
       return body;
     }
 
+    async function probeLocalAgent(url, timeoutMs = 1200) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url + "/health", {
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          signal: controller.signal
+        });
+        const body = await res.json();
+        if (!res.ok || !body?.ok) throw new Error("invalid local-agent health response");
+        return true;
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
+    function localAgentEndpointLocked() {
+      if (state.terminal.socket && state.terminal.socket.readyState !== WebSocket.CLOSED) return true;
+      return Object.values(state.syncJobs).some((job) => syncJobActive(job));
+    }
+
     async function detectLocalAgent(options = {}) {
       const wasOnline = state.localAgent.online;
-      try {
-        await localAgentAPI("/health");
-        state.localAgent.online = true;
-      } catch (err) {
-        state.localAgent.online = false;
+      const selected = state.localAgent.url;
+      const locked = localAgentEndpointLocked();
+      const candidates = selected
+        ? [selected, ...(locked ? [] : [state.localAgent.secureURL, state.localAgent.legacyURL].filter((url) => url !== selected))]
+        : [state.localAgent.secureURL, state.localAgent.legacyURL];
+      let connectedURL = "";
+      for (const candidate of candidates) {
+        try {
+          if (await probeLocalAgent(candidate)) {
+            connectedURL = candidate;
+            break;
+          }
+        } catch (err) {
+          // Try the next migration endpoint.
+        }
       }
+      state.localAgent.url = connectedURL || (locked ? selected : "");
+      state.localAgent.online = !!connectedURL;
+      state.localAgent.errorReason = connectedURL ? "" : "本机代理未连接，请运行 cm local-agent install";
       renderLocalAgentStatus();
       renderProfiles();
       renderSelected();
@@ -1131,7 +1168,7 @@
 
     function renderLocalAgentStatus() {
       document.body.classList.toggle("local-agent-off", !state.localAgent.online);
-      $("localAgentStatus").textContent = state.localAgent.online ? "本机代理已连接" : "本机代理未启动";
+      $("localAgentStatus").textContent = state.localAgent.online ? "本机代理已连接" : (state.localAgent.errorReason || "本机代理未连接，请运行 cm local-agent install");
     }
 
     function selectedProfileYAML(profileName) {
@@ -1527,8 +1564,9 @@
       $("profiles").innerHTML = rows.length ? rows.map((p) => {
         const status = state.statuses[p.name];
         const ready = !!status?.ready;
-        const readyAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能执行该操作。\"";
-        const vncAttrs = ready ? "" : " disabled title=\"Mac 未 ready，不能打开 VNC。\"";
+        const agentReady = state.localAgent.online;
+        const readyAttrs = ready && agentReady ? "" : " disabled title=\"" + escapeAttr(!agentReady ? "本机代理未连接，请运行 cm local-agent install" : "Mac 未 ready，不能执行该操作。") + "\"";
+        const vncAttrs = ready && agentReady ? "" : " disabled title=\"" + escapeAttr(!agentReady ? "本机代理未连接，请运行 cm local-agent install" : "Mac 未 ready，不能打开 VNC。") + "\"";
         return "<tr class=\"" + (p.name === state.selected ? "selected" : "") + "\">" +
           "<td data-label=\"Profile\"><div class=\"name\">" + escapeHTML(p.name) + "</div><div class=\"muted\">" + escapeHTML(p.description || "-") + "</div></td>" +
           "<td data-label=\"Apple\">" + escapeHTML(p.apple_email || "-") + "</td>" +
