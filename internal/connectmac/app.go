@@ -52,7 +52,7 @@ type App struct {
 	WebShutdownTimeout        time.Duration
 	WebWorkerShutdownTimeout  time.Duration
 	LocalAgentSecurityCommand func(context.Context, ...string) ([]byte, error)
-	LocalAgentServiceCommand  func(context.Context, ...string) error
+	LocalAgentServiceCommand  func(context.Context, ...string) ([]byte, error)
 }
 
 func NewApp(out, err io.Writer) App {
@@ -78,8 +78,8 @@ func NewApp(out, err io.Writer) App {
 		LocalAgentSecurityCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "security", args...).CombinedOutput()
 		},
-		LocalAgentServiceCommand: func(ctx context.Context, args ...string) error {
-			return exec.CommandContext(ctx, "launchctl", args...).Run()
+		LocalAgentServiceCommand: func(ctx context.Context, args ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
 		},
 	}
 }

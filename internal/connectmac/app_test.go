@@ -977,12 +977,40 @@ func TestLocalAgentLaunchAgentPlist(t *testing.T) {
 }
 
 func TestLocalAgentEndpoint(t *testing.T) {
-	opts := localAgentOptions{Host: "127.0.0.1", Port: 18765}
-	if got := localAgentEndpoint(opts, true, "/health"); got != "https://127.0.0.1:18765/health" {
-		t.Fatalf("HTTPS endpoint = %q", got)
+	for _, tt := range []struct {
+		host string
+		want string
+	}{
+		{host: "localhost", want: "localhost:29876"},
+		{host: "127.0.0.1", want: "127.0.0.1:29876"},
+		{host: "::1", want: "[::1]:29876"},
+	} {
+		t.Run(tt.host, func(t *testing.T) {
+			opts := localAgentOptions{Host: tt.host, Port: 29876}
+			if got := localAgentEndpoint(opts, true, "/health"); got != "https://"+tt.want+"/health" {
+				t.Fatalf("HTTPS endpoint = %q", got)
+			}
+			if got := localAgentEndpoint(opts, false, "activity"); got != "http://"+tt.want+"/activity" {
+				t.Fatalf("HTTP endpoint = %q", got)
+			}
+		})
 	}
-	if got := localAgentEndpoint(opts, false, "activity"); got != "http://127.0.0.1:18765/activity" {
-		t.Fatalf("HTTP endpoint = %q", got)
+}
+
+func TestLocalAgentHTTPClientsHaveDeadlines(t *testing.T) {
+	home := t.TempDir()
+	material, _, err := ensureLocalAgentTLS(home, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range []*http.Client{localAgentHTTPClient(), localAgentHTTPSClient(material)} {
+		if client.Timeout != localAgentClientTimeout {
+			t.Fatalf("client timeout = %s", client.Timeout)
+		}
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok || transport.ResponseHeaderTimeout != localAgentProbeTimeout {
+			t.Fatalf("client transport = %#v", client.Transport)
+		}
 	}
 }
 
@@ -1162,7 +1190,7 @@ func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
 		}
 	}()
 	var launchCalls [][]string
-	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) error {
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		launchCalls = append(launchCalls, append([]string(nil), args...))
 		switch args[0] {
 		case "bootout":
@@ -1179,7 +1207,7 @@ func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
 			}
 			serverStop = stop
 		}
-		return nil
+		return nil, nil
 	}
 	securityCalls := 0
 	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
@@ -1212,7 +1240,7 @@ func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
 	}
 
 	failing := testApp(&out, &errOut, home)
-	failing.LocalAgentServiceCommand = func(_ context.Context, _ ...string) error { return nil }
+	failing.LocalAgentServiceCommand = func(_ context.Context, _ ...string) ([]byte, error) { return nil, nil }
 	failing.LocalAgentSecurityCommand = app.LocalAgentSecurityCommand
 	out.Reset()
 	errOut.Reset()
@@ -1238,9 +1266,9 @@ func TestLocalAgentInstallKeychainCancellationKeepsExistingServiceRunning(t *tes
 	app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
 		return nil, context.Canceled
 	}
-	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) error {
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		t.Fatalf("launchctl must not run after keychain cancellation: %#v", args)
-		return nil
+		return nil, nil
 	}
 
 	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
@@ -1252,6 +1280,211 @@ func TestLocalAgentInstallKeychainCancellationKeepsExistingServiceRunning(t *tes
 	}
 	if string(got) != original {
 		t.Fatalf("plist changed after cancellation:\n%s", got)
+	}
+}
+
+func TestLocalAgentInstallLaunchctlFailuresAreAuthoritative(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		bootout      []byte
+		bootErr      error
+		bootstrap    []byte
+		bootstrapErr error
+		kickstart    []byte
+		kickstartErr error
+		want         string
+	}{
+		{
+			name:         "known missing service permits bootstrap",
+			bootout:      []byte(`Could not find service "com.connectmac.local-agent" in domain for user gui: 501`),
+			bootErr:      errors.New("exit status 3"),
+			bootstrap:    []byte("operation not permitted"),
+			bootstrapErr: errors.New("exit status 1"),
+			want:         "bootstrap launch agent",
+		},
+		{
+			name:         "kickstart failure is not ignored",
+			bootstrap:    []byte(""),
+			kickstart:    []byte("Could not kickstart service: Operation not permitted"),
+			kickstartErr: errors.New("exit status 1"),
+			want:         "start launch agent",
+		},
+		{
+			name:    "bootout permission failure is not ignored",
+			bootout: []byte("Boot-out failed: Operation not permitted"),
+			bootErr: errors.New("exit status 1"),
+			want:    "stop launch agent",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, home)
+			app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) { return nil, nil }
+			var commands []string
+			app.LocalAgentServiceCommand = func(_ context.Context, args ...string) ([]byte, error) {
+				commands = append(commands, args[0])
+				switch args[0] {
+				case "bootout":
+					return tt.bootout, tt.bootErr
+				case "bootstrap":
+					return tt.bootstrap, tt.bootstrapErr
+				case "kickstart":
+					return tt.kickstart, tt.kickstartErr
+				default:
+					t.Fatalf("unexpected launchctl command: %#v", args)
+					return nil, nil
+				}
+			}
+
+			if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentUnusedOptions(t)); code != 1 {
+				t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+			}
+			if !strings.Contains(errOut.String(), tt.want) {
+				t.Fatalf("install error = %q", errOut.String())
+			}
+			if tt.name == "bootout permission failure is not ignored" && len(commands) != 1 {
+				t.Fatalf("launchctl commands = %#v", commands)
+			}
+		})
+	}
+}
+
+func TestLocalAgentLaunchServiceNotLoadedClassification(t *testing.T) {
+	for _, tt := range []struct {
+		output string
+		want   bool
+	}{
+		{output: `Could not find service "com.connectmac.local-agent" in domain for user gui: 501`, want: true},
+		{output: "Boot-out failed: 3: No such process", want: true},
+		{output: "Service is not loaded.", want: true},
+		{output: "Could not find service configuration: Operation not permitted", want: false},
+		{output: "Service is not loaded because access was denied", want: false},
+		{output: "Boot-out failed: 5: Input/output error", want: false},
+	} {
+		t.Run(tt.output, func(t *testing.T) {
+			if got := localAgentLaunchServiceNotLoaded([]byte(tt.output)); got != tt.want {
+				t.Fatalf("classified %q as %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLocalAgentInstallRejectsOldHealthyVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	opts := localAgentUnusedOptions(t)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Version = "new-version"
+	app.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) { return nil, nil }
+	var stop func()
+	defer func() {
+		if stop != nil {
+			stop()
+		}
+	}()
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "bootout", "bootstrap":
+			return nil, nil
+		case "kickstart":
+			old := app
+			old.Version = "old-version"
+			_, stop = startLocalAgentTLSServer(t, net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)), localAgentTLSPaths(home), old.newLocalAgentHandler())
+			return nil, nil
+		default:
+			t.Fatalf("unexpected launchctl command: %#v", args)
+			return nil, nil
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	if code := app.installLocalAgentLaunchAgent(ctx, opts); code != 1 {
+		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if strings.Contains(out.String(), "ready at") || !strings.Contains(errOut.String(), "health check failed") {
+		t.Fatalf("install output = %q, error = %q", out.String(), errOut.String())
+	}
+}
+
+func TestLocalAgentInstallHostMigrationAndRejection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", localAgentOptions{Host: "127.0.0.9", Port: 29876}, "/tmp/out", "/tmp/err"))
+	opts, err := resolveInstalledLocalAgentOptions(localAgentOptions{Host: "127.0.0.1", Port: 18765})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	migrated, err := app.normalizeLocalAgentInstallOptions(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Host != "127.0.0.1" || migrated.Port != 29876 || !strings.Contains(out.String(), "migrating local-agent host 127.0.0.9") {
+		t.Fatalf("migration = %#v, output = %q", migrated, out.String())
+	}
+
+	for _, host := range []string{"127.0.0.9", "192.0.2.10"} {
+		t.Run(host, func(t *testing.T) {
+			var rejectedOut, rejectedErr bytes.Buffer
+			rejected := testApp(&rejectedOut, &rejectedErr, home)
+			tlsDir := localAgentTLSPaths(home).Dir
+			plistPath, err := ExpandPath(localAgentPlistPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforePlist, err := os.ReadFile(plistPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rejected.LocalAgentSecurityCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+				t.Fatal("security must not run for rejected host")
+				return nil, nil
+			}
+			rejected.LocalAgentServiceCommand = func(_ context.Context, _ ...string) ([]byte, error) {
+				t.Fatal("launchctl must not run for rejected host")
+				return nil, nil
+			}
+			if code := rejected.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: host, Port: 18765, HostExplicit: true}); code != 2 {
+				t.Fatalf("install code = %d, error = %q", code, rejectedErr.String())
+			}
+			if !strings.Contains(rejectedErr.String(), "localhost, 127.0.0.1, or ::1") {
+				t.Fatalf("rejection error = %q", rejectedErr.String())
+			}
+			if _, err := os.Stat(tlsDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("TLS directory changed for rejected host: %v", err)
+			}
+			afterPlist, err := os.ReadFile(plistPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(afterPlist, beforePlist) {
+				t.Fatal("plist changed for rejected host")
+			}
+		})
+	}
+}
+
+func TestLocalAgentProbeTimeoutForHangingServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	started := time.Now()
+	if code := app.statusLocalAgent(context.Background(), localAgentOptionsForURL(t, server.URL)); code != 1 {
+		t.Fatalf("status code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	if elapsed := time.Since(started); elapsed > 2*localAgentProbeTimeout {
+		t.Fatalf("hanging probe took %s", elapsed)
 	}
 }
 
@@ -1502,6 +1735,9 @@ func TestLocalAgentKeychainTrustKeepsLedgerWhenStaleCleanupFails(t *testing.T) {
 	writeFile(t, localAgentTrustedCAFingerprintLedgerPath(home), oldFingerprint+"\n")
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
+	opts := localAgentUnusedOptions(t)
+	stop := configureLocalAgentInstallService(t, &app, home, opts)
+	defer stop()
 	attempt := 0
 	app.LocalAgentSecurityCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		switch args[0] {
@@ -1519,7 +1755,7 @@ func TestLocalAgentKeychainTrustKeepsLedgerWhenStaleCleanupFails(t *testing.T) {
 		}
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	ledger, err := readLocalAgentTrustedCAFingerprints(home)
@@ -1528,7 +1764,7 @@ func TestLocalAgentKeychainTrustKeepsLedgerWhenStaleCleanupFails(t *testing.T) {
 		(ledger[0] != currentFingerprint && ledger[1] != currentFingerprint) {
 		t.Fatalf("ledger after failed cleanup = %#v, err = %v", ledger, err)
 	}
-	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 0 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
 		t.Fatalf("retry install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	currentFingerprint, err = localAgentCAFingerprint(material.CACertPath)
@@ -2113,7 +2349,7 @@ func startLocalAgentTLSServer(t *testing.T, address string, material localAgentT
 func configureLocalAgentInstallService(t *testing.T, app *App, home string, opts localAgentOptions) func() {
 	t.Helper()
 	var stop func()
-	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) error {
+	app.LocalAgentServiceCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "bootout":
 			if stop != nil {
@@ -2123,7 +2359,7 @@ func configureLocalAgentInstallService(t *testing.T, app *App, home string, opts
 		case "kickstart":
 			_, stop = startLocalAgentTLSServer(t, net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port)), localAgentTLSPaths(home), app.newLocalAgentHandler())
 		}
-		return nil
+		return nil, nil
 	}
 	return func() {
 		if stop != nil {

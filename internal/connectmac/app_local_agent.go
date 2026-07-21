@@ -29,6 +29,10 @@ import (
 const localAgentLaunchLabel = "com.connectmac.local-agent"
 const localAgentPlistPath = "~/Library/LaunchAgents/com.connectmac.local-agent.plist"
 
+const localAgentProbeTimeout = 500 * time.Millisecond
+
+const localAgentClientTimeout = time.Second
+
 type localAgentOptions struct {
 	Host         string
 	Port         int
@@ -153,6 +157,13 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 			return 1
 		}
 	}
+	if command == "install" {
+		opts, err = a.normalizeLocalAgentInstallOptions(opts)
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 2
+		}
+	}
 	switch command {
 	case "install":
 		return a.installLocalAgentLaunchAgent(ctx, opts)
@@ -273,6 +284,10 @@ func decodePlistStringArray(decoder *xml.Decoder) ([]string, error) {
 }
 
 func (a App) installLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptions) int {
+	if err := validateLocalAgentTLSInstallHost(opts.Host); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 2
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
@@ -760,11 +775,12 @@ func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
 		return 1
 	}
 	domain := localAgentLaunchDomain()
-	if err := a.runLocalAgentServiceCommand(ctx, "bootstrap", domain, path); err != nil {
-		fmt.Fprintf(a.Out, "launch agent may already be loaded: %v\n", err)
+	if output, err := a.runLocalAgentServiceCommand(ctx, "bootstrap", domain, path); err != nil {
+		fmt.Fprintf(a.Err, "bootstrap launch agent: %s\n", localAgentServiceCommandError(err, output))
+		return 1
 	}
-	if err := a.runLocalAgentServiceCommand(ctx, "kickstart", "-k", domain+"/"+localAgentLaunchLabel); err != nil {
-		fmt.Fprintf(a.Err, "start launch agent: %v\n", err)
+	if output, err := a.runLocalAgentServiceCommand(ctx, "kickstart", "-k", domain+"/"+localAgentLaunchLabel); err != nil {
+		fmt.Fprintf(a.Err, "start launch agent: %s\n", localAgentServiceCommandError(err, output))
 		return 1
 	}
 	fmt.Fprintf(a.Out, "started %s\n", localAgentLaunchLabel)
@@ -784,15 +800,15 @@ func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptio
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
-	err = a.runLocalAgentServiceCommand(ctx, "bootout", localAgentLaunchDomain(), path)
+	output, err := a.runLocalAgentServiceCommand(ctx, "bootout", localAgentLaunchDomain(), path)
 	if err != nil {
 		if drained {
 			a.resumeLocalAgentActivity(opts)
 		}
-		if ignoreMissing {
+		if ignoreMissing && localAgentLaunchServiceNotLoaded(output) {
 			return 0
 		}
-		fmt.Fprintf(a.Err, "stop launch agent: %v\n", err)
+		fmt.Fprintf(a.Err, "stop launch agent: %s\n", localAgentServiceCommandError(err, output))
 		return 1
 	}
 	fmt.Fprintf(a.Out, "stopped %s\n", localAgentLaunchLabel)
@@ -874,9 +890,13 @@ func (a App) guardLocalAgentActivity(ctx context.Context, opts localAgentOptions
 }
 
 func localAgentHTTPClient() *http.Client {
-	return &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	return &http.Client{
+		Timeout:   localAgentClientTimeout,
+		Transport: &http.Transport{ResponseHeaderTimeout: localAgentProbeTimeout},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func localAgentEndpoint(opts localAgentOptions, secure bool, path string) string {
@@ -917,7 +937,10 @@ func localAgentHTTPSClient(material localAgentTLSMaterial) *http.Client {
 		return localAgentHTTPClient()
 	}
 	client := localAgentHTTPClient()
-	client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+	client.Transport = &http.Transport{
+		TLSClientConfig:       &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		ResponseHeaderTimeout: localAgentProbeTimeout,
+	}
 	return client
 }
 
@@ -932,8 +955,10 @@ func (a App) localAgentRequest(ctx context.Context, opts localAgentOptions, meth
 	}
 	secure := tlsInstalled
 	endpoint := localAgentEndpoint(opts, secure, path)
-	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	requestCtx, cancel := context.WithTimeout(ctx, localAgentClientTimeout)
+	request, err := http.NewRequestWithContext(requestCtx, method, endpoint, nil)
 	if err != nil {
+		cancel()
 		return nil, endpoint, err
 	}
 	client := localAgentHTTPClient()
@@ -942,15 +967,44 @@ func (a App) localAgentRequest(ctx context.Context, opts localAgentOptions, meth
 	}
 	response, err := client.Do(request)
 	if err == nil || !secure || !allowLegacyFallback || !localAgentConnectionUnavailable(err) {
-		return response, endpoint, err
+		return localAgentRequestResult(ctx, requestCtx, cancel, response, endpoint, err)
 	}
 	endpoint = localAgentEndpoint(opts, false, path)
-	request, requestErr := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	request, requestErr := http.NewRequestWithContext(requestCtx, method, endpoint, nil)
 	if requestErr != nil {
+		cancel()
 		return nil, endpoint, requestErr
 	}
 	response, err = localAgentHTTPClient().Do(request)
-	return response, endpoint, err
+	return localAgentRequestResult(ctx, requestCtx, cancel, response, endpoint, err)
+}
+
+type localAgentCancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (body localAgentCancelReadCloser) Close() error {
+	err := body.ReadCloser.Close()
+	body.cancel()
+	return err
+}
+
+func localAgentRequestResult(parent, requestCtx context.Context, cancel context.CancelFunc, response *http.Response, endpoint string, err error) (*http.Response, string, error) {
+	if err == nil {
+		response.Body = localAgentCancelReadCloser{ReadCloser: response.Body, cancel: cancel}
+		return response, endpoint, nil
+	}
+	parentErr := parent.Err()
+	requestErr := requestCtx.Err()
+	cancel()
+	if parentErr != nil {
+		return nil, endpoint, parentErr
+	}
+	if requestErr != nil {
+		return nil, endpoint, requestErr
+	}
+	return nil, endpoint, err
 }
 
 func (a App) waitForLocalAgentHealth(ctx context.Context, opts localAgentOptions, material localAgentTLSMaterial) error {
@@ -958,7 +1012,7 @@ func (a App) waitForLocalAgentHealth(ctx context.Context, opts localAgentOptions
 	endpoint := localAgentEndpoint(opts, true, "/health")
 	var lastErr error
 	for time.Now().Before(deadline) {
-		requestCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		requestCtx, cancel := context.WithTimeout(ctx, localAgentProbeTimeout)
 		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 		if err == nil {
 			resp, requestErr := localAgentHTTPSClient(material).Do(req)
@@ -967,13 +1021,16 @@ func (a App) waitForLocalAgentHealth(ctx context.Context, opts localAgentOptions
 				_ = resp.Body.Close()
 				if readErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					var envelope struct {
-						OK bool `json:"ok"`
+						OK   bool `json:"ok"`
+						Data struct {
+							Version string `json:"version"`
+						} `json:"data"`
 					}
-					if json.Unmarshal(body, &envelope) == nil && envelope.OK {
+					if json.Unmarshal(body, &envelope) == nil && envelope.OK && envelope.Data.Version == a.Version {
 						cancel()
 						return nil
 					}
-					lastErr = fmt.Errorf("unexpected health response")
+					lastErr = fmt.Errorf("unexpected health response: ok=%t version=%q (want %q)", envelope.OK, envelope.Data.Version, a.Version)
 				} else if readErr != nil {
 					lastErr = readErr
 				} else {
@@ -998,11 +1055,55 @@ func (a App) waitForLocalAgentHealth(ctx context.Context, opts localAgentOptions
 	return lastErr
 }
 
-func (a App) runLocalAgentServiceCommand(ctx context.Context, args ...string) error {
+func (a App) runLocalAgentServiceCommand(ctx context.Context, args ...string) ([]byte, error) {
 	if a.LocalAgentServiceCommand != nil {
 		return a.LocalAgentServiceCommand(ctx, args...)
 	}
-	return exec.CommandContext(ctx, "launchctl", args...).Run()
+	return exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
+}
+
+func localAgentLaunchServiceNotLoaded(output []byte) bool {
+	text := strings.ToLower(strings.TrimSpace(string(output)))
+	if matched, _ := regexp.MatchString(`^could not find service "[^"\r\n]+" in domain for user gui: [0-9]+\.?$`, text); matched {
+		return true
+	}
+	switch strings.TrimSuffix(text, ".") {
+	case "boot-out failed: 3: no such process", "boot-out failed: service is not loaded", "service is not loaded":
+		return true
+	default:
+		return false
+	}
+}
+
+func localAgentServiceCommandError(err error, output []byte) string {
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return fmt.Sprintf("%v: %s", err, detail)
+	}
+	return err.Error()
+}
+
+func (a App) normalizeLocalAgentInstallOptions(opts localAgentOptions) (localAgentOptions, error) {
+	if localAgentTLSInstallHostSupported(opts.Host) {
+		return opts, nil
+	}
+	ip := net.ParseIP(opts.Host)
+	if !opts.HostExplicit && ip != nil && ip.IsLoopback() {
+		fmt.Fprintf(a.Out, "migrating local-agent host %s to 127.0.0.1 for HTTPS certificate compatibility\n", opts.Host)
+		opts.Host = "127.0.0.1"
+		return opts, nil
+	}
+	return opts, validateLocalAgentTLSInstallHost(opts.Host)
+}
+
+func validateLocalAgentTLSInstallHost(host string) error {
+	if localAgentTLSInstallHostSupported(host) {
+		return nil
+	}
+	return fmt.Errorf("local-agent HTTPS supports only localhost, 127.0.0.1, or ::1; use --host 127.0.0.1")
+}
+
+func localAgentTLSInstallHostSupported(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func localAgentConnectionUnavailable(err error) bool {
