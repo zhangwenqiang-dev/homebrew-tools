@@ -1427,7 +1427,7 @@ func completeAutoReleaseInMySQLTransaction(tx mysqlReleaseReminderTransaction, c
 		}
 		return ReleaseReminder{}, err
 	}
-	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || !current.AutoReleaseEnabled {
+	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || (current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying) || !current.AutoReleaseEnabled {
 		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 	}
 	ownerMemberID := ""

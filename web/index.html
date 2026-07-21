@@ -1534,7 +1534,7 @@
           "<td data-label=\"Apple\">" + escapeHTML(p.apple_email || "-") + "</td>" +
           "<td data-label=\"负责人\">" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td data-label=\"Region\">" + escapeHTML(p.region || "-") + "</td>" +
-          "<td data-label=\"状态\">" + statusBadge(status) + statusDetail(status) + "</td>" +
+          "<td data-label=\"状态\">" + statusBadge(status, p.name) + statusDetail(status) + "</td>" +
           "<td data-label=\"操作\"><div class=\"row-actions\"><button class=\"local-action\" data-terminal=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"连接到本机终端\"><span class=\"action-icon\" aria-hidden=\"true\">↗</span>连接</button><button class=\"local-action\" data-start=\"" + escapeAttr(p.name) + "\"" + vncAttrs + " title=\"打开本机 VNC\"><span class=\"action-icon\" aria-hidden=\"true\">▣</span>VNC</button><button class=\"local-action\" data-sync=\"" + escapeAttr(p.name) + "\"" + readyAttrs + " title=\"传输文件\"><span class=\"action-icon\" aria-hidden=\"true\">⇅</span>传输</button><button data-profile=\"" + escapeAttr(p.name) + "\" title=\"选择当前 Profile\"><span class=\"action-icon\" aria-hidden=\"true\">✓</span>选择</button></div></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
@@ -1741,10 +1741,10 @@
       const statusKnown = !!status && status.decision !== "error" && !status.error;
       const isReady = statusKnown && status.ready === true;
       const readyActionDisabled = disabled || state.busy || !isReady || !state.localAgent.online;
-      const openDisabled = disabled || state.busy || !statusKnown || isReady;
-      const destroyDisabled = disabled || state.busy || !statusKnown || !isReady;
       const reminder = p ? state.reminders[p.name] : null;
       const releaseActive = !!(p && autoReleaseActive(reminder, p.name));
+      const openDisabled = disabled || state.busy || !statusKnown || isReady || releaseActive;
+      const destroyDisabled = disabled || state.busy || !statusKnown || !isReady || releaseActive;
       const syncJobsLoading = !!(p && state.syncJobsLoading[p.name]);
       for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
         $(id).disabled = disabled || state.busy;
@@ -1767,7 +1767,7 @@
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
       renderSyncProgress("push", syncJob(p?.name, "push"));
       renderSyncProgress("pull", syncJob(p?.name, "pull"));
-      $("decisionValue").textContent = status ? statusLabel(status) + (status.detail ? " · " + status.detail : "") : "-";
+      $("decisionValue").textContent = status ? statusLabel(status, p?.name) + (status.detail ? " · " + status.detail : "") : "-";
       $("readyValue").textContent = status ? String(!!status.ready) : "-";
       $("ipValue").textContent = status?.elastic_ip?.public_ip || firstInstanceIP(status) || "-";
       $("nextValue").textContent = status?.next || "-";
@@ -1790,7 +1790,7 @@
     }
 
     function autoReleaseActive(reminder, profileName) {
-      if (reminder?.auto_release_state === "running") return true;
+      if (reminder?.auto_release_state === "running" || reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "notifying") return true;
       return state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"));
     }
 
@@ -1806,6 +1806,7 @@
         const attempts = Math.max(1, Number(reminder.auto_release_attempts) || 0);
         return `释放重试中（第 ${attempts} 次）`;
       }
+      if (reminder.auto_release_state === "notifying") return "释放完成，企业微信通知重试中";
       if (reminder.auto_release_state === "failed") return "自动释放失败";
       return "等待提醒";
     }
@@ -1837,11 +1838,12 @@
       $("generateOwnTokenBtn").textContent = member.has_api_token ? "查看令牌" : "生成令牌";
     }
 
-    function statusBadge(status) {
+    function statusBadge(status, profileName) {
       if (!status) return "<span class=\"badge loading\">unknown</span>";
-      const cls = status.ready ? "ready" : statusClass(status.decision);
+      const releasing = !!(profileName && autoReleaseActive(state.reminders[profileName], profileName));
+      const cls = releasing ? "wait" : (status.ready ? "ready" : statusClass(status.decision));
       const title = status.error || status.detail || status.next || "";
-      return "<span class=\"badge " + cls + "\" title=\"" + escapeAttr(title) + "\">" + escapeHTML(statusLabel(status)) + "</span>";
+      return "<span class=\"badge " + cls + "\" title=\"" + escapeAttr(title) + "\">" + escapeHTML(statusLabel(status, profileName)) + "</span>";
     }
 
     function statusDetail(status) {
@@ -1857,8 +1859,9 @@
       return "stopped";
     }
 
-    function statusLabel(status) {
+    function statusLabel(status, profileName) {
       if (status.error) return "error";
+      if (profileName && autoReleaseActive(state.reminders[profileName], profileName)) return "releasing";
       if (status.ready) return "ready";
       if (status.decision === "create") return "stopped";
       if (status.decision === "wait-ready") return "creating";
@@ -3770,7 +3773,7 @@
 
     function autoReleasePollingNeeded() {
       return Object.values(state.reminders).some((reminder) =>
-        reminder.auto_release_state === "scheduled" || reminder.auto_release_state === "running" || reminder.auto_release_state === "retrying"
+        reminder.auto_release_state === "scheduled" || reminder.auto_release_state === "running" || reminder.auto_release_state === "retrying" || reminder.auto_release_state === "notifying"
       );
     }
 

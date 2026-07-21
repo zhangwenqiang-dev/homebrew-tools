@@ -42,6 +42,31 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 	}
 }
 
+func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`return "releasing";`,
+		`const openDisabled = disabled || state.busy || !statusKnown || isReady || releaseActive;`,
+		`const destroyDisabled = disabled || state.busy || !statusKnown || !isReady || releaseActive;`,
+		`reminder?.auto_release_state === "running" || reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "notifying"`,
+		`statusBadge(status, p.name)`,
+		`const cls = releasing ? "wait" : (status.ready ? "ready" : statusClass(status.decision));`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("web releasing state contract missing %q", want)
+		}
+	}
+	guard := strings.Index(html, `if (profileName && autoReleaseActive(state.reminders[profileName], profileName)) return "releasing";`)
+	creating := strings.Index(html, `if (status.decision === "wait-ready") return "creating";`)
+	if guard < 0 || creating < 0 || guard > creating {
+		t.Fatal("releasing label must take precedence over the AWS creating label")
+	}
+}
+
 func TestWebAutoReleaseDialogAndSubmissionContract(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
 	if err != nil {
@@ -480,6 +505,68 @@ func TestAppWebAutoReleaseToggleRejectsRunningRelease(t *testing.T) {
 				t.Fatalf("running release was modified: %+v", got)
 			}
 		})
+	}
+}
+
+func TestAppWebOpenRejectsProfileWhileReleaseIsActive(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		state     string
+		activeJob bool
+	}{
+		{name: "running reminder", state: ReleaseReminderAutoReleaseStateRunning},
+		{name: "retrying reminder", state: ReleaseReminderAutoReleaseStateRetrying},
+		{name: "notification pending", state: ReleaseReminderAutoReleaseStateNotifying},
+		{name: "destroy job", activeJob: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := newWebAutoReleaseTestApp(t)
+			if test.state != "" {
+				if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{ProfileName: "xcode-vnc", Status: ReleaseReminderStatusDueNotified, AutoReleaseEnabled: true, AutoReleaseState: test.state}); err != nil {
+					t.Fatalf("upsert reminder: %v", err)
+				}
+			}
+			if test.activeJob {
+				if _, err := app.JobManager.Create(Job{ID: "destroy-active", Type: "aws-destroy", Profile: "xcode-vnc", Status: JobStatusRunning, PID: 42}); err != nil {
+					t.Fatalf("create job: %v", err)
+				}
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/aws/open", strings.NewReader(`{"profile":"xcode-vnc","confirm":true,"background":true}`))
+			addWebAuth(t, &app, req, "admin")
+			rec := httptest.NewRecorder()
+			app.newWebHandler("").ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "currently releasing") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAppAutoReleaseSuccessNotificationUsesWechatWebhook(t *testing.T) {
+	var markdown string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Markdown struct {
+				Content string `json:"content"`
+			} `json:"markdown"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode webhook payload: %v", err)
+		}
+		markdown = payload.Markdown.Content
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+	t.Setenv(envWechatWebhookURL, server.URL)
+
+	app := newWebAutoReleaseTestApp(t)
+	coordinator := app.newAutoReleaseCoordinator("")
+	err := coordinator.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationSuccess, Reminder: ReleaseReminder{ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-1"}})
+	if err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	if !strings.Contains(markdown, "Mac 自动释放成功，Elastic IP 分配已保留") || !strings.Contains(markdown, "xcode-vnc") {
+		t.Fatalf("markdown = %q", markdown)
 	}
 }
 

@@ -476,6 +476,40 @@ func TestAutoReleaseObservesSuccessfulJobAndRetainsEIPAllocation(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseCompletionNotificationFailureRetries(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+	coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-retained"}}, nil
+	}
+	calls := 0
+	coordinator.Notify = func(notification AutoReleaseNotification) error {
+		if notification.Kind != AutoReleaseNotificationSuccess {
+			t.Fatalf("notification = %+v", notification)
+		}
+		calls++
+		if calls == 1 {
+			return errors.New("wechat temporarily unavailable")
+		}
+		return nil
+	}
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || !strings.Contains(got.AutoReleaseLastError, "wechat") {
+		t.Fatalf("first reminder = %+v", got)
+	}
+	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryInterval) }
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || calls != 2 {
+		t.Fatalf("retry reminder=%+v calls=%d", got, calls)
+	}
+}
+
 func TestAutoReleaseDeferredJobWithResourcesRetries(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	reminder := scheduledAutoRelease(now)
@@ -586,7 +620,7 @@ func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, r
 		}
 	}
 	reminder := s.reminders[cycle.ProfileName]
-	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
+	if !releaseReminderMatchesCycle(reminder, cycle) || (reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying) {
 		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 	}
 	reminder.Status = ReleaseReminderStatusReleased

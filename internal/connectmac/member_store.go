@@ -193,6 +193,7 @@ const (
 	ReleaseReminderAutoReleaseStateScheduled = "scheduled"
 	ReleaseReminderAutoReleaseStateRunning   = "running"
 	ReleaseReminderAutoReleaseStateRetrying  = "retrying"
+	ReleaseReminderAutoReleaseStateNotifying = "notifying"
 	ReleaseReminderAutoReleaseStateFailed    = "failed"
 	ReleaseReminderAutoReleaseStateReleased  = "released"
 )
@@ -981,7 +982,7 @@ func completeAutoReleaseInData(db *MemberData, cycle ReleaseReminderCycle, relea
 		if current.ProfileName != cycle.ProfileName {
 			continue
 		}
-		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || !current.AutoReleaseEnabled {
+		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || (current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying) || !current.AutoReleaseEnabled {
 			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 		}
 		ownerIndex := -1

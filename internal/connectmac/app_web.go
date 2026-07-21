@@ -284,8 +284,7 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 			case AutoReleaseNotificationSuccess:
 				event, description = "auto-release-success", "Mac 自动释放成功，Elastic IP 分配已保留"
 			}
-			a.notifyReleaseReminder(event, notification.Reminder, "", description)
-			return nil
+			return a.notifyReleaseReminder(event, notification.Reminder, "", description)
 		},
 		Emit: func(event AutoReleaseEvent) {
 			level := "info"
@@ -1687,6 +1686,17 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
+		if command == "open" {
+			releasing, err := a.profileReleaseInProgress(req.Profile)
+			if err != nil {
+				writeWebError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if releasing {
+				writeWebError(w, http.StatusConflict, "profile is currently releasing; wait for automatic release to finish")
+				return
+			}
+		}
 		if req.Confirm {
 			if err := a.validateWebAWSOwner(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
 				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.open", Profile: req.Profile, Message: err.Error()})
@@ -1722,6 +1732,24 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
 	}
+}
+
+func (a App) profileReleaseInProgress(profileName string) (bool, error) {
+	reminder, ok, err := a.MemberStore.ReleaseReminder(profileName)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		switch reminder.AutoReleaseState {
+		case ReleaseReminderAutoReleaseStateRunning, ReleaseReminderAutoReleaseStateRetrying, ReleaseReminderAutoReleaseStateNotifying:
+			return true, nil
+		}
+	}
+	jobs, err := a.JobManager.Active()
+	if err != nil {
+		return false, err
+	}
+	return hasActiveDestroyJob(jobs, profileName), nil
 }
 
 func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {

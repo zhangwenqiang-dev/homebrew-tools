@@ -17,6 +17,7 @@ func TestMemberStoreCompleteAutoReleaseAtomicallyClearsMatchingOwner(t *testing.
 		t.Fatalf("set owner: %v", err)
 	}
 	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateNotifying
 	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
 		t.Fatalf("upsert reminder: %v", err)
 	}
@@ -270,6 +271,7 @@ func releaseReminderCycle(reminder ReleaseReminder) ReleaseReminderCycle {
 
 func TestMySQLCompleteAutoReleaseTransactionClearsOnlyMatchingOwner(t *testing.T) {
 	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateNotifying
 	tx := &fakeMySQLReleaseReminderTransaction{
 		row:      fakeMySQLReleaseReminderRow{reminder: reminder},
 		ownerRow: fakeMySQLProfileOwnerRow{memberID: "member-1", email: "owner@example.com"},
