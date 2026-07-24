@@ -230,7 +230,10 @@ func TestMemberStoreReleaseReminders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mark released: %v", err)
 	}
-	if released.Status != ReleaseReminderStatusReleased || released.ReleasedAt != "2026-07-02T09:00:00Z" {
+	if released.Status != ReleaseReminderStatusReleased ||
+		released.ReleasedAt != "2026-07-02T09:00:00Z" ||
+		released.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased ||
+		released.AutoReleaseLastError != "" {
 		t.Fatalf("released reminder = %+v", released)
 	}
 }

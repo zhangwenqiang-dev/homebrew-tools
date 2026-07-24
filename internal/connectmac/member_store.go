@@ -77,6 +77,7 @@ type MemberRepository interface {
 	UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error)
+	CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
@@ -945,11 +946,115 @@ func (s MemberStore) MarkReleaseReminderReleased(profileName, releasedAt string)
 	if releasedAt == "" {
 		releasedAt = s.currentTime().Format(time.RFC3339)
 	}
-	return s.UpdateReleaseReminder(profileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
+	return s.UpdateReleaseReminder(profileName, markReleaseReminderReleased(releasedAt))
+}
+
+func markReleaseReminderReleased(releasedAt string) func(ReleaseReminder) (ReleaseReminder, error) {
+	return func(reminder ReleaseReminder) (ReleaseReminder, error) {
+		if reminder.Status != ReleaseReminderStatusReleased || strings.TrimSpace(reminder.ReleasedAt) == "" {
+			reminder.ReleasedAt = releasedAt
+		}
 		reminder.Status = ReleaseReminderStatusReleased
-		reminder.ReleasedAt = releasedAt
+		reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+		reminder.AutoReleaseLastError = ""
 		return reminder, nil
-	})
+	}
+}
+
+func (s MemberStore) CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	defer unlock()
+	if releasedAt == "" {
+		releasedAt = s.currentTime().Format(time.RFC3339)
+	}
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	reminder, changed, err := cleanupProfileRecordsInData(&db, profileName, releasedAt, reason, s.currentTime().Format(time.RFC3339))
+	if err != nil || !changed {
+		return reminder, changed, err
+	}
+	if err := s.saveUnlocked(db); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	return reminder, true, nil
+}
+
+func cleanupProfileRecordsInData(db *MemberData, profileName, releasedAt, reason, updatedAt string) (ReleaseReminder, bool, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, false, errors.New("profile is required")
+	}
+	ownerIndex := -1
+	for i, owner := range db.ProfileOwners {
+		if owner.ProfileName == profileName {
+			ownerIndex = i
+			break
+		}
+	}
+	reminderIndex := -1
+	reminder := ReleaseReminder{ProfileName: profileName, Status: ReleaseReminderStatusReleased}
+	for i, current := range db.Reminders {
+		if current.ProfileName == profileName {
+			reminderIndex = i
+			reminder = current
+			break
+		}
+	}
+	reminderChanged := reminderIndex >= 0 && releaseReminderNeedsConvergence(reminder)
+	ownerChanged := ownerIndex >= 0
+	if !ownerChanged && !reminderChanged {
+		return reminder, false, nil
+	}
+	if ownerChanged {
+		db.ProfileOwners = append(db.ProfileOwners[:ownerIndex], db.ProfileOwners[ownerIndex+1:]...)
+	}
+	if reminderChanged {
+		var err error
+		reminder, err = markReleaseReminderReleased(releasedAt)(reminder)
+		if err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		reminder.UpdatedAt = updatedAt
+		db.Reminders[reminderIndex] = reminder
+	}
+	event := cleanupProfileRecordsEvent(reminder, reminderIndex >= 0, ownerChanged, reminderChanged, reason)
+	if err := appendOperationEvent(db, event, updatedAt); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	return reminder, true, nil
+}
+
+func releaseReminderNeedsConvergence(reminder ReleaseReminder) bool {
+	return reminder.Status != ReleaseReminderStatusReleased ||
+		reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased ||
+		reminder.AutoReleaseLastError != ""
+}
+
+func cleanupProfileRecordsEvent(reminder ReleaseReminder, reminderFound, ownerChanged, reminderChanged bool, reason string) OperationEvent {
+	changes := make([]string, 0, 2)
+	if ownerChanged {
+		changes = append(changes, "cleared profile owner")
+	}
+	if reminderChanged {
+		changes = append(changes, "marked release reminder released")
+	}
+	message := strings.Join(changes, " and ")
+	if !reminderFound {
+		message += "; no release reminder found"
+	}
+	return OperationEvent{
+		Action:     "cleanup-records",
+		Profile:    reminder.ProfileName,
+		AppleEmail: reminder.AppleEmail,
+		Confirmed:  true,
+		Status:     "success",
+		Message:    message + " (" + reason + ")",
+	}
 }
 
 func (s MemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {

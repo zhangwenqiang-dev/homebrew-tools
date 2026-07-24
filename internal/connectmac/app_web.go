@@ -1642,16 +1642,11 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: message})
 			return
 		}
-		plan, status, err := a.AWSService.StatusWithOptions(r.Context(), profile, AWSStatusOptions{IncludeTerminal: false})
+		plan, status, err := a.webAWSStatusWithCleanup(r.Context(), profile)
 		if err != nil {
 			a.logProfileError("web.aws.status", profile, fmt.Sprintf("aws status failed: %v", err))
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("aws status failed: %v", err)})
 			return
-		}
-		if shouldAutoCleanupProfileRecords(status) {
-			if _, err := a.cleanupProfileLocalRecords(profile.Name, "auto-status"); err != nil {
-				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.cleanup.auto", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail, Message: err.Error()})
-			}
 		}
 		writeWebJSON(w, webAPIResponse{
 			OK:     true,
@@ -1923,51 +1918,46 @@ func shouldAutoCleanupProfileRecords(status AWSStatus) bool {
 	return len(status.Hosts) == 0 && len(status.Instances) == 0 && strings.TrimSpace(status.ElasticIP.InstanceID) == ""
 }
 
+func (a App) webAWSStatusWithCleanup(ctx context.Context, profile Profile) (MacPlan, AWSStatus, error) {
+	var plan MacPlan
+	var status AWSStatus
+	err := a.JobManager.WithProfileOperation(profile.Name, func() error {
+		var err error
+		plan, status, err = a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
+		if err != nil {
+			return err
+		}
+		if shouldAutoCleanupProfileRecords(status) {
+			if _, err := a.cleanupProfileLocalRecordsLocked(profile.Name, "auto-status"); err != nil {
+				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.cleanup.auto", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail, Message: err.Error()})
+			}
+		}
+		return nil
+	})
+	return plan, status, err
+}
+
 func (a App) cleanupProfileLocalRecords(profileName, reason string) (ReleaseReminder, error) {
 	profileName = strings.TrimSpace(profileName)
 	if profileName == "" {
 		return ReleaseReminder{}, errors.New("profile is required")
 	}
-	if err := a.clearProfileOwnerForCleanup(profileName); err != nil {
-		return ReleaseReminder{}, err
-	}
-	reminder, ok, err := a.MemberStore.ReleaseReminder(profileName)
-	if err != nil {
-		return ReleaseReminder{}, err
-	}
-	if !ok {
-		_ = a.MemberStore.RecordEvent(OperationEvent{
-			Action:    "cleanup-records",
-			Profile:   profileName,
-			Confirmed: true,
-			Status:    "success",
-			Message:   "cleared profile owner; no release reminder found (" + reason + ")",
-		})
-		return ReleaseReminder{ProfileName: profileName, Status: ReleaseReminderStatusReleased}, nil
-	}
-	if reminder.Status != ReleaseReminderStatusReleased {
-		reminder, err = a.MemberStore.MarkReleaseReminderReleased(profileName, time.Now().Format(time.RFC3339))
-		if err != nil {
-			return ReleaseReminder{}, err
-		}
-	}
-	_ = a.MemberStore.RecordEvent(OperationEvent{
-		Action:     "cleanup-records",
-		Profile:    profileName,
-		AppleEmail: reminder.AppleEmail,
-		Confirmed:  true,
-		Status:     "success",
-		Message:    "cleared profile owner and marked release reminder released (" + reason + ")",
+	var reminder ReleaseReminder
+	err := a.JobManager.WithProfileOperation(profileName, func() error {
+		var err error
+		reminder, err = a.cleanupProfileLocalRecordsLocked(profileName, reason)
+		return err
 	})
-	return reminder, nil
+	return reminder, err
 }
 
-func (a App) clearProfileOwnerForCleanup(profileName string) error {
-	profileName = strings.TrimSpace(profileName)
-	if profileName == "" {
-		return errors.New("profile is required")
-	}
-	return a.MemberStore.ClearProfileOwner(profileName)
+func (a App) cleanupProfileLocalRecordsLocked(profileName, reason string) (ReleaseReminder, error) {
+	reminder, _, err := a.MemberStore.CleanupProfileRecords(
+		profileName,
+		time.Now().Format(time.RFC3339),
+		reason,
+	)
+	return reminder, err
 }
 
 func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) error {

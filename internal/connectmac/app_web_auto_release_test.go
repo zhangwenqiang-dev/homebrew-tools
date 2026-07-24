@@ -52,6 +52,7 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 		`return "releasing";`,
 		`const openDisabled = disabled || state.busy || !statusKnown || isReady || releaseActive;`,
 		`const destroyDisabled = disabled || state.busy || !statusKnown || !isReady || releaseActive;`,
+		`if (reminder?.status === "released" || reminder?.auto_release_state === "released") return false;`,
 		`reminder?.auto_release_state === "running" || reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "notifying"`,
 		`statusBadge(status, p.name)`,
 		`const cls = releasing ? "wait" : (status.ready ? "ready" : statusClass(status.decision));`,
@@ -64,6 +65,171 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 	creating := strings.Index(html, `if (status.decision === "wait-ready") return "creating";`)
 	if guard < 0 || creating < 0 || guard > creating {
 		t.Fatal("releasing label must take precedence over the AWS creating label")
+	}
+	activeJob := strings.Index(html, `if (state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"))) return true;`)
+	terminalReminder := strings.Index(html, `if (reminder?.status === "released" || reminder?.auto_release_state === "released") return false;`)
+	if activeJob < 0 || terminalReminder < 0 || activeJob > terminalReminder {
+		t.Fatal("active destroy jobs must take precedence over terminal reminder fields")
+	}
+}
+
+func TestCleanupProfileLocalRecordsIsIdempotent(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:          "xcode-vnc",
+		AppleEmail:           "user@example.com",
+		Status:               ReleaseReminderStatusReleased,
+		ReleasedAt:           "2026-07-01T09:00:00Z",
+		AutoReleaseEnabled:   true,
+		AutoReleaseState:     ReleaseReminderAutoReleaseStateRunning,
+		AutoReleaseLastError: "stale release error",
+	}); err != nil {
+		t.Fatalf("seed stale released reminder: %v", err)
+	}
+
+	first, err := app.cleanupProfileLocalRecords("xcode-vnc", "auto-status")
+	if err != nil {
+		t.Fatalf("first cleanup: %v", err)
+	}
+	if first.Status != ReleaseReminderStatusReleased ||
+		first.ReleasedAt != "2026-07-01T09:00:00Z" ||
+		first.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased ||
+		first.AutoReleaseLastError != "" {
+		t.Fatalf("first cleanup did not converge reminder: %+v", first)
+	}
+
+	events, err := app.MemberStore.RecentEvents("user@example.com", 10)
+	if err != nil {
+		t.Fatalf("events after first cleanup: %v", err)
+	}
+	if len(events) != 1 || events[0].Action != "cleanup-records" {
+		t.Fatalf("events after first cleanup = %+v", events)
+	}
+	if events[0].Message != "marked release reminder released (auto-status)" {
+		t.Fatalf("first cleanup event message = %q", events[0].Message)
+	}
+
+	second, err := app.cleanupProfileLocalRecords("xcode-vnc", "auto-status")
+	if err != nil {
+		t.Fatalf("second cleanup: %v", err)
+	}
+	if second.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased {
+		t.Fatalf("second cleanup reminder = %+v", second)
+	}
+	events, err = app.MemberStore.RecentEvents("user@example.com", 10)
+	if err != nil {
+		t.Fatalf("events after second cleanup: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("repeated cleanup recorded duplicate events: %+v", events)
+	}
+}
+
+func TestCleanupProfileLocalRecordsConcurrentCallsRecordOneEvent(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName:          "xcode-vnc",
+		AppleEmail:           "user@example.com",
+		Status:               ReleaseReminderStatusReleased,
+		AutoReleaseState:     ReleaseReminderAutoReleaseStateRunning,
+		AutoReleaseLastError: "stale release error",
+	}); err != nil {
+		t.Fatalf("seed stale released reminder: %v", err)
+	}
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := app.cleanupProfileLocalRecords("xcode-vnc", "auto-status")
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent cleanup: %v", err)
+		}
+	}
+
+	events, err := app.MemberStore.RecentEvents("user@example.com", 10)
+	if err != nil {
+		t.Fatalf("events after concurrent cleanup: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("concurrent cleanup recorded duplicate events: %+v", events)
+	}
+}
+
+func TestWebAWSStatusCleanupSharesLifecycleProfileLock(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	profile := validAWSProfile()
+	statusStarted := make(chan struct{})
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		close(statusStarted)
+		return &fakeAWSClient{}, nil
+	}
+
+	lockEntered := make(chan struct{})
+	releaseLock := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- app.JobManager.WithProfileOperation(profile.Name, func() error {
+			close(lockEntered)
+			<-releaseLock
+			return nil
+		})
+	}()
+	<-lockEntered
+
+	statusDone := make(chan error, 1)
+	go func() {
+		_, _, err := app.webAWSStatusWithCleanup(context.Background(), profile)
+		statusDone <- err
+	}()
+	select {
+	case <-statusStarted:
+		t.Fatal("AWS status started before the lifecycle profile lock was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseLock)
+	if err := <-lockDone; err != nil {
+		t.Fatalf("release lifecycle lock: %v", err)
+	}
+	select {
+	case err := <-statusDone:
+		if err != nil {
+			t.Fatalf("status with cleanup: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("status cleanup did not continue after lifecycle lock release")
+	}
+}
+
+func TestWebAWSStatusKeepsValidStatusWhenCleanupFails(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	app.MemberStore = failingCleanupRepository{
+		MemberRepository: app.MemberStore,
+		err:              errors.New("cleanup storage unavailable"),
+	}
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{}, nil
+	}
+
+	_, status, err := app.webAWSStatusWithCleanup(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("AWS status was replaced by cleanup error: %v", err)
+	}
+	if len(status.Hosts) != 0 || len(status.Instances) != 0 {
+		t.Fatalf("unexpected stopped status: %+v", status)
 	}
 }
 
@@ -846,6 +1012,15 @@ type firstUpdateGateRepository struct {
 	gated   bool
 	entered chan struct{}
 	release chan struct{}
+}
+
+type failingCleanupRepository struct {
+	MemberRepository
+	err error
+}
+
+func (r failingCleanupRepository) CleanupProfileRecords(string, string, string) (ReleaseReminder, bool, error) {
+	return ReleaseReminder{}, false, r.err
 }
 
 func (r *firstUpdateGateRepository) UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error) {

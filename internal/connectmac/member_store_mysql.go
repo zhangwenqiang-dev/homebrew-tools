@@ -1016,6 +1016,36 @@ func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releas
 	return completeAutoReleaseInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, cycle, releasedTime)
 }
 
+func (s MySQLMemberStore) CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error) {
+	defer s.lockMutation()()
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, false, errors.New("profile is required")
+	}
+	if err := s.EnsureSchema(); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	if releasedAt == "" {
+		releasedAt = s.currentTime().Format(time.RFC3339)
+	}
+	return cleanupProfileRecordsInMySQLTransaction(
+		sqlMySQLReleaseReminderTransaction{tx: tx},
+		profileName,
+		releasedAt,
+		reason,
+		s.currentTime(),
+	)
+}
+
 type mysqlReleaseReminderExecer interface {
 	Exec(query string, args ...any) error
 }
@@ -1407,6 +1437,79 @@ func updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx mysqlReleaseR
 	return updated, nil
 }
 
+func cleanupProfileRecordsInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName, releasedAt, reason string, now time.Time) (reminder ReleaseReminder, changed bool, err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+
+	ownerMemberID := ""
+	ownerEmail := ""
+	ownerErr := tx.QueryRow(mysqlProfileOwnerForUpdateQuery, profileName).Scan(&ownerMemberID, &ownerEmail)
+	if ownerErr != nil && !errors.Is(ownerErr, sql.ErrNoRows) {
+		return ReleaseReminder{}, false, ownerErr
+	}
+	ownerChanged := ownerErr == nil
+
+	reminderFound := true
+	if err = scanMySQLReleaseReminder(tx.QueryRow(mysqlReleaseReminderSelectForUpdate, profileName), &reminder); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return ReleaseReminder{}, false, err
+		}
+		reminderFound = false
+		reminder = ReleaseReminder{ProfileName: profileName, Status: ReleaseReminderStatusReleased}
+	}
+	reminderChanged := reminderFound && releaseReminderNeedsConvergence(reminder)
+	if !ownerChanged && !reminderChanged {
+		if err = tx.Commit(); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		committed = true
+		return reminder, false, nil
+	}
+
+	if ownerChanged {
+		if err = tx.Exec(mysqlDeleteMatchingProfileOwnerQuery, profileName, ownerMemberID); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+	}
+	if reminderChanged {
+		reminder, err = markReleaseReminderReleased(releasedAt)(reminder)
+		if err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		reminder.UpdatedAt = now.Format(time.RFC3339)
+		if err = updateMySQLReleaseReminder(tx, profileName, reminder); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+	}
+	eventData := MemberData{}
+	event := cleanupProfileRecordsEvent(reminder, reminderFound, ownerChanged, reminderChanged, reason)
+	if err = appendOperationEvent(&eventData, event, now.Format(time.RFC3339)); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	normalized := eventData.Events[0]
+	if err = tx.Exec(mysqlOperationEventInsertQuery, normalized.ID, normalized.Action, normalized.Profile, normalized.AppleEmail, normalized.MemberID, normalized.MemberEmail, normalized.MemberName, normalized.Confirmed, normalized.Status, normalized.Message, normalized.CreatedAt); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	committed = true
+	return reminder, true, nil
+}
+
 func completeAutoReleaseInMySQLTransaction(tx mysqlReleaseReminderTransaction, cycle ReleaseReminderCycle, releasedAt time.Time) (updated ReleaseReminder, err error) {
 	committed := false
 	defer func() {
@@ -1477,11 +1580,7 @@ func (s MySQLMemberStore) MarkReleaseReminderReleased(profileName, releasedAt st
 	if releasedAt == "" {
 		releasedAt = s.currentTime().Format(time.RFC3339)
 	}
-	return s.UpdateReleaseReminder(profileName, func(reminder ReleaseReminder) (ReleaseReminder, error) {
-		reminder.Status = ReleaseReminderStatusReleased
-		reminder.ReleasedAt = releasedAt
-		return reminder, nil
-	})
+	return s.UpdateReleaseReminder(profileName, markReleaseReminderReleased(releasedAt))
 }
 
 func (s MySQLMemberStore) WebSettings() (WebSettings, error) {

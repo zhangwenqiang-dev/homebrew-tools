@@ -1828,8 +1828,10 @@
     }
 
     function autoReleaseActive(reminder, profileName) {
+      if (state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"))) return true;
+      if (reminder?.status === "released" || reminder?.auto_release_state === "released") return false;
       if (reminder?.auto_release_state === "running" || reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "notifying") return true;
-      return state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"));
+      return false;
     }
 
     function autoReleaseStateText(reminder, profile) {

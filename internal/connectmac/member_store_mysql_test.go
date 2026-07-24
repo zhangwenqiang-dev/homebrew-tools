@@ -918,6 +918,77 @@ func TestMySQLSaveReleaseReminderInsertRoundTripsThroughScan(t *testing.T) {
 	}
 }
 
+func TestMySQLMarkReleaseReminderReleasedConvergesAutoReleaseState(t *testing.T) {
+	current := ReleaseReminder{
+		ProfileName:          "apple-usw2",
+		AppleEmail:           "apple@example.com",
+		Status:               ReleaseReminderStatusReleased,
+		ReleasedAt:           "2026-07-02T08:00:00Z",
+		AutoReleaseEnabled:   true,
+		AutoReleaseState:     ReleaseReminderAutoReleaseStateRunning,
+		AutoReleaseLastError: "stale release error",
+		CreatedAt:            "2026-07-01T08:00:00Z",
+		UpdatedAt:            "2026-07-02T08:00:00Z",
+	}
+	tx := &fakeMySQLReleaseReminderTransaction{row: fakeMySQLReleaseReminderRow{reminder: current}}
+	now := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+
+	got, err := updateReleaseReminderInMySQLTransaction(
+		tx,
+		current.ProfileName,
+		now,
+		markReleaseReminderReleased(now.Format(time.RFC3339)),
+	)
+	if err != nil {
+		t.Fatalf("mark MySQL reminder released: %v", err)
+	}
+	if got.Status != ReleaseReminderStatusReleased ||
+		got.ReleasedAt != current.ReleasedAt ||
+		got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased ||
+		got.AutoReleaseLastError != "" {
+		t.Fatalf("released MySQL reminder did not converge: %+v", got)
+	}
+	if !reflect.DeepEqual(tx.written, got) {
+		t.Fatalf("persisted MySQL reminder = %+v, want %+v", tx.written, got)
+	}
+}
+
+func TestMySQLCleanupProfileRecordsRollsBackOwnerReminderAndEventTogether(t *testing.T) {
+	current := ReleaseReminder{
+		ProfileName:          "apple-usw2",
+		AppleEmail:           "apple@example.com",
+		Status:               ReleaseReminderStatusReleased,
+		ReleasedAt:           "2026-07-02T08:00:00Z",
+		AutoReleaseState:     ReleaseReminderAutoReleaseStateRunning,
+		AutoReleaseLastError: "stale release error",
+		CreatedAt:            "2026-07-01T08:00:00Z",
+		UpdatedAt:            "2026-07-02T08:00:00Z",
+	}
+	tx := &fakeMySQLReleaseReminderTransaction{
+		row:          fakeMySQLReleaseReminderRow{reminder: current},
+		ownerRow:     fakeMySQLProfileOwnerRow{memberID: "member-1", email: "owner@example.com"},
+		eventExecErr: errors.New("event insert failed"),
+	}
+	now := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+
+	_, _, err := cleanupProfileRecordsInMySQLTransaction(
+		tx,
+		current.ProfileName,
+		now.Format(time.RFC3339),
+		"auto-status",
+		now,
+	)
+	if err == nil || !strings.Contains(err.Error(), "event insert failed") {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	if !tx.rolledBack || tx.committed {
+		t.Fatalf("cleanup transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
+	}
+	if !tx.ownerDeleted {
+		t.Fatal("test did not reach owner deletion before rollback")
+	}
+}
+
 func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testing.T) {
 	current := ReleaseReminder{
 		ProfileName:         "apple-usw2",
