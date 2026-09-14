@@ -7,11 +7,15 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,6 +38,91 @@ func TestScanHostKeyPrimarySuccessDoesNotFallback(t *testing.T) {
 	}
 	if _, err := os.Stat(env.sshArgs); !os.IsNotExist(err) {
 		t.Fatalf("fallback invoked, stat error = %v", err)
+	}
+}
+
+func TestScanHostKeyMetadataIdentifiesScanner(t *testing.T) {
+	for _, tc := range []struct{ name, keyscanMode, sshMode, want string }{
+		{name: "primary", keyscanMode: "key", sshMode: "fail-if-called", want: "ssh-keyscan"},
+		{name: "fallback", keyscanMode: "empty", sshMode: "key", want: "ssh-fallback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installHostKeyScanFakes(t)
+			key := testHostKeyRecord(t, "scan.example")
+			t.Setenv("CM_TEST_KEYSCAN_MODE", tc.keyscanMode)
+			t.Setenv("CM_TEST_KEYSCAN_KEY", key)
+			t.Setenv("CM_TEST_SSH_MODE", tc.sshMode)
+			t.Setenv("CM_TEST_SSH_KEY", key)
+			result, err := (ExecRunner{}).ScanHostKeyWithMetadata(context.Background(), "scan.example")
+			if err != nil || result.Keys != key || result.Scanner != tc.want || result.Cause != "" || result.Detail != "" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestScanHostKeyMetadataCategorizesFailure(t *testing.T) {
+	installHostKeyScanFakes(t)
+	t.Setenv("CM_TEST_KEYSCAN_MODE", "fail")
+	t.Setenv("CM_TEST_SSH_MODE", "empty")
+	t.Setenv("CM_TEST_SECRET_OUTPUT", "ssh: connect to host scan.example port 22: Connection refused")
+	result, err := (ExecRunner{}).ScanHostKeyWithMetadata(context.Background(), "scan.example")
+	if err == nil || result.Scanner != "ssh-fallback" || result.Cause != "unreachable" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if strings.Contains(result.Detail, "scan.example") || strings.Contains(result.Detail, "Connection refused") {
+		t.Fatalf("unsafe detail=%q", result.Detail)
+	}
+}
+
+func TestScanHostKeyFallbackCauseIsAuthoritative(t *testing.T) {
+	for _, tc := range []struct {
+		name, primary, fallback, want string
+	}{
+		{name: "primary unreachable fallback negotiation", primary: "Connection refused", fallback: "no matching host key type found", want: "scanner_compatibility"},
+		{name: "primary negotiation fallback unreachable", primary: "no matching host key type found", fallback: "Connection reset by peer", want: "unreachable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installHostKeyScanFakes(t)
+			t.Setenv("CM_TEST_KEYSCAN_MODE", "fail")
+			t.Setenv("CM_TEST_SSH_MODE", "fail")
+			t.Setenv("CM_TEST_KEYSCAN_OUTPUT", tc.primary)
+			t.Setenv("CM_TEST_SSH_OUTPUT", tc.fallback)
+			result, err := (ExecRunner{}).ScanHostKeyWithMetadata(context.Background(), "scan.example")
+			if err == nil || result.Cause != tc.want {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestClassifyHostKeyScanCauseRecognizesBoundedReachabilityFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		text string
+		want string
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, want: "unreachable"},
+		{name: "net timeout", err: &net.DNSError{IsTimeout: true, Err: "timeout", Name: "private.example"}, want: "unreachable"},
+		{name: "dns", err: &net.DNSError{Err: "no such host", Name: "private.example"}, want: "unreachable"},
+		{name: "syscall reset", err: fmt.Errorf("dial: %w", syscall.ECONNRESET), want: "unreachable"},
+		{name: "refused", text: "Connection refused", want: "unreachable"},
+		{name: "reset", text: "Connection reset by peer", want: "unreachable"},
+		{name: "host down", text: "Host is down", want: "unreachable"},
+		{name: "no route", text: "No route to host", want: "unreachable"},
+		{name: "network", text: "Network unreachable", want: "unreachable"},
+		{name: "timeout", text: "Operation timed out", want: "unreachable"},
+		{name: "macOS DNS", text: "nodename nor servname provided, or not known", want: "unreachable"},
+		{name: "unknown", err: errors.New("scanner exited"), text: "no matching host key type found", want: "scanner_compatibility"},
+		{name: "marker outside bound", text: strings.Repeat("x", maxHostKeyDiagnosticBytes) + " connection refused", want: "scanner_compatibility"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyHostKeyScanCause([]error{tc.err}, tc.text); got != tc.want {
+				t.Fatalf("cause=%q want=%q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -173,6 +262,26 @@ func TestScanHostKeyFallbackNonzeroWithValidKeySucceeds(t *testing.T) {
 	}
 }
 
+func TestSSHHostKeyFallbackDisablesDefaultAuthenticationMaterial(t *testing.T) {
+	args := []string{
+		"-G", "-F", "/dev/null",
+		"-o", "IdentityFile=none",
+		"-o", "CertificateFile=none",
+		"-o", "IdentityAgent=none",
+		"scan.example",
+	}
+	out, err := exec.Command("ssh", args...).Output()
+	if err != nil {
+		t.Fatalf("ssh effective config: %v", err)
+	}
+	effective := strings.ToLower(string(out))
+	for _, want := range []string{"identityfile none\n", "certificatefile none\n", "identityagent none\n"} {
+		if !strings.Contains(effective, want) {
+			t.Fatalf("effective ssh config missing %q", strings.TrimSpace(want))
+		}
+	}
+}
+
 func TestScanHostKeyEmptyFallbackFailsWithSanitizedDiagnostic(t *testing.T) {
 	installHostKeyScanFakes(t)
 	t.Setenv("CM_TEST_KEYSCAN_MODE", "fail")
@@ -222,13 +331,24 @@ func TestScanHostKeyHonorsCancellation(t *testing.T) {
 	t.Setenv("TMPDIR", env.tempRoot)
 	t.Setenv("CM_TEST_KEYSCAN_MODE", "empty")
 	t.Setenv("CM_TEST_SSH_MODE", "block")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	started := time.Now()
-	_, err := (ExecRunner{}).ScanHostKey(ctx, "scan.example")
-	if err != context.DeadlineExceeded {
-		t.Fatalf("ScanHostKey() error = %v, want deadline exceeded", err)
+	type scanOutcome struct {
+		result HostKeyScanResult
+		err    error
+	}
+	done := make(chan scanOutcome, 1)
+	go func() {
+		result, err := (ExecRunner{}).ScanHostKeyWithMetadata(ctx, "scan.example")
+		done <- scanOutcome{result: result, err: err}
+	}()
+	waitForHostKeyFakeReady(t, env.sshReady)
+	cancel()
+	outcome := <-done
+	if !errors.Is(outcome.err, context.Canceled) || outcome.result.Cause != "canceled" {
+		t.Fatalf("ScanHostKeyWithMetadata() = %+v, %v; want canceled", outcome.result, outcome.err)
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("cancellation took %s", elapsed)
@@ -237,11 +357,22 @@ func TestScanHostKeyHonorsCancellation(t *testing.T) {
 	assertNoHostKeyScanTempDirs(t, env.tempRoot)
 }
 
+func TestScanHostKeyPreservesExpiredDeadlineMetadata(t *testing.T) {
+	installHostKeyScanFakes(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	result, err := (ExecRunner{}).ScanHostKeyWithMetadata(ctx, "scan.example")
+	if !errors.Is(err, context.DeadlineExceeded) || result.Cause != "deadline_exceeded" || result.Scanner != "ssh-keyscan" {
+		t.Fatalf("ScanHostKeyWithMetadata() = %+v, %v; want deadline", result, err)
+	}
+}
+
 type hostKeyScanFakeEnv struct {
 	tempRoot    string
 	keyscanArgs string
 	sshArgs     string
 	sshModes    string
+	sshReady    string
 }
 
 func installHostKeyScanFakes(t *testing.T) hostKeyScanFakeEnv {
@@ -263,12 +394,26 @@ func installHostKeyScanFakes(t *testing.T) hostKeyScanFakeEnv {
 	keyscanArgs := filepath.Join(root, "ssh-keyscan.args")
 	sshArgs := filepath.Join(root, "ssh.args")
 	sshModes := filepath.Join(root, "ssh.modes")
+	sshReady := filepath.Join(root, "ssh.ready")
 	t.Setenv("PATH", bin)
 	t.Setenv("CM_TEST_HOST_KEY_HELPER", "1")
 	t.Setenv("CM_TEST_KEYSCAN_ARGS", keyscanArgs)
 	t.Setenv("CM_TEST_SSH_ARGS", sshArgs)
 	t.Setenv("CM_TEST_SSH_MODES", sshModes)
-	return hostKeyScanFakeEnv{tempRoot: root, keyscanArgs: keyscanArgs, sshArgs: sshArgs, sshModes: sshModes}
+	t.Setenv("CM_TEST_SSH_READY", sshReady)
+	return hostKeyScanFakeEnv{tempRoot: root, keyscanArgs: keyscanArgs, sshArgs: sshArgs, sshModes: sshModes, sshReady: sshReady}
+}
+
+func waitForHostKeyFakeReady(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for fake ssh readiness marker %s", path)
 }
 
 func assertKeyscanArgs(t *testing.T, path, host string) {
@@ -323,6 +468,9 @@ func assertSafeSSHArgs(t *testing.T, path, host string) {
 		"-o", "PreferredAuthentications=none",
 		"-o", "PasswordAuthentication=no",
 		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "IdentityFile=none",
+		"-o", "CertificateFile=none",
+		"-o", "IdentityAgent=none",
 		"-o", "ConnectTimeout=5",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + knownHosts,
@@ -334,8 +482,14 @@ func assertSafeSSHArgs(t *testing.T, path, host string) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ssh argv = %#v, want %#v", got, want)
 	}
-	if strings.Contains(strings.Join(got, " "), "IdentityFile") {
-		t.Fatalf("ssh argv contains identity file: %q", got)
+	for option, want := range map[string]string{
+		"IdentityFile=":    "none",
+		"CertificateFile=": "none",
+		"IdentityAgent=":   "none",
+	} {
+		if gotValue := optionValue(got, option); gotValue != want {
+			t.Fatalf("ssh argv option %q = %q, want %q: %q", option, gotValue, want, got)
+		}
 	}
 }
 
@@ -400,18 +554,26 @@ func TestMain(m *testing.M) {
 	switch name {
 	case "ssh-keyscan":
 		_ = os.WriteFile(os.Getenv("CM_TEST_KEYSCAN_ARGS"), []byte(strings.Join(os.Args[1:], "\x00")), 0o600)
-		runHostKeyFake(os.Getenv("CM_TEST_KEYSCAN_MODE"), os.Getenv("CM_TEST_KEYSCAN_KEY"), "")
+		runHostKeyFake(os.Getenv("CM_TEST_KEYSCAN_MODE"), os.Getenv("CM_TEST_KEYSCAN_KEY"), "", hostKeyFakeOutput("CM_TEST_KEYSCAN_OUTPUT"))
 	case "ssh":
 		args := os.Args[1:]
 		_ = os.WriteFile(os.Getenv("CM_TEST_SSH_ARGS"), []byte(strings.Join(args, "\x00")), 0o600)
 		knownHosts := optionValue(args, "UserKnownHostsFile=")
 		recordTemporaryHostKeyModes(knownHosts)
-		runHostKeyFake(os.Getenv("CM_TEST_SSH_MODE"), os.Getenv("CM_TEST_SSH_KEY"), knownHosts)
+		_ = os.WriteFile(os.Getenv("CM_TEST_SSH_READY"), []byte("ready"), 0o600)
+		runHostKeyFake(os.Getenv("CM_TEST_SSH_MODE"), os.Getenv("CM_TEST_SSH_KEY"), knownHosts, hostKeyFakeOutput("CM_TEST_SSH_OUTPUT"))
 	}
 	os.Exit(2)
 }
 
-func runHostKeyFake(mode, key, knownHosts string) {
+func hostKeyFakeOutput(specific string) string {
+	if output := os.Getenv(specific); output != "" {
+		return output
+	}
+	return os.Getenv("CM_TEST_SECRET_OUTPUT")
+}
+
+func runHostKeyFake(mode, key, knownHosts, output string) {
 	switch mode {
 	case "key", "key-exit-1", "key-exit-255":
 		if knownHosts == "" {
@@ -427,7 +589,7 @@ func runHostKeyFake(mode, key, knownHosts string) {
 		}
 		os.Exit(0)
 	case "fail":
-		_, _ = os.Stderr.WriteString(os.Getenv("CM_TEST_SECRET_OUTPUT"))
+		_, _ = os.Stderr.WriteString(output)
 		os.Exit(1)
 	case "fail-if-called":
 		os.Exit(99)
@@ -435,7 +597,7 @@ func runHostKeyFake(mode, key, knownHosts string) {
 		time.Sleep(time.Minute)
 		os.Exit(0)
 	default:
-		_, _ = os.Stderr.WriteString(os.Getenv("CM_TEST_SECRET_OUTPUT"))
+		_, _ = os.Stderr.WriteString(output)
 		os.Exit(0)
 	}
 }

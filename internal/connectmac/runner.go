@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -105,34 +107,45 @@ func (ExecRunner) KnownHostKey(ctx context.Context, host string) (string, error)
 	return string(out), nil
 }
 func (ExecRunner) ScanHostKey(ctx context.Context, host string) (string, error) {
+	result, err := (ExecRunner{}).ScanHostKeyWithMetadata(ctx, host)
+	return result.Keys, err
+}
+
+func (ExecRunner) ScanHostKeyWithMetadata(ctx context.Context, host string) (HostKeyScanResult, error) {
+	result := HostKeyScanResult{Scanner: "ssh-keyscan"}
 	normalizedHost, err := normalizeHostKeyScanHost(host)
 	if err != nil {
-		return "", err
+		return result, err
 	}
 	cmd := exec.CommandContext(ctx, "ssh-keyscan", "-T", "5", "--", normalizedHost)
-	primaryOutput, primaryErr := cmd.Output()
-	if keys := validHostKeyRecords(primaryOutput, normalizedHost); keys != "" {
-		return keys, nil
+	var primaryOutput, primaryDiagnostic boundedBuffer
+	cmd.Stdout = &primaryOutput
+	cmd.Stderr = &primaryDiagnostic
+	primaryErr := cmd.Run()
+	if keys := validHostKeyRecords(primaryOutput.data, normalizedHost); keys != "" {
+		result.Keys = keys
+		return result, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return canceledHostKeyScan(result, err)
 	}
+	result.Scanner = "ssh-fallback"
 
 	tempDir, err := os.MkdirTemp("", "connectmac-host-key-")
 	if err != nil {
-		return "", hostKeyScanError(primaryErr, fmt.Errorf("create isolated storage: %w", err))
+		return failedHostKeyScan(result, primaryErr, primaryDiagnostic.String(), fmt.Errorf("create isolated storage: %w", err), "")
 	}
 	defer os.RemoveAll(tempDir)
 	if err := os.Chmod(tempDir, 0o700); err != nil {
-		return "", hostKeyScanError(primaryErr, fmt.Errorf("secure isolated storage: %w", err))
+		return failedHostKeyScan(result, primaryErr, primaryDiagnostic.String(), fmt.Errorf("secure isolated storage: %w", err), "")
 	}
 	knownHosts := filepath.Join(tempDir, "known_hosts")
 	file, err := os.OpenFile(knownHosts, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", hostKeyScanError(primaryErr, fmt.Errorf("create isolated host key file: %w", err))
+		return failedHostKeyScan(result, primaryErr, primaryDiagnostic.String(), fmt.Errorf("create isolated host key file: %w", err), "")
 	}
 	if err := file.Close(); err != nil {
-		return "", hostKeyScanError(primaryErr, fmt.Errorf("close isolated host key file: %w", err))
+		return failedHostKeyScan(result, primaryErr, primaryDiagnostic.String(), fmt.Errorf("close isolated host key file: %w", err), "")
 	}
 
 	args := []string{
@@ -142,6 +155,9 @@ func (ExecRunner) ScanHostKey(ctx context.Context, host string) (string, error) 
 		"-o", "PreferredAuthentications=none",
 		"-o", "PasswordAuthentication=no",
 		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "IdentityFile=none",
+		"-o", "CertificateFile=none",
+		"-o", "IdentityAgent=none",
 		"-o", "ConnectTimeout=5",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + knownHosts,
@@ -150,20 +166,98 @@ func (ExecRunner) ScanHostKey(ctx context.Context, host string) (string, error) 
 		"-o", "ProxyCommand=none",
 		"--", normalizedHost, "true",
 	}
-	fallbackErr := exec.CommandContext(ctx, "ssh", args...).Run()
+	fallbackCmd := exec.CommandContext(ctx, "ssh", args...)
+	var fallbackDiagnostic boundedBuffer
+	fallbackCmd.Stderr = &fallbackDiagnostic
+	fallbackErr := fallbackCmd.Run()
 	data, readErr := os.ReadFile(knownHosts)
 	if readErr == nil {
 		if keys := validHostKeyRecords(data, normalizedHost); keys != "" {
-			return keys, nil
+			result.Keys = keys
+			return result, nil
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return canceledHostKeyScan(result, err)
 	}
 	if readErr != nil {
 		fallbackErr = fmt.Errorf("read isolated host key file: %w", readErr)
 	}
-	return "", hostKeyScanError(primaryErr, fallbackErr)
+	return failedHostKeyScan(result, primaryErr, primaryDiagnostic.String(), fallbackErr, fallbackDiagnostic.String())
+}
+
+func canceledHostKeyScan(result HostKeyScanResult, err error) (HostKeyScanResult, error) {
+	if errors.Is(err, context.Canceled) {
+		result.Cause = "canceled"
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		result.Cause = "deadline_exceeded"
+	}
+	return result, err
+}
+
+const maxHostKeyDiagnosticBytes = 4096
+
+type boundedBuffer struct{ data []byte }
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := maxHostKeyDiagnosticBytes - len(b.data)
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.data = append(b.data, p...)
+	}
+	return n, nil
+}
+
+func (b boundedBuffer) String() string { return string(b.data) }
+
+func failedHostKeyScan(result HostKeyScanResult, primaryErr error, primaryText string, fallbackErr error, fallbackText string) (HostKeyScanResult, error) {
+	result.Cause = classifyHostKeyScanCause([]error{fallbackErr}, fallbackText)
+	result.Detail = hostKeyScanError(primaryErr, fallbackErr).Error()
+	return result, errors.New(result.Detail)
+}
+
+func classifyHostKeyScanCause(errs []error, text string) string {
+	for _, err := range errs {
+		if hostKeyScanUnreachableError(err) {
+			return "unreachable"
+		}
+	}
+	if len(text) > maxHostKeyDiagnosticBytes {
+		text = text[:maxHostKeyDiagnosticBytes]
+	}
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"connection refused", "connection reset", "connection timed out", "operation timed out",
+		"host is down", "no route to host", "network is unreachable", "network unreachable",
+		"could not resolve hostname", "name or service not known", "temporary failure in name resolution",
+		"nodename nor servname provided, or not known",
+	} {
+		if strings.Contains(lower, marker) {
+			return "unreachable"
+		}
+	}
+	return "scanner_compatibility"
+}
+
+func hostKeyScanUnreachableError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.EHOSTDOWN) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func normalizeHostKeyScanHost(host string) (string, error) {

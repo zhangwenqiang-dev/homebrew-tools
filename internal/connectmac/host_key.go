@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -24,11 +25,14 @@ const (
 )
 
 type HostKeyCheck struct {
-	Host    string
-	Status  HostKeyStatus
-	Scanned string
-	Known   string
-	Message string
+	Host       string
+	Status     HostKeyStatus
+	Scanned    string
+	Known      string
+	Message    string
+	Scanner    string `json:"scanner,omitempty"`
+	ScanCause  string `json:"-"`
+	ScanDetail string `json:"-"`
 }
 
 func (a App) checkHostKey(ctx context.Context, profile Profile) (HostKeyCheck, error) {
@@ -36,14 +40,46 @@ func (a App) checkHostKey(ctx context.Context, profile Profile) (HostKeyCheck, e
 	if profile.Host == "" {
 		return result, fmt.Errorf("host is required")
 	}
-	scanned, err := a.Runner.ScanHostKey(ctx, profile.Host)
+	var scanned string
+	var err error
+	if scanner, ok := a.Runner.(HostKeyScanner); ok {
+		metadata, scanErr := scanner.ScanHostKeyWithMetadata(ctx, profile.Host)
+		scanned, err = metadata.Keys, scanErr
+		result.Scanner, result.ScanCause, result.ScanDetail = metadata.Scanner, metadata.Cause, metadata.Detail
+	} else {
+		scanned, err = a.Runner.ScanHostKey(ctx, profile.Host)
+		if errors.Is(err, context.Canceled) {
+			result.ScanCause = "canceled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			result.ScanCause = "deadline_exceeded"
+		} else if err != nil {
+			result.ScanCause = classifyHostKeyScanCause([]error{err}, err.Error())
+		}
+	}
+	if errors.Is(err, context.Canceled) {
+		result.ScanCause = "canceled"
+		result.Scanned = scanned
+		result.Status = HostKeyScanFailed
+		result.Message = "host key scan canceled"
+		return result, context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		result.ScanCause = "deadline_exceeded"
+		result.Scanned = scanned
+		result.Status = HostKeyScanFailed
+		result.Message = "host key scan timed out"
+		return result, context.DeadlineExceeded
+	}
+	if err != nil && result.ScanCause == "" {
+		result.ScanCause = classifyHostKeyScanCause([]error{err}, err.Error())
+	}
 	result.Scanned = scanned
 	if err != nil || len(hostKeyPairs(scanned)) == 0 {
 		result.Status = HostKeyScanFailed
 		if err != nil {
-			result.Message = err.Error()
+			result.Message = hostKeyScanFailureMessage(result.ScanCause)
 		} else {
-			result.Message = "no host key returned by ssh-keyscan"
+			result.Message = hostKeyScanFailureMessage(result.ScanCause)
 		}
 		return result, nil
 	}
@@ -68,8 +104,21 @@ func (a App) checkHostKey(ctx context.Context, profile Profile) (HostKeyCheck, e
 	return result, nil
 }
 
+func hostKeyScanFailureMessage(cause string) string {
+	if cause == "unreachable" {
+		return "host key scan failed: SSH service is unreachable; verify the host, network, and port 22"
+	}
+	return "host key scan failed: SSH Host Key negotiation failed; update OpenSSH or check server Host Key compatibility"
+}
+
 func (a App) requireCurrentHostKey(ctx context.Context, profile Profile) (HostKeyCheck, error) {
 	check, err := a.checkHostKey(ctx, profile)
+	if errors.Is(err, context.Canceled) {
+		return check, context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return check, context.DeadlineExceeded
+	}
 	if err != nil {
 		check.Status = HostKeyScanFailed
 		check.Message = "host key check failed"
@@ -90,6 +139,7 @@ func (a App) requireCurrentHostKey(ctx context.Context, profile Profile) (HostKe
 		code = "host_key_missing"
 		message = "host key is missing; confirm the fingerprint, then run cm host-key fix <profile>"
 	case HostKeyScanFailed:
+		message = check.Message
 	default:
 		message = "host key status is unknown; verify network access and try again"
 	}
@@ -114,11 +164,24 @@ func (a App) hostKeyBlocked(ctx context.Context, profile Profile, check HostKeyC
 			Level: "error", Action: "host-key.blocked", Profile: profile.Name,
 			AppleEmail: profile.AWS.AccountEmail, RequestID: op.RequestID, Source: source,
 			Status: string(check.Status), Outcome: "failure", ErrorCode: code,
-			Message: message,
+			Scanner: check.Scanner, FailureStage: check.ScanCause, Message: boundedHostKeyDiagnostic(message, check.ScanDetail),
 		})
 	}
 	return LocalCodedError{Code: code, Cause: errors.New(message)}
 }
+
+func boundedHostKeyDiagnostic(message, detail string) string {
+	if detail == "" || !safeHostKeyDiagnosticPattern.MatchString(detail) {
+		return message
+	}
+	combined := message + "; diagnostic: " + detail
+	if len(combined) > 240 {
+		return combined[:240]
+	}
+	return combined
+}
+
+var safeHostKeyDiagnosticPattern = regexp.MustCompile(`^host key scan failed \(primary: (?:no valid keys|canceled|timed out|execution failed|exit [0-9]+); fallback: (?:no valid keys|canceled|timed out|execution failed|exit [0-9]+)\)$`)
 
 func (a App) applyCheckedHostKey(ctx context.Context, check HostKeyCheck) (HostKeyCheck, error) {
 	if check.Host == "" {

@@ -111,6 +111,7 @@ type LogEntry struct {
 	ErrorCode        string `json:"error_code,omitempty"`
 	ExitCode         int    `json:"exit_code,omitempty"`
 	FailureStage     string `json:"failure_stage,omitempty"`
+	Scanner          string `json:"scanner,omitempty"`
 	Attempt          int    `json:"attempt,omitempty"`
 	HTTPStatus       int    `json:"http_status,omitempty"`
 	Message          string `json:"message"`
@@ -1355,6 +1356,7 @@ func sanitizeLogEntry(entry LogEntry) LogEntry {
 	entry.Phase = sanitizeLogText(entry.Phase)
 	entry.ErrorCode = sanitizeLogText(entry.ErrorCode)
 	entry.FailureStage = sanitizeLogText(entry.FailureStage)
+	entry.Scanner = sanitizeLogText(entry.Scanner)
 	entry.Message = sanitizeLogText(entry.Message)
 	return entry
 }

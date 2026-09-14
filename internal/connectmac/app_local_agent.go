@@ -2081,7 +2081,7 @@ func (a App) localAgentHostKeyCheckHandler() http.HandlerFunc {
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
 			"profile": profile.Name, "status": string(check.Status),
-			"fingerprints": fingerprints, "challenge": challenge,
+			"fingerprints": fingerprints, "challenge": challenge, "scanner": check.Scanner,
 		}})
 	}
 }

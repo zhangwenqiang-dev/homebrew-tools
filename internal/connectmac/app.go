@@ -26,6 +26,17 @@ type Runner interface {
 	OpenVNC(ctx context.Context, target string) error
 }
 
+type HostKeyScanResult struct {
+	Keys    string
+	Scanner string
+	Cause   string
+	Detail  string
+}
+
+type HostKeyScanner interface {
+	ScanHostKeyWithMetadata(ctx context.Context, host string) (HostKeyScanResult, error)
+}
+
 type ExecRunner struct{}
 
 type App struct {

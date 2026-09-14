@@ -167,6 +167,16 @@ func (r *fakeRunner) ScanHostKey(ctx context.Context, host string) (string, erro
 	return r.scannedKey, nil
 }
 
+type metadataFakeRunner struct {
+	*fakeRunner
+	result HostKeyScanResult
+	err    error
+}
+
+func (r *metadataFakeRunner) ScanHostKeyWithMetadata(context.Context, string) (HostKeyScanResult, error) {
+	return r.result, r.err
+}
+
 func (r *fakeRunner) ForgetHost(ctx context.Context, host string) error {
 	r.forgotHost = host
 	return nil
@@ -1034,10 +1044,10 @@ func TestLocalAgentHostKeyConfirmationRepairsOnlyAfterExplicitMatchingConfirmati
 	scannedFirst, fingerprint := testScannedHostKey(t, "mac-host.example.com")
 	scannedSecond, secondFingerprint := testScannedHostKey(t, "mac-host.example.com")
 	scanned := scannedFirst + scannedSecond
-	runner := &fakeRunner{
-		knownHost:  "mac-host.example.com ssh-ed25519 AAAAOLD\n",
-		scannedKey: scanned,
+	baseRunner := &fakeRunner{
+		knownHost: "mac-host.example.com ssh-ed25519 AAAAOLD\n",
 	}
+	runner := &metadataFakeRunner{fakeRunner: baseRunner, result: HostKeyScanResult{Keys: scanned, Scanner: "ssh-fallback"}}
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
 	app.Runner = runner
@@ -1048,8 +1058,13 @@ func TestLocalAgentHostKeyConfirmationRepairsOnlyAfterExplicitMatchingConfirmati
 	checkReq := localAgentTestRequest(http.MethodPost, "/host-key/check", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(body)+`}`))
 	checkRec := httptest.NewRecorder()
 	handler.ServeHTTP(checkRec, checkReq)
-	if !strings.Contains(checkRec.Body.String(), `"status":"stale"`) || !strings.Contains(checkRec.Body.String(), fingerprint) || !strings.Contains(checkRec.Body.String(), secondFingerprint) {
+	if !strings.Contains(checkRec.Body.String(), `"status":"stale"`) || !strings.Contains(checkRec.Body.String(), fingerprint) || !strings.Contains(checkRec.Body.String(), secondFingerprint) || !strings.Contains(checkRec.Body.String(), `"scanner":"ssh-fallback"`) {
 		t.Fatalf("check response=%s", checkRec.Body.String())
+	}
+	for _, internal := range []string{"ssh-ed25519", strings.Fields(scannedFirst)[2], strings.Fields(scannedSecond)[2], "scan_cause", "scan_detail", "diagnostic", "connectmac-host-key-"} {
+		if strings.Contains(checkRec.Body.String(), internal) {
+			t.Fatalf("check response exposed scan internals %q: %s", internal, checkRec.Body.String())
+		}
 	}
 	if runner.forgotHost != "" {
 		t.Fatalf("check mutated known_hosts for %q", runner.forgotHost)
@@ -7823,6 +7838,116 @@ func TestRequireCurrentHostKeyErrorCodes(t *testing.T) {
 				t.Fatalf("error code=%q want=%q err=%v", classified.Code, tc.wantCode, err)
 			}
 		})
+	}
+}
+
+func TestLegacyRunnerHostKeyFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, detail, wantCause, wantMessage string
+	}{
+		{name: "unreachable", detail: "ssh: connect to host private.example port 22: Connection reset by peer", wantCause: "unreachable", wantMessage: "SSH service is unreachable"},
+		{name: "macOS DNS", detail: "ssh: Could not resolve hostname private.example: nodename nor servname provided, or not known", wantCause: "unreachable", wantMessage: "SSH service is unreachable"},
+		{name: "unknown", detail: "scanner compatibility failure for private.example", wantCause: "scanner_compatibility", wantMessage: "Host Key negotiation failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, t.TempDir())
+			app.Runner = &fakeRunner{scanErr: errors.New(tc.detail)}
+			check, err := app.requireCurrentHostKey(localLifecycleTestContext("legacy-"+tc.name), validProfile(writeSSHKey(t, 0o600)))
+			if err == nil || check.ScanCause != tc.wantCause || !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("check=%+v err=%v", check, err)
+			}
+			if strings.Contains(err.Error(), "private.example") || strings.Contains(readTestLogsRaw(t, app.LogManager), "private.example") {
+				t.Fatalf("legacy error detail leaked: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRequireCurrentHostKeyPropagatesCancellationWithoutBlockedLog(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	app.Runner = &metadataFakeRunner{
+		fakeRunner: &fakeRunner{},
+		result:     HostKeyScanResult{Scanner: "ssh-fallback", Cause: "canceled"},
+		err:        context.Canceled,
+	}
+	app.HostKeyBlockedEvents = newHostKeyBlockedEventCache(8, time.Minute)
+	check, err := app.requireCurrentHostKey(localLifecycleTestContext("host-key-canceled"), validProfile(writeSSHKey(t, 0o600)))
+	if !errors.Is(err, context.Canceled) || check.Status != HostKeyScanFailed || check.ScanCause != "canceled" || check.Scanner != "ssh-fallback" {
+		t.Fatalf("check=%+v err=%v", check, err)
+	}
+	if files, listErr := app.LogManager.List(); listErr != nil || len(files) != 0 {
+		t.Fatalf("cancellation produced structured log noise: files=%+v err=%v", files, listErr)
+	}
+}
+
+func TestRequireCurrentHostKeyPropagatesDeadlineWithoutBlockedLog(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	app.Runner = &metadataFakeRunner{
+		fakeRunner: &fakeRunner{},
+		result:     HostKeyScanResult{Scanner: "ssh-fallback", Cause: "deadline_exceeded"},
+		err:        context.DeadlineExceeded,
+	}
+	app.HostKeyBlockedEvents = newHostKeyBlockedEventCache(8, time.Minute)
+	check, err := app.requireCurrentHostKey(localLifecycleTestContext("host-key-deadline"), validProfile(writeSSHKey(t, 0o600)))
+	if !errors.Is(err, context.DeadlineExceeded) || check.Status != HostKeyScanFailed || check.ScanCause != "deadline_exceeded" || check.Scanner != "ssh-fallback" {
+		t.Fatalf("check=%+v err=%v", check, err)
+	}
+	if files, listErr := app.LogManager.List(); listErr != nil || len(files) != 0 {
+		t.Fatalf("deadline produced structured log noise: files=%+v err=%v", files, listErr)
+	}
+}
+
+func TestHostKeyScannerMetadataAndActionableFailureAreSafe(t *testing.T) {
+	tests := []struct {
+		name, cause, wantMessage string
+	}{
+		{name: "unreachable", cause: "unreachable", wantMessage: "SSH service is unreachable"},
+		{name: "compatibility", cause: "scanner_compatibility", wantMessage: "Host Key negotiation failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out, errOut bytes.Buffer
+			secret := "mac-user ssh-ed25519 AAAA-DO-NOT-LOG /private/tmp/connectmac-host-key-secret challenge-secret SHA256:secret"
+			runner := &metadataFakeRunner{
+				fakeRunner: &fakeRunner{},
+				result:     HostKeyScanResult{Scanner: "ssh-fallback", Cause: tc.cause, Detail: secret},
+				err:        errors.New("sanitized scan failure"),
+			}
+			app := testApp(&out, &errOut, dir)
+			app.Runner = runner
+			app.HostKeyBlockedEvents = newHostKeyBlockedEventCache(8, time.Minute)
+			profile := validProfile(writeSSHKey(t, 0o600))
+			check, err := app.requireCurrentHostKey(localLifecycleTestContext("scanner-safe"), profile)
+			if err == nil || check.Scanner != "ssh-fallback" || check.ScanCause != tc.cause || !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("check=%+v err=%v", check, err)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 1 || entries[0].Action != "host-key.blocked" || entries[0].Scanner != "ssh-fallback" || entries[0].ErrorCode != "host_key_scan_failed" || entries[0].FailureStage != tc.cause {
+				t.Fatalf("entries=%+v", entries)
+			}
+			raw := readTestLogsRaw(t, app.LogManager)
+			for _, sensitive := range []string{"mac-user", "ssh-ed25519", "AAAA-DO-NOT-LOG", "/private/tmp/connectmac-host-key-secret", "challenge-secret", "SHA256:secret"} {
+				if strings.Contains(raw, sensitive) {
+					t.Fatalf("serialized log leaked %q: %s", sensitive, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckHostKeyCarriesSuccessfulScannerMetadata(t *testing.T) {
+	key, _ := testScannedHostKey(t, "mac-host.example.com")
+	runner := &metadataFakeRunner{fakeRunner: &fakeRunner{knownHost: key}, result: HostKeyScanResult{Keys: key, Scanner: "ssh-fallback"}}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	app.Runner = runner
+	check, err := app.checkHostKey(context.Background(), validProfile(writeSSHKey(t, 0o600)))
+	if err != nil || check.Status != HostKeyCurrent || check.Scanner != "ssh-fallback" {
+		t.Fatalf("check=%+v err=%v", check, err)
 	}
 }
 

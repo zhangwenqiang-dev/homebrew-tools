@@ -386,10 +386,10 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 		}
 		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
 		if check.Status == HostKeyScanFailed {
-			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed"})
+			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed", Scanner: check.Scanner})
 			return 1
 		}
-		a.logLocalCommand(ctx, "known-host.checked", profile, 0, startedAt, LogEntry{})
+		a.logLocalCommand(ctx, "known-host.checked", profile, 0, startedAt, LogEntry{Scanner: check.Scanner})
 		return 0
 	case "fix":
 		confirm, supplied, err := parseHostKeyFixConfirmation(args[2:])
@@ -404,7 +404,7 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 			return 1
 		}
 		if check.Status == HostKeyScanFailed {
-			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed"})
+			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed", Scanner: check.Scanner})
 			return 1
 		}
 		fingerprints := hostKeyFingerprints(check.Scanned)
@@ -433,7 +433,7 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 			fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
 			return 1
 		}
-		a.logLocalCommand(ctx, "known-host.fixed", profile, 0, startedAt, LogEntry{})
+		a.logLocalCommand(ctx, "known-host.fixed", profile, 0, startedAt, LogEntry{Scanner: check.Scanner})
 		return 0
 	default:
 		fmt.Fprintf(a.Err, "unknown host-key command %q\n", action)
