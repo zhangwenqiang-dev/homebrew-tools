@@ -2,10 +2,17 @@ package connectmac
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func (ExecRunner) RunForeground(ctx context.Context, args []string) error {
@@ -98,12 +105,176 @@ func (ExecRunner) KnownHostKey(ctx context.Context, host string) (string, error)
 	return string(out), nil
 }
 func (ExecRunner) ScanHostKey(ctx context.Context, host string) (string, error) {
-	cmd := exec.CommandContext(ctx, "ssh-keyscan", "-T", "5", host)
-	out, err := cmd.Output()
+	normalizedHost, err := normalizeHostKeyScanHost(host)
 	if err != nil {
-		return string(out), err
+		return "", err
 	}
-	return string(out), nil
+	cmd := exec.CommandContext(ctx, "ssh-keyscan", "-T", "5", "--", normalizedHost)
+	primaryOutput, primaryErr := cmd.Output()
+	if keys := validHostKeyRecords(primaryOutput, normalizedHost); keys != "" {
+		return keys, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	tempDir, err := os.MkdirTemp("", "connectmac-host-key-")
+	if err != nil {
+		return "", hostKeyScanError(primaryErr, fmt.Errorf("create isolated storage: %w", err))
+	}
+	defer os.RemoveAll(tempDir)
+	if err := os.Chmod(tempDir, 0o700); err != nil {
+		return "", hostKeyScanError(primaryErr, fmt.Errorf("secure isolated storage: %w", err))
+	}
+	knownHosts := filepath.Join(tempDir, "known_hosts")
+	file, err := os.OpenFile(knownHosts, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", hostKeyScanError(primaryErr, fmt.Errorf("create isolated host key file: %w", err))
+	}
+	if err := file.Close(); err != nil {
+		return "", hostKeyScanError(primaryErr, fmt.Errorf("close isolated host key file: %w", err))
+	}
+
+	args := []string{
+		"-F", "/dev/null",
+		"-n", "-T",
+		"-o", "BatchMode=yes",
+		"-o", "PreferredAuthentications=none",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "ConnectTimeout=5",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile=" + knownHosts,
+		"-o", "GlobalKnownHostsFile=/dev/null",
+		"-o", "ClearAllForwardings=yes",
+		"-o", "ProxyCommand=none",
+		"--", normalizedHost, "true",
+	}
+	fallbackErr := exec.CommandContext(ctx, "ssh", args...).Run()
+	data, readErr := os.ReadFile(knownHosts)
+	if readErr == nil {
+		if keys := validHostKeyRecords(data, normalizedHost); keys != "" {
+			return keys, nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if readErr != nil {
+		fallbackErr = fmt.Errorf("read isolated host key file: %w", readErr)
+	}
+	return "", hostKeyScanError(primaryErr, fallbackErr)
+}
+
+func normalizeHostKeyScanHost(host string) (string, error) {
+	if host == "" || strings.TrimSpace(host) != host {
+		return "", errors.New("invalid host for host key scan")
+	}
+	for _, r := range host {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", errors.New("invalid host for host key scan")
+		}
+	}
+	if strings.HasPrefix(host, "[") {
+		if !strings.HasSuffix(host, "]") || strings.Count(host, "[") != 1 || strings.Count(host, "]") != 1 {
+			return "", errors.New("invalid host for host key scan")
+		}
+		addr, err := netip.ParseAddr(host[1 : len(host)-1])
+		if err != nil || !addr.Is6() {
+			return "", errors.New("invalid host for host key scan")
+		}
+		return addr.String(), nil
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String(), nil
+	}
+	if len(host) > 253 || strings.ContainsAny(host, ":@/,\\") || strings.HasPrefix(host, "-") {
+		return "", errors.New("invalid host for host key scan")
+	}
+	if strings.HasSuffix(host, "..") {
+		return "", errors.New("invalid host for host key scan")
+	}
+	trimmed := strings.TrimSuffix(host, ".")
+	if trimmed == "" {
+		return "", errors.New("invalid host for host key scan")
+	}
+	allNumeric := true
+	for _, label := range strings.Split(trimmed, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", errors.New("invalid host for host key scan")
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+				return "", errors.New("invalid host for host key scan")
+			}
+			if r < '0' || r > '9' {
+				allNumeric = false
+			}
+		}
+	}
+	if allNumeric && strings.Contains(trimmed, ".") {
+		return "", errors.New("invalid host for host key scan")
+	}
+	return strings.ToLower(trimmed), nil
+}
+
+func validHostKeyRecords(data []byte, host string) string {
+	var records []string
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || !hostKeyRecordHostMatches(fields[0], host) || !supportedHostKeyType(fields[1]) {
+			continue
+		}
+		key, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(fields[1] + " " + fields[2]))
+		if err != nil || len(rest) != 0 || key.Type() != fields[1] {
+			continue
+		}
+		records = append(records, strings.Join(fields[:3], " "))
+	}
+	if len(records) == 0 {
+		return ""
+	}
+	return strings.Join(records, "\n") + "\n"
+}
+
+func hostKeyRecordHostMatches(recordHost, host string) bool {
+	if strings.HasPrefix(recordHost, "@") || strings.Contains(recordHost, ",") {
+		return false
+	}
+	return strings.EqualFold(recordHost, host) || strings.EqualFold(recordHost, "["+host+"]:22")
+}
+
+func supportedHostKeyType(keyType string) bool {
+	switch keyType {
+	case "ssh-ed25519", "ssh-rsa",
+		"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+		"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func hostKeyScanError(primaryErr, fallbackErr error) error {
+	return fmt.Errorf("host key scan failed (primary: %s; fallback: %s)",
+		hostKeyScanStage(primaryErr), hostKeyScanStage(fallbackErr))
+}
+
+func hostKeyScanStage(err error) string {
+	if err == nil {
+		return "no valid keys"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timed out"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("exit %d", exitErr.ExitCode())
+	}
+	return "execution failed"
 }
 func (ExecRunner) ForgetHost(ctx context.Context, host string) error {
 	cmd := exec.CommandContext(ctx, "ssh-keygen", "-R", host)
