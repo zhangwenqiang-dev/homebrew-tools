@@ -2181,6 +2181,7 @@ func (a App) localAgentTerminalCheckHandler() http.HandlerFunc {
 			"target":                 fmt.Sprintf("%s@%s", profile.User, profile.Host),
 			"host_key_status":        string(check.Status),
 			"host_key_message":       check.Message,
+			"host_key_algorithms":    mustTrustedHostKeyAlgorithms(check),
 			"terminal_session_token": token,
 		}})
 	}
@@ -2228,7 +2229,7 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, strings.Join(validationMessages(errs), "\n"))
 			return
 		}
-		_, err = a.requireCurrentHostKey(ctx, profile)
+		check, err := a.requireCurrentHostKey(ctx, profile)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
@@ -2254,18 +2255,18 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			return
 		}
 		ctx = withOperationContext(r.Context(), OperationContext{RequestID: grant.RequestID, Source: "web-local"})
-		_ = a.observeLocalTerminalSession(ctx, profile, func() error {
-			return a.proxyWebTerminal(ctx, conn, profile)
+		_ = a.observeLocalTerminalSession(ctx, profile, mustTrustedHostKeyAlgorithms(check), func() error {
+			return a.proxyWebTerminal(ctx, conn, profile, check)
 		})
 	}
 }
 
-func (a App) observeLocalTerminalSession(ctx context.Context, profile Profile, run func() error) error {
+func (a App) observeLocalTerminalSession(ctx context.Context, profile Profile, hostKeyAlgorithms []string, run func() error) error {
 	startedAt := time.Now()
-	a.logLocalCommand(ctx, "terminal.opened", profile, 0, startedAt, LogEntry{Phase: "opened"})
+	a.logLocalCommand(ctx, "terminal.opened", profile, 0, startedAt, LogEntry{Phase: "opened", HostKeyAlgorithms: hostKeyAlgorithms})
 	proxyErr := run()
 	code := 0
-	entry := finalizeTerminalClosedEntry(LogEntry{Phase: "closed"}, proxyErr)
+	entry := finalizeTerminalClosedEntry(LogEntry{Phase: "closed", HostKeyAlgorithms: hostKeyAlgorithms}, proxyErr)
 	if !normalTerminalClose(proxyErr) {
 		code = 1
 	}

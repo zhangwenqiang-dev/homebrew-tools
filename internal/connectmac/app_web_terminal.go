@@ -30,7 +30,7 @@ func (a App) webTerminalCheckHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		profile, err := a.prepareWebTerminal(r, configPath, r.URL.Query().Get("profile"))
+		profile, _, err := a.prepareWebTerminal(r, configPath, r.URL.Query().Get("profile"))
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
@@ -50,7 +50,7 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		profile, err := a.prepareWebTerminal(r, configPath, r.URL.Query().Get("profile"))
+		profile, check, err := a.prepareWebTerminal(r, configPath, r.URL.Query().Get("profile"))
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
@@ -77,22 +77,23 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 		}
 		startedAt := time.Now()
 		op := a.operationContextForRequest(r)
+		hostKeyAlgorithms := mustTrustedHostKeyAlgorithms(check)
 		a.writeRuntimeLog(LogEntry{
 			Action: "terminal.opened", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
 			ActorMemberID: op.Actor.MemberID, ActorMemberEmail: op.Actor.MemberEmail,
 			ActorMemberName: op.Actor.MemberName, RequestID: op.RequestID,
 			SessionIDHash: op.SessionIDHash, Source: "web-server",
-			Phase: "opened", Outcome: "success", Message: "terminal.opened",
+			Phase: "opened", Outcome: "success", Message: "terminal.opened", HostKeyAlgorithms: hostKeyAlgorithms,
 		})
 		a.recordWebEventForRequest(r, configPath, profile.Name, "terminal", true, webAPIResponse{OK: true, Output: "opened web terminal"})
-		proxyErr := a.proxyWebTerminal(r.Context(), conn, profile)
+		proxyErr := a.proxyWebTerminal(r.Context(), conn, profile, check)
 		entry := LogEntry{
 			Action: "terminal.closed", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
 			ActorMemberID: op.Actor.MemberID, ActorMemberEmail: op.Actor.MemberEmail,
 			ActorMemberName: op.Actor.MemberName, RequestID: op.RequestID,
 			SessionIDHash: op.SessionIDHash, Source: "web-server", Phase: "closed",
 			DurationMS: positiveDurationMS(time.Since(startedAt)), Outcome: "success",
-			Message: "terminal.closed reason=normal",
+			Message: "terminal.closed reason=normal", HostKeyAlgorithms: hostKeyAlgorithms,
 		}
 		entry = finalizeTerminalClosedEntry(entry, proxyErr)
 		a.writeRuntimeLog(entry)
@@ -107,42 +108,43 @@ func sameWebOrigin(r *http.Request) bool {
 	return origin == "http://"+r.Host || origin == "https://"+r.Host
 }
 
-func (a App) prepareWebTerminal(r *http.Request, configPath, profileRef string) (Profile, error) {
+func (a App) prepareWebTerminal(r *http.Request, configPath, profileRef string) (Profile, HostKeyCheck, error) {
 	profileRef = strings.TrimSpace(profileRef)
 	if profileRef == "" {
-		return Profile{}, errors.New("profile is required")
+		return Profile{}, HostKeyCheck{}, errors.New("profile is required")
 	}
 	cfg, err := a.loadWebConfig(r, configPath)
 	if err != nil {
-		return Profile{}, err
+		return Profile{}, HostKeyCheck{}, err
 	}
 	profile, err := resolveProfileRef(cfg, profileRef)
 	if err != nil {
-		return Profile{}, err
+		return Profile{}, HostKeyCheck{}, err
 	}
 	if errs := a.Validator.ValidateAccess(profile); len(errs) > 0 {
-		return Profile{}, fmt.Errorf("profile %s config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
+		return Profile{}, HostKeyCheck{}, fmt.Errorf("profile %s config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
 	}
 	if errs := a.Validator.ValidateAWSProfile(profile); len(errs) > 0 {
-		return Profile{}, fmt.Errorf("profile %s aws config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
+		return Profile{}, HostKeyCheck{}, fmt.Errorf("profile %s aws config error:\n%s", profile.Name, strings.Join(validationMessages(errs), "\n"))
 	}
 	_, status, err := a.AWSService.StatusWithOptions(r.Context(), profile, AWSStatusOptions{IncludeTerminal: false})
 	if err != nil {
-		return Profile{}, fmt.Errorf("aws status failed: %w", err)
+		return Profile{}, HostKeyCheck{}, fmt.Errorf("aws status failed: %w", err)
 	}
 	if !AWSStatusReady(status) {
-		return Profile{}, fmt.Errorf("aws mac is not ready: %s", AWSReadinessSummary(status))
+		return Profile{}, HostKeyCheck{}, fmt.Errorf("aws mac is not ready: %s", AWSReadinessSummary(status))
 	}
 	ctx := withOperationContext(r.Context(), a.operationContextForRequest(r))
-	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
-		return Profile{}, err
+	check, err := a.requireCurrentHostKey(ctx, profile)
+	if err != nil {
+		return Profile{}, check, err
 	}
-	return profile, nil
+	return profile, check, nil
 }
 
-func (a App) proxyWebTerminal(ctx context.Context, conn *websocket.Conn, profile Profile) error {
+func (a App) proxyWebTerminal(ctx context.Context, conn *websocket.Conn, profile Profile, check HostKeyCheck) error {
 	defer conn.Close()
-	client, err := a.openSSHTerminalClient(profile)
+	client, err := a.openSSHTerminalClient(profile, check)
 	if err != nil {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\nconnect failed: "+err.Error()+"\r\n"))
 		return err
@@ -271,7 +273,7 @@ func proxyTerminalIO(
 	}
 }
 
-func (a App) openSSHTerminalClient(profile Profile) (*ssh.Client, error) {
+func (a App) openSSHTerminalClient(profile Profile, check HostKeyCheck) (*ssh.Client, error) {
 	keyPath, err := ExpandPath(profile.IdentityFile)
 	if err != nil {
 		return nil, err
@@ -296,11 +298,16 @@ func (a App) openSSHTerminalClient(profile Profile) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	hostKeyAlgorithms, err := trustedHostKeyAlgorithms(check)
+	if err != nil {
+		return nil, err
+	}
 	config := &ssh.ClientConfig{
-		User:            profile.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         15 * time.Second,
+		User:              profile.User,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           15 * time.Second,
 	}
 	return ssh.Dial("tcp", net.JoinHostPort(profile.Host, "22"), config)
 }

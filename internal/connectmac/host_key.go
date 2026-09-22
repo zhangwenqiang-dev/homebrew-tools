@@ -280,6 +280,50 @@ func hasSharedHostKeyPair(a, b map[string]bool) bool {
 	return false
 }
 
+func trustedHostKeyAlgorithms(check HostKeyCheck) ([]string, error) {
+	known := hostKeyPairs(check.Known)
+	scanned := hostKeyPairs(check.Scanned)
+	trustedTypes := map[string]bool{}
+	for pair := range known {
+		if !scanned[pair] {
+			continue
+		}
+		keyType, _, ok := strings.Cut(pair, " ")
+		if ok {
+			trustedTypes[keyType] = true
+		}
+	}
+
+	preference := []string{
+		ssh.KeyAlgoED25519,
+		ssh.KeyAlgoECDSA521,
+		ssh.KeyAlgoECDSA384,
+		ssh.KeyAlgoECDSA256,
+		ssh.KeyAlgoRSASHA512,
+		ssh.KeyAlgoRSASHA256,
+		ssh.KeyAlgoRSA,
+	}
+	algorithms := make([]string, 0, len(preference))
+	for _, algorithm := range preference {
+		keyType := algorithm
+		if algorithm == ssh.KeyAlgoRSASHA512 || algorithm == ssh.KeyAlgoRSASHA256 {
+			keyType = ssh.KeyAlgoRSA
+		}
+		if trustedTypes[keyType] {
+			algorithms = append(algorithms, algorithm)
+		}
+	}
+	if len(algorithms) == 0 {
+		return nil, LocalCodedError{Code: "host_key_algorithm_mismatch", Cause: errors.New("no confirmed SSH Host Key algorithm matches the current host")}
+	}
+	return algorithms, nil
+}
+
+func mustTrustedHostKeyAlgorithms(check HostKeyCheck) []string {
+	algorithms, _ := trustedHostKeyAlgorithms(check)
+	return algorithms
+}
+
 func hostKeyFingerprints(text string) []string {
 	seen := map[string]bool{}
 	var fingerprints []string

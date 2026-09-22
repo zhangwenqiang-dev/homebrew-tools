@@ -31,6 +31,7 @@ func TestClassifyLocalOperationError(t *testing.T) {
 	}{
 		{name: "host identification changed", err: errors.New("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"), wantCode: "host_key_changed", wantLvl: "error"},
 		{name: "host key verification", err: errors.New("Host key verification failed"), wantCode: "host_key_changed", wantLvl: "error"},
+		{name: "go ssh host key mismatch", err: errors.New("ssh: handshake failed: knownhosts: key mismatch"), wantCode: "host_key_changed", wantLvl: "error"},
 		{name: "exit 255", err: errors.New("exit status 255"), wantCode: "ssh_exit_255", wantLvl: "error", wantExit: 255},
 		{name: "operation timeout", err: errors.New("Operation timed out"), wantCode: "ssh_timeout", wantLvl: "warn"},
 		{name: "deadline", err: context.DeadlineExceeded, wantCode: "ssh_timeout", wantLvl: "warn"},

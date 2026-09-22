@@ -5,8 +5,24 @@ import (
 	"strconv"
 )
 
+func strictSSHHostKeyOptions() ([]string, error) {
+	knownHosts, err := ExpandPath("~/.ssh/known_hosts")
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile=" + knownHosts,
+		"-o", "IdentitiesOnly=yes",
+	}, nil
+}
+
 func SSHArgs(profile Profile) ([]string, error) {
 	keyPath, err := ExpandPath(profile.IdentityFile)
+	if err != nil {
+		return nil, err
+	}
+	hostKeyOptions, err := strictSSHHostKeyOptions()
 	if err != nil {
 		return nil, err
 	}
@@ -14,8 +30,9 @@ func SSHArgs(profile Profile) ([]string, error) {
 	for _, tunnel := range profile.Tunnels {
 		args = append(args, "-L", fmt.Sprintf("%d:%s:%d", tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort))
 	}
+	args = append(args, "-i", keyPath)
+	args = append(args, hostKeyOptions...)
 	args = append(args,
-		"-i", keyPath,
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
@@ -29,12 +46,18 @@ func InteractiveSSHArgs(profile Profile) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
-		"-i", keyPath,
+	hostKeyOptions, err := strictSSHHostKeyOptions()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"-i", keyPath}
+	args = append(args, hostKeyOptions...)
+	args = append(args,
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
 		fmt.Sprintf("%s@%s", profile.User, profile.Host),
-	}, nil
+	)
+	return args, nil
 }
 
 func ExecSSHArgs(profile Profile, command []string) ([]string, error) {
@@ -42,13 +65,17 @@ func ExecSSHArgs(profile Profile, command []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{
-		"-i", keyPath,
-		"-o", "IdentitiesOnly=yes",
+	hostKeyOptions, err := strictSSHHostKeyOptions()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"-i", keyPath}
+	args = append(args, hostKeyOptions...)
+	args = append(args,
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
 		fmt.Sprintf("%s@%s", profile.User, profile.Host),
-	}
+	)
 	args = append(args, command...)
 	return args, nil
 }

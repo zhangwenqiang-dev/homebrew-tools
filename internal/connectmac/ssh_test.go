@@ -16,10 +16,14 @@ func TestSSHArgs(t *testing.T) {
 		t.Fatalf("SSHArgs returned error: %v", err)
 	}
 	wantKey := filepath.Join(home, ".ssh", "example.pem")
+	wantKnownHosts := filepath.Join(home, ".ssh", "known_hosts")
 	want := []string{
 		"-N",
 		"-L", "5900:localhost:5900",
 		"-i", wantKey,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile=" + wantKnownHosts,
+		"-o", "IdentitiesOnly=yes",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
@@ -47,8 +51,12 @@ func TestInteractiveSSHArgs(t *testing.T) {
 		t.Fatalf("InteractiveSSHArgs returned error: %v", err)
 	}
 	wantKey := filepath.Join(home, ".ssh", "example.pem")
+	wantKnownHosts := filepath.Join(home, ".ssh", "known_hosts")
 	want := []string{
 		"-i", wantKey,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile=" + wantKnownHosts,
+		"-o", "IdentitiesOnly=yes",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
 		"user@mac-host.example.com",
@@ -67,8 +75,11 @@ func TestExecSSHArgs(t *testing.T) {
 		t.Fatalf("ExecSSHArgs returned error: %v", err)
 	}
 	wantKey := filepath.Join(home, ".ssh", "example.pem")
+	wantKnownHosts := filepath.Join(home, ".ssh", "known_hosts")
 	want := []string{
 		"-i", wantKey,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile=" + wantKnownHosts,
 		"-o", "IdentitiesOnly=yes",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",

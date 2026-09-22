@@ -201,6 +201,38 @@ func TestReplaceKnownHostKeyAtomicSerializesSymlinkAndRealPath(t *testing.T) {
 	}
 }
 
+func TestTrustedHostKeyAlgorithmsUsesOnlyConfirmedCurrentKeys(t *testing.T) {
+	check := HostKeyCheck{
+		Known: strings.Join([]string{
+			"mac.example.com ssh-ed25519 CONFIRMED_ED25519",
+			"mac.example.com ssh-rsa CONFIRMED_RSA",
+		}, "\n"),
+		Scanned: strings.Join([]string{
+			"mac.example.com ecdsa-sha2-nistp256 UNCONFIRMED_ECDSA",
+			"mac.example.com ssh-ed25519 CONFIRMED_ED25519",
+			"mac.example.com ssh-rsa CONFIRMED_RSA",
+		}, "\n"),
+	}
+	got, err := trustedHostKeyAlgorithms(check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ssh-rsa"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("algorithms=%q want=%q", got, want)
+	}
+}
+
+func TestTrustedHostKeyAlgorithmsRejectsNoExactMatch(t *testing.T) {
+	_, err := trustedHostKeyAlgorithms(HostKeyCheck{
+		Known:   "mac.example.com ssh-ed25519 OLD",
+		Scanned: "mac.example.com ssh-ed25519 NEW",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no confirmed SSH Host Key algorithm") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestNormalizedKnownHostsPathRejectsBrokenSymlinkAndNonRegularTarget(t *testing.T) {
 	dir := t.TempDir()
 	broken := filepath.Join(dir, "broken")

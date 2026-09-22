@@ -59,8 +59,12 @@ func RsyncPullArgsWithOptions(profile Profile, remotePath, localDir string, filt
 	if err != nil {
 		return nil, err
 	}
+	sshCommand, err := strictRsyncSSHCommand(keyPath)
+	if err != nil {
+		return nil, err
+	}
 	args := rsyncBaseArgs(options)
-	args = append(args, "-e", "ssh -i "+keyPath)
+	args = append(args, "-e", sshCommand)
 	args = appendRsyncFilters(args, filters)
 	args = append(args, RemoteTarget(profile, EscapeRemotePath(remotePath)), localDir)
 	return args, nil
@@ -75,12 +79,27 @@ func RsyncPushArgsWithOptions(profile Profile, localPath, remoteDir string, filt
 	if err != nil {
 		return nil, err
 	}
+	sshCommand, err := strictRsyncSSHCommand(keyPath)
+	if err != nil {
+		return nil, err
+	}
 	remoteDir = NormalizeRemotePath(remoteDir)
 	args := rsyncBaseArgs(options)
-	args = append(args, "-e", "ssh -i "+keyPath)
+	args = append(args, "-e", sshCommand)
 	args = appendRsyncFilters(args, filters)
 	args = append(args, localPath, RemoteTarget(profile, EscapeRemotePath(remoteDir)))
 	return args, nil
+}
+
+func strictRsyncSSHCommand(keyPath string) (string, error) {
+	knownHosts, err := ExpandPath("~/.ssh/known_hosts")
+	if err != nil {
+		return "", err
+	}
+	return "ssh -i " + keyPath +
+		" -o StrictHostKeyChecking=yes" +
+		" -o UserKnownHostsFile=" + knownHosts +
+		" -o IdentitiesOnly=yes", nil
 }
 
 func rsyncBaseArgs(options RsyncOptions) []string {

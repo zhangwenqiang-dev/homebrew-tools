@@ -74,47 +74,48 @@ type logExportManifest struct {
 }
 
 type LogEntry struct {
-	Time             string `json:"time"`
-	Level            string `json:"level"`
-	Action           string `json:"action"`
-	Profile          string `json:"profile,omitempty"`
-	TunnelAction     string `json:"tunnel_action,omitempty"`
-	PID              int    `json:"pid,omitempty"`
-	LocalPorts       []int  `json:"local_ports,omitempty"`
-	LaunchResult     string `json:"launch_result,omitempty"`
-	Outcome          string `json:"outcome,omitempty"`
-	AppleEmail       string `json:"apple_email,omitempty"`
-	MemberEmail      string `json:"member_email,omitempty"`
-	ActorMemberID    string `json:"actor_member_id,omitempty"`
-	ActorMemberEmail string `json:"actor_member_email,omitempty"`
-	ActorMemberName  string `json:"actor_member_name,omitempty"`
-	TransferID       string `json:"transfer_id,omitempty"`
-	LocalJobID       string `json:"local_job_id,omitempty"`
-	Direction        string `json:"direction,omitempty"`
-	Status           string `json:"status,omitempty"`
-	Percent          int    `json:"percent,omitempty"`
-	BytesTransferred int64  `json:"bytes_transferred,omitempty"`
-	BytesTotal       int64  `json:"bytes_total,omitempty"`
-	BytesPerSecond   int64  `json:"bytes_per_second,omitempty"`
-	ETASeconds       int64  `json:"eta_seconds,omitempty"`
-	ElapsedMS        int64  `json:"elapsed_ms,omitempty"`
-	DurationMS       int64  `json:"duration_ms,omitempty"`
-	Region           string `json:"region,omitempty"`
-	AWSProfile       string `json:"aws_profile,omitempty"`
-	RequestID        string `json:"request_id,omitempty"`
-	JobID            string `json:"job_id,omitempty"`
-	CycleID          string `json:"cycle_id,omitempty"`
-	SessionIDHash    string `json:"session_id_hash,omitempty"`
-	Operation        string `json:"operation,omitempty"`
-	Source           string `json:"source,omitempty"`
-	Phase            string `json:"phase,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
-	ExitCode         int    `json:"exit_code,omitempty"`
-	FailureStage     string `json:"failure_stage,omitempty"`
-	Scanner          string `json:"scanner,omitempty"`
-	Attempt          int    `json:"attempt,omitempty"`
-	HTTPStatus       int    `json:"http_status,omitempty"`
-	Message          string `json:"message"`
+	Time              string   `json:"time"`
+	Level             string   `json:"level"`
+	Action            string   `json:"action"`
+	Profile           string   `json:"profile,omitempty"`
+	TunnelAction      string   `json:"tunnel_action,omitempty"`
+	PID               int      `json:"pid,omitempty"`
+	LocalPorts        []int    `json:"local_ports,omitempty"`
+	LaunchResult      string   `json:"launch_result,omitempty"`
+	Outcome           string   `json:"outcome,omitempty"`
+	AppleEmail        string   `json:"apple_email,omitempty"`
+	MemberEmail       string   `json:"member_email,omitempty"`
+	ActorMemberID     string   `json:"actor_member_id,omitempty"`
+	ActorMemberEmail  string   `json:"actor_member_email,omitempty"`
+	ActorMemberName   string   `json:"actor_member_name,omitempty"`
+	TransferID        string   `json:"transfer_id,omitempty"`
+	LocalJobID        string   `json:"local_job_id,omitempty"`
+	Direction         string   `json:"direction,omitempty"`
+	Status            string   `json:"status,omitempty"`
+	Percent           int      `json:"percent,omitempty"`
+	BytesTransferred  int64    `json:"bytes_transferred,omitempty"`
+	BytesTotal        int64    `json:"bytes_total,omitempty"`
+	BytesPerSecond    int64    `json:"bytes_per_second,omitempty"`
+	ETASeconds        int64    `json:"eta_seconds,omitempty"`
+	ElapsedMS         int64    `json:"elapsed_ms,omitempty"`
+	DurationMS        int64    `json:"duration_ms,omitempty"`
+	Region            string   `json:"region,omitempty"`
+	AWSProfile        string   `json:"aws_profile,omitempty"`
+	RequestID         string   `json:"request_id,omitempty"`
+	JobID             string   `json:"job_id,omitempty"`
+	CycleID           string   `json:"cycle_id,omitempty"`
+	SessionIDHash     string   `json:"session_id_hash,omitempty"`
+	Operation         string   `json:"operation,omitempty"`
+	Source            string   `json:"source,omitempty"`
+	Phase             string   `json:"phase,omitempty"`
+	ErrorCode         string   `json:"error_code,omitempty"`
+	ExitCode          int      `json:"exit_code,omitempty"`
+	FailureStage      string   `json:"failure_stage,omitempty"`
+	Scanner           string   `json:"scanner,omitempty"`
+	HostKeyAlgorithms []string `json:"host_key_algorithms,omitempty"`
+	Attempt           int      `json:"attempt,omitempty"`
+	HTTPStatus        int      `json:"http_status,omitempty"`
+	Message           string   `json:"message"`
 }
 
 type LogFile struct {
@@ -1357,6 +1358,9 @@ func sanitizeLogEntry(entry LogEntry) LogEntry {
 	entry.ErrorCode = sanitizeLogText(entry.ErrorCode)
 	entry.FailureStage = sanitizeLogText(entry.FailureStage)
 	entry.Scanner = sanitizeLogText(entry.Scanner)
+	for i := range entry.HostKeyAlgorithms {
+		entry.HostKeyAlgorithms[i] = sanitizeLogText(entry.HostKeyAlgorithms[i])
+	}
 	entry.Message = sanitizeLogText(entry.Message)
 	return entry
 }

@@ -53,7 +53,7 @@ func classifyLocalOperationError(err error) LocalOperationError {
 		}
 	}
 	message := strings.ToLower(err.Error())
-	if containsAny(message, "remote host identification has changed", "host key verification failed") {
+	if containsAny(message, "remote host identification has changed", "host key verification failed", "knownhosts: key mismatch") {
 		result.Code = "host_key_changed"
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

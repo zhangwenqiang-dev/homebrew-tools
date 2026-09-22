@@ -20,7 +20,7 @@ func TestRsyncPullArgs(t *testing.T) {
 	key := filepath.Join(home, ".ssh", "example.pem")
 	want := []string{
 		"-avzP",
-		"-e", "ssh -i " + key,
+		"-e", strictRsyncCommandForTest(home, key),
 		"--exclude", ".DS_Store",
 		"user@mac-host.example.com:~/Desktop/App.ipa",
 		".",
@@ -43,7 +43,7 @@ func TestRsyncPullArgsWithProgress2(t *testing.T) {
 		"-avz",
 		"--partial",
 		"--info=progress2",
-		"-e", "ssh -i " + key,
+		"-e", strictRsyncCommandForTest(home, key),
 		"user@mac-host.example.com:~/Desktop/App.ipa",
 		".",
 	}
@@ -63,7 +63,7 @@ func TestRsyncPushArgs(t *testing.T) {
 	key := filepath.Join(home, ".ssh", "example.pem")
 	want := []string{
 		"-avzP",
-		"-e", "ssh -i " + key,
+		"-e", strictRsyncCommandForTest(home, key),
 		"--exclude", "xcuserdata",
 		"--exclude", ".git",
 		"/tmp/project",
@@ -128,7 +128,7 @@ func TestRsyncPushArgsNormalizesShellExpandedHomeRemoteDir(t *testing.T) {
 	key := filepath.Join(home, ".ssh", "example.pem")
 	want := []string{
 		"-avzP",
-		"-e", "ssh -i " + key,
+		"-e", strictRsyncCommandForTest(home, key),
 		"/tmp/project",
 		"user@mac-host.example.com:~/Documents/",
 	}
@@ -151,7 +151,7 @@ func TestRsyncArgsIncludeOnlyAddsFinalExcludeAll(t *testing.T) {
 	key := filepath.Join(home, ".ssh", "example.pem")
 	want := []string{
 		"-avzP",
-		"-e", "ssh -i " + key,
+		"-e", strictRsyncCommandForTest(home, key),
 		"--include", "Sources/***",
 		"--include", "*.xcodeproj/***",
 		"--exclude", "DerivedData",
@@ -185,11 +185,18 @@ func TestRsyncPullArgsEscapesRemotePathSpaces(t *testing.T) {
 	key := filepath.Join(home, ".ssh", "example.pem")
 	want := []string{
 		"-avzP",
-		"-e", "ssh -i " + key,
+		"-e", strictRsyncCommandForTest(home, key),
 		"user@mac-host.example.com:~/Documents/Telegram\\ Bot\\ 头像",
 		"/Users/wenqiang/Downloads/",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
+}
+
+func strictRsyncCommandForTest(home, key string) string {
+	return "ssh -i " + key +
+		" -o StrictHostKeyChecking=yes" +
+		" -o UserKnownHostsFile=" + filepath.Join(home, ".ssh", "known_hosts") +
+		" -o IdentitiesOnly=yes"
 }

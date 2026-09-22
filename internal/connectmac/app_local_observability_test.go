@@ -667,7 +667,7 @@ func TestTerminalCloseLoggedExactlyOnceForNormalExitAndBrowserDisconnect(t *test
 				Source:    "web-local",
 			})
 			profile := Profile{Name: "terminal-profile"}
-			got := app.observeLocalTerminalSession(ctx, profile, func() error { return test.err })
+			got := app.observeLocalTerminalSession(ctx, profile, []string{"ssh-ed25519"}, func() error { return test.err })
 			if !errors.Is(got, test.err) {
 				t.Fatalf("error=%v want=%v", got, test.err)
 			}
@@ -680,7 +680,8 @@ func TestTerminalCloseLoggedExactlyOnceForNormalExitAndBrowserDisconnect(t *test
 				closed++
 				if entry.Outcome != "success" || entry.Phase != "closed" ||
 					entry.RequestID != "terminal-request-123" || entry.DurationMS < 1 ||
-					entry.ActorMemberID != "" || entry.ActorMemberEmail != "" || entry.ActorMemberName != "" {
+					entry.ActorMemberID != "" || entry.ActorMemberEmail != "" || entry.ActorMemberName != "" ||
+					len(entry.HostKeyAlgorithms) != 1 || entry.HostKeyAlgorithms[0] != "ssh-ed25519" {
 					t.Fatalf("entry=%+v", entry)
 				}
 			}
@@ -699,7 +700,7 @@ func TestLocalTerminalFailureUsesLocalClassifier(t *testing.T) {
 		Source:    "web-local",
 	})
 	err := errors.New("ssh session failed: exit status 255")
-	if got := app.observeLocalTerminalSession(ctx, Profile{Name: "terminal-profile"}, func() error { return err }); !errors.Is(got, err) {
+	if got := app.observeLocalTerminalSession(ctx, Profile{Name: "terminal-profile"}, nil, func() error { return err }); !errors.Is(got, err) {
 		t.Fatalf("error=%v", got)
 	}
 	entries := readTestLogEntries(t, app.LogManager)
@@ -727,7 +728,7 @@ func TestLocalTerminalPreservesWarnLevelAndSanitizedMessage(t *testing.T) {
 	app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, dir)
 	ctx := withOperationContext(context.Background(), OperationContext{RequestID: "terminal-timeout", Source: "web-local"})
 	err := fmt.Errorf("ssh operation timed out token=%s", "terminal-secret")
-	_ = app.observeLocalTerminalSession(ctx, Profile{Name: "terminal-profile"}, func() error { return err })
+	_ = app.observeLocalTerminalSession(ctx, Profile{Name: "terminal-profile"}, nil, func() error { return err })
 	entries := readTestLogEntries(t, app.LogManager)
 	for _, entry := range entries {
 		if entry.Action != "terminal.closed" {
@@ -829,7 +830,7 @@ func TestProxyTerminalIOPreservesRealErrorsAndNormalClose(t *testing.T) {
 			app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, dir)
 			ctx := localLifecycleTestContext("terminal-proxy-request")
 			profile := Profile{Name: "terminal-profile"}
-			got := app.observeLocalTerminalSession(ctx, profile, func() error {
+			got := app.observeLocalTerminalSession(ctx, profile, nil, func() error {
 				return proxyTerminalIO(ctx, test.socket, io.Discard, test.stdout, test.stderr, test.wait)
 			})
 			if test.want == nil {
