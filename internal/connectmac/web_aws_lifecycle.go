@@ -501,27 +501,58 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 		return ReleaseReminder{}, err
 	}
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
-		existing.OwnerEmail = owner.Owner.Email
-		existing.OwnerName = owner.Owner.Name
-		existing.HostArchitecture = hostArchitecture
-		return a.MemberStore.UpsertReleaseReminder(existing)
+		return a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if current.HostID != hostID || current.Status == ReleaseReminderStatusReleased {
+				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+			}
+			current.OwnerEmail = owner.Owner.Email
+			current.OwnerName = owner.Owner.Name
+			current.HostArchitecture = hostArchitecture
+			return current, nil
+		})
 	}
-	createdAt, parseErr := time.Parse(time.RFC3339, hostCreatedAt)
-	if parseErr != nil {
-		createdAt = now
-		hostCreatedAt = now.Format(time.RFC3339)
+	reminder := newActiveReleaseReminder(
+		profile.Name,
+		profile.AWS.AccountEmail,
+		hostID,
+		hostArchitecture,
+		hostCreatedAt,
+		owner.Owner.Email,
+		owner.Owner.Name,
+		now,
+	)
+	if ok {
+		return a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if current.HostID != existing.HostID || current.AppleEmail != existing.AppleEmail || current.Status != existing.Status {
+				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+			}
+			return reminder, nil
+		})
 	}
-	return a.MemberStore.UpsertReleaseReminder(ReleaseReminder{
-		ProfileName:      profile.Name,
-		AppleEmail:       profile.AWS.AccountEmail,
-		HostID:           hostID,
-		HostArchitecture: hostArchitecture,
-		HostCreatedAt:    hostCreatedAt,
-		ReleaseDueAt:     createdAt.Add(24 * time.Hour).Format(time.RFC3339),
-		OwnerEmail:       owner.Owner.Email,
-		OwnerName:        owner.Owner.Name,
-		Status:           ReleaseReminderStatusActive,
-	})
+	return a.MemberStore.UpsertReleaseReminder(reminder)
+}
+
+func newActiveReleaseReminder(profileName, appleEmail, hostID, hostArchitecture, hostCreatedAt, ownerEmail, ownerName string, fallbackCreatedAt time.Time) ReleaseReminder {
+	createdAt, err := time.Parse(time.RFC3339, hostCreatedAt)
+	if err != nil {
+		createdAt = fallbackCreatedAt
+		hostCreatedAt = fallbackCreatedAt.Format(time.RFC3339)
+	}
+	releaseDueAt := createdAt.Add(24 * time.Hour)
+	return ReleaseReminder{
+		ProfileName:        profileName,
+		AppleEmail:         appleEmail,
+		HostID:             hostID,
+		HostArchitecture:   hostArchitecture,
+		HostCreatedAt:      hostCreatedAt,
+		ReleaseDueAt:       releaseDueAt.Format(time.RFC3339),
+		OwnerEmail:         ownerEmail,
+		OwnerName:          ownerName,
+		Status:             ReleaseReminderStatusActive,
+		AutoReleaseEnabled: true,
+		AutoReleaseAt:      releaseDueAt.Add(AutoReleaseGracePeriod).Format(time.RFC3339),
+		AutoReleaseState:   ReleaseReminderAutoReleaseStateScheduled,
+	}
 }
 
 func (a App) finalizeWebAWSDestroy(profile Profile) (ReleaseReminder, error) {

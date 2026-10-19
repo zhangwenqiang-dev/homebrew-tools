@@ -2338,33 +2338,41 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 		return err
 	}
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
-		existing.OwnerEmail = owner.Email
-		existing.OwnerName = owner.Name
-		existing.HostArchitecture = hostArchitecture
-		existing, err = a.MemberStore.UpsertReleaseReminder(existing)
+		existing, err = a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if current.HostID != hostID || current.Status == ReleaseReminderStatusReleased {
+				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+			}
+			current.OwnerEmail = owner.Email
+			current.OwnerName = owner.Name
+			current.HostArchitecture = hostArchitecture
+			return current, nil
+		})
 		if err != nil {
 			return err
 		}
 		a.notifyReleaseReminder("open", existing, owner.Name, "Mac 打开确认成功")
 		return nil
 	}
-	createdAt, err := time.Parse(time.RFC3339, hostCreatedAt)
-	if err != nil {
-		createdAt = now
-		hostCreatedAt = now.Format(time.RFC3339)
+	reminder := newActiveReleaseReminder(
+		profile.Name,
+		profile.AWS.AccountEmail,
+		hostID,
+		hostArchitecture,
+		hostCreatedAt,
+		owner.Email,
+		owner.Name,
+		now,
+	)
+	if ok {
+		reminder, err = a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if current.HostID != existing.HostID || current.AppleEmail != existing.AppleEmail || current.Status != existing.Status {
+				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+			}
+			return reminder, nil
+		})
+	} else {
+		reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
 	}
-	reminder := ReleaseReminder{
-		ProfileName:      profile.Name,
-		AppleEmail:       profile.AWS.AccountEmail,
-		HostID:           hostID,
-		HostArchitecture: hostArchitecture,
-		HostCreatedAt:    hostCreatedAt,
-		ReleaseDueAt:     createdAt.Add(24 * time.Hour).Format(time.RFC3339),
-		OwnerEmail:       owner.Email,
-		OwnerName:        owner.Name,
-		Status:           ReleaseReminderStatusActive,
-	}
-	reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
 	if err != nil {
 		return err
 	}

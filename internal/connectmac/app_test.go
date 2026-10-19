@@ -4545,6 +4545,85 @@ func TestAppWebBackgroundOpenDefersLifecycleMutation(t *testing.T) {
 	}
 }
 
+func TestUpsertReleaseReminderAfterOpenEnablesAutomaticReleaseForNewReminder(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	configPath := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	hostCreatedAt := time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{Hosts: []DedicatedHostStatus{{
+			HostID: "h-1", State: "available", InstanceType: "mac2-m2.metal", CreatedAt: hostCreatedAt.Format(time.RFC3339), Tags: managedTestTags(),
+		}}}}, nil
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile, _ := cfg.Profile("xcode-vnc")
+	owner := PublicMember{Name: "Owner", Email: "owner@example.com"}
+
+	if err := app.upsertReleaseReminderAfterOpen(context.Background(), profile, owner); err != nil {
+		t.Fatalf("upsert release reminder after open: %v", err)
+	}
+	reminder, ok, err := app.MemberStore.ReleaseReminder(profile.Name)
+	if err != nil || !ok {
+		t.Fatalf("release reminder: %+v ok=%t err=%v", reminder, ok, err)
+	}
+	wantDueAt := hostCreatedAt.Add(24 * time.Hour)
+	if !reminder.AutoReleaseEnabled ||
+		reminder.ReleaseDueAt != wantDueAt.Format(time.RFC3339) ||
+		reminder.AutoReleaseAt != wantDueAt.Add(AutoReleaseGracePeriod).Format(time.RFC3339) ||
+		reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateScheduled {
+		t.Fatalf("new reminder automatic release = %+v", reminder)
+	}
+}
+
+func TestUpsertReleaseReminderAfterOpenPreservesDisabledAutomaticReleaseWhenOwnerChanges(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	configPath := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{Hosts: []DedicatedHostStatus{{
+			HostID: "h-1", State: "available", InstanceType: "mac2-m2.metal", CreatedAt: "2026-07-16T01:00:00Z", Tags: managedTestTags(),
+		}}}}, nil
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile, _ := cfg.Profile("xcode-vnc")
+	seed := ReleaseReminder{
+		ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-1",
+		HostCreatedAt: "2026-07-16T01:00:00Z", ReleaseDueAt: "2026-07-17T01:00:00Z",
+		OwnerEmail: "old-owner@example.com", OwnerName: "Old Owner", Status: ReleaseReminderStatusActive,
+		AutoReleaseEnabled: false, AutoReleaseAt: "2026-07-17T01:10:00Z",
+		AutoReleaseStartedAt: "2026-07-17T01:11:00Z", AutoReleaseLastAttemptAt: "2026-07-17T01:12:00Z",
+		AutoReleaseAcceptedAt: "2026-07-17T01:13:00Z", AutoReleaseStalledNotifyClaimedAt: "2026-07-17T01:14:00Z",
+		AutoReleaseStalledNotifiedAt: "2026-07-17T01:15:00Z", AutoReleaseNotifiedAt: "2026-07-17T01:16:00Z",
+		AutoReleaseAttempts: 3, AutoReleaseLastError: "kept", AutoReleaseState: ReleaseReminderAutoReleaseStateFailed,
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(seed); err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+
+	owner := PublicMember{Name: "New Owner", Email: "new-owner@example.com"}
+	if err := app.upsertReleaseReminderAfterOpen(context.Background(), profile, owner); err != nil {
+		t.Fatalf("upsert release reminder after open: %v", err)
+	}
+	got, ok, err := app.MemberStore.ReleaseReminder(profile.Name)
+	if err != nil || !ok {
+		t.Fatalf("release reminder: %+v ok=%t err=%v", got, ok, err)
+	}
+	assertReleaseReminderAutoHistoryPreserved(t, got, seed)
+	if got.OwnerEmail != owner.Email || got.OwnerName != owner.Name || got.HostArchitecture != "arm64" {
+		t.Fatalf("updated reminder identity = %+v", got)
+	}
+}
+
 func TestAppWebBackgroundOpenDefersOperatorAssignment(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
