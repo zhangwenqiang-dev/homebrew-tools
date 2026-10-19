@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
 func TestMacHostArchitecture(t *testing.T) {
@@ -752,13 +756,22 @@ func TestAWSServiceDestroyRetriesPendingHostReleaseUntilSuccess(t *testing.T) {
 }
 
 func TestAWSServiceDestroyRetriesOccupiedAvailableHostUntilSuccess(t *testing.T) {
+	occupiedErr := validateReleaseHostOutput("h-1", &ec2.ReleaseHostsOutput{
+		Unsuccessful: []ec2types.UnsuccessfulItem{{
+			ResourceId: aws.String("h-1"),
+			Error: &ec2types.UnsuccessfulItemError{
+				Code:    aws.String("Client.InvalidHost.Occupied"),
+				Message: aws.String("host is occupied"),
+			},
+		}},
+	})
 	fake := &fakeAWSClient{
 		status: AWSStatus{
 			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: managedTestTags()}},
 			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
 			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
 		},
-		releaseErrs: []error{autoReleaseTestAPIError{code: "Client.InvalidHost.Occupied", message: "host is occupied"}, nil},
+		releaseErrs: []error{occupiedErr, nil},
 	}
 	service := testAWSService(fake)
 	service.DestroyPollInterval = time.Millisecond

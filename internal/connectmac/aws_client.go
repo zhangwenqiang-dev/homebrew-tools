@@ -409,6 +409,20 @@ func (c RealAWSClient) ReleaseHost(ctx context.Context, hostID string) error {
 	return nil
 }
 
+type releaseHostError struct {
+	HostID  string
+	Code    string
+	Message string
+}
+
+func (e releaseHostError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+func (e releaseHostError) ErrorCode() string {
+	return e.Code
+}
+
 func validateReleaseHostOutput(hostID string, out *ec2.ReleaseHostsOutput) error {
 	if out == nil {
 		return errors.New("AWS did not confirm host release")
@@ -440,7 +454,7 @@ func validateReleaseHostOutput(hostID string, out *ec2.ReleaseHostsOutput) error
 				message = value
 			}
 		}
-		return fmt.Errorf("%s: %s", code, message)
+		return releaseHostError{HostID: hostID, Code: code, Message: message}
 	}
 	if !successful {
 		return errors.New("AWS did not confirm host release")
