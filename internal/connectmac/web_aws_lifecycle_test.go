@@ -211,6 +211,211 @@ func TestFinalizeWebAWSOpenEnablesAutomaticReleaseForNewReminder(t *testing.T) {
 	}
 }
 
+type racingCreateReminderRepository struct {
+	MemberRepository
+	winner ReleaseReminder
+}
+
+func (r *racingCreateReminderRepository) CreateReleaseReminderIfAbsent(reminder ReleaseReminder) (ReleaseReminder, bool, error) {
+	if _, err := r.MemberRepository.UpsertReleaseReminder(r.winner); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	return r.MemberRepository.CreateReleaseReminderIfAbsent(reminder)
+}
+
+type failOncePersistOwnerRepository struct {
+	MemberRepository
+	failed bool
+}
+
+type postCASOwnerRaceRepository struct {
+	MemberRepository
+	winner      ReleaseReminder
+	winnerEmail string
+	appleEmail  string
+}
+
+type postCASDestroyRaceRepository struct {
+	MemberRepository
+}
+
+func (r *postCASDestroyRaceRepository) PersistReleaseReminderOwner(cycle ReleaseReminderCycle, appleEmail, memberEmail string) (PublicProfileOwner, error) {
+	current, ok, err := r.MemberRepository.ReleaseReminder(cycle.ProfileName)
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	if !ok {
+		return PublicProfileOwner{}, ErrReleaseReminderCycleChanged
+	}
+	current.Status = ReleaseReminderStatusReleased
+	current.ReleasedAt = "2026-07-16T02:00:00Z"
+	if _, err := r.MemberRepository.UpsertReleaseReminder(current); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	if err := r.MemberRepository.ClearProfileOwner(cycle.ProfileName); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	return r.MemberRepository.PersistReleaseReminderOwner(cycle, appleEmail, memberEmail)
+}
+
+func (r *postCASOwnerRaceRepository) PersistReleaseReminderOwner(cycle ReleaseReminderCycle, appleEmail, memberEmail string) (PublicProfileOwner, error) {
+	winner, err := r.MemberRepository.UpsertReleaseReminder(r.winner)
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	if _, err := r.MemberRepository.PersistReleaseReminderOwner(releaseReminderOwnerCycle(winner), r.appleEmail, r.winnerEmail); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	return r.MemberRepository.PersistReleaseReminderOwner(cycle, appleEmail, memberEmail)
+}
+
+func (r *failOncePersistOwnerRepository) PersistReleaseReminderOwner(cycle ReleaseReminderCycle, appleEmail, memberEmail string) (PublicProfileOwner, error) {
+	if !r.failed {
+		r.failed = true
+		return PublicProfileOwner{}, errors.New("persist owner failed")
+	}
+	return r.MemberRepository.PersistReleaseReminderOwner(cycle, appleEmail, memberEmail)
+}
+
+func TestFinalizeWebAWSOpenAbortsWhenConcurrentReminderWins(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	if _, err := app.MemberStore.AddMember("Old Owner", "old-owner@example.com", "operator"); err != nil {
+		t.Fatalf("add old owner: %v", err)
+	}
+	if _, err := app.MemberStore.AssignMember("user@example.com", "old-owner@example.com", "owner"); err != nil {
+		t.Fatalf("assign old owner: %v", err)
+	}
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "old-owner@example.com"); err != nil {
+		t.Fatalf("set old owner: %v", err)
+	}
+	winner := ReleaseReminder{ProfileName: "xcode-vnc", HostID: "h-winner", Status: ReleaseReminderStatusDueNotified, AutoReleaseEnabled: false, AutoReleaseAttempts: 5, AutoReleaseState: ReleaseReminderAutoReleaseStateFailed}
+	app.MemberStore = &racingCreateReminderRepository{MemberRepository: app.MemberStore, winner: winner}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile, _ := cfg.Profile("xcode-vnc")
+	_, err = app.finalizeWebAWSOpen(profile, "owner@example.com", readyWebAWSLifecycleStatus())
+	if !errors.Is(err, ErrReleaseReminderCycleChanged) {
+		t.Fatalf("finalize error = %v", err)
+	}
+	got, ok, lookupErr := app.MemberStore.ReleaseReminder(profile.Name)
+	if lookupErr != nil || !ok || got.HostID != winner.HostID || got.AutoReleaseEnabled || got.AutoReleaseAttempts != winner.AutoReleaseAttempts {
+		t.Fatalf("winning reminder changed: got=%+v ok=%t err=%v", got, ok, lookupErr)
+	}
+	owner, ok, lookupErr := app.MemberStore.ProfileOwner(profile.Name)
+	if lookupErr != nil || !ok || owner.Owner.Email != "old-owner@example.com" {
+		t.Fatalf("profile owner changed: got=%+v ok=%t err=%v", owner, ok, lookupErr)
+	}
+	members, lookupErr := app.MemberStore.MembersForApple(profile.AWS.AccountEmail)
+	if lookupErr != nil {
+		t.Fatalf("members for apple: %v", lookupErr)
+	}
+	for _, member := range members {
+		if member.Email == "owner@example.com" {
+			t.Fatalf("losing owner was assigned: %+v", members)
+		}
+	}
+}
+
+func TestWebAWSLifecycleRetriesOwnerPersistenceAfterReminderSuccess(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	app.MemberStore = &failOncePersistOwnerRepository{MemberRepository: app.MemberStore}
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	notifications := 0
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
+		notifications++
+		return nil
+	}
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+
+	if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err == nil || !strings.Contains(err.Error(), "persist owner failed") {
+		t.Fatalf("first reconcile error = %v", err)
+	}
+	if reminder, ok, err := app.MemberStore.ReleaseReminder("xcode-vnc"); err != nil || !ok || reminder.HostID != "h-1" {
+		t.Fatalf("reminder after failed owner persistence: got=%+v ok=%t err=%v", reminder, ok, err)
+	}
+	if _, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil || ok {
+		t.Fatalf("profile owner after failed persistence: ok=%t err=%v", ok, err)
+	}
+	if notifications != 0 {
+		t.Fatalf("notifications after failed persistence = %d", notifications)
+	}
+
+	if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc")
+	if err != nil || !ok || owner.Owner.Email != "owner@example.com" {
+		t.Fatalf("profile owner after retry: got=%+v ok=%t err=%v", owner, ok, err)
+	}
+	members, err := app.MemberStore.MembersForApple("user@example.com")
+	if err != nil || len(members) != 1 || members[0].Email != "owner@example.com" {
+		t.Fatalf("assignment after retry: got=%+v err=%v", members, err)
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications after retry = %d, want 1", notifications)
+	}
+}
+
+func TestFinalizeWebAWSOpenRejectsStalePostCASOwnerPersistence(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	if _, err := app.MemberStore.AddMember("Winner", "winner@example.com", "operator"); err != nil {
+		t.Fatalf("add winner: %v", err)
+	}
+	winner := ReleaseReminder{
+		ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-newer", OwnerEmail: "winner@example.com", OwnerName: "Winner",
+		Status: ReleaseReminderStatusActive, AutoReleaseEnabled: true, AutoReleaseAt: "2026-07-18T01:10:00Z", AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled,
+	}
+	app.MemberStore = &postCASOwnerRaceRepository{MemberRepository: app.MemberStore, winner: winner, winnerEmail: "winner@example.com", appleEmail: "user@example.com"}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile, _ := cfg.Profile("xcode-vnc")
+	if _, err := app.finalizeWebAWSOpen(profile, "owner@example.com", readyWebAWSLifecycleStatus()); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+		t.Fatalf("finalize error = %v", err)
+	}
+	owner, ok, err := app.MemberStore.ProfileOwner(profile.Name)
+	if err != nil || !ok || owner.Owner.Email != "winner@example.com" {
+		t.Fatalf("newer owner changed: got=%+v ok=%t err=%v", owner, ok, err)
+	}
+	members, err := app.MemberStore.MembersForApple(profile.AWS.AccountEmail)
+	if err != nil {
+		t.Fatalf("members for apple: %v", err)
+	}
+	for _, member := range members {
+		if member.Email == "owner@example.com" {
+			t.Fatalf("stale owner assigned: %+v", members)
+		}
+	}
+}
+
+func TestFinalizeWebAWSOpenRejectsOwnerPersistenceAfterConcurrentDestroy(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	app.MemberStore = &postCASDestroyRaceRepository{MemberRepository: app.MemberStore}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile, _ := cfg.Profile("xcode-vnc")
+	if _, err := app.finalizeWebAWSOpen(profile, "owner@example.com", readyWebAWSLifecycleStatus()); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+		t.Fatalf("finalize error = %v", err)
+	}
+	reminder, ok, err := app.MemberStore.ReleaseReminder(profile.Name)
+	if err != nil || !ok || reminder.Status != ReleaseReminderStatusReleased || reminder.ReleasedAt == "" {
+		t.Fatalf("released reminder changed: got=%+v ok=%t err=%v", reminder, ok, err)
+	}
+	if owner, ok, err := app.MemberStore.ProfileOwner(profile.Name); err != nil || ok {
+		t.Fatalf("owner recreated after destroy: got=%+v ok=%t err=%v", owner, ok, err)
+	}
+	if members, err := app.MemberStore.MembersForApple(profile.AWS.AccountEmail); err != nil || len(members) != 0 {
+		t.Fatalf("assignment recreated after destroy: got=%+v err=%v", members, err)
+	}
+}
+
 func TestFinalizeWebAWSOpenEnablesAutomaticReleaseForReplacementReminder(t *testing.T) {
 	app, configPath := newWebAWSLifecycleTestApp(t)
 	cfg, err := LoadConfig(configPath)

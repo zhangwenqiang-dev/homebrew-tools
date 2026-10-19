@@ -961,7 +961,7 @@ func TestDestroyJobPersistsAcceptedReleaseHosts(t *testing.T) {
 					{HostID: "h-accepted", State: "available", Tags: managedTestTags()},
 					{HostID: "h-deferred", State: "pending", Tags: managedTestTags()},
 				},
-			}, releaseErrs: []error{nil}, releaseErr: errors.New("host transition is still in progress")},
+			}, releaseErrs: []error{nil}, releaseErr: autoReleaseTestAPIError{code: "Client.InvalidHost.Occupied", message: "host transition is still in progress"}},
 			wantDeferred: true,
 			wantHosts:    "h-accepted",
 		},

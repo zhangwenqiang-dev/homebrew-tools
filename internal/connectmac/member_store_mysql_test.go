@@ -153,6 +153,7 @@ func (r fakeMySQLReleaseReminderRow) Scan(dest ...any) error {
 
 type fakeMySQLReleaseReminderTransaction struct {
 	row           mysqlReleaseReminderScanner
+	rows          []mysqlReleaseReminderScanner
 	ownerRow      mysqlReleaseReminderScanner
 	query         string
 	queryArgs     []any
@@ -184,6 +185,11 @@ func (tx *fakeMySQLReleaseReminderTransaction) QueryRow(query string, args ...an
 	}
 	tx.query = query
 	tx.queryArgs = args
+	if len(tx.rows) > 0 {
+		row := tx.rows[0]
+		tx.rows = tx.rows[1:]
+		return row
+	}
 	return tx.row
 }
 
@@ -1919,6 +1925,148 @@ func TestMySQLUpsertReleaseReminderInsertsMissingRow(t *testing.T) {
 	if !tx.committed || tx.rolledBack {
 		t.Fatalf("insert transaction committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
 	}
+}
+
+func TestMySQLCreateReleaseReminderIfAbsent(t *testing.T) {
+	now := time.Date(2026, 7, 2, 8, 3, 0, 0, time.UTC)
+	t.Run("creates", func(t *testing.T) {
+		tx := &fakeMySQLReleaseReminderTransaction{row: fakeMySQLReleaseReminderRow{err: sql.ErrNoRows}}
+		got, created, err := createReleaseReminderIfAbsentInMySQLTransaction(tx, ReleaseReminder{
+			ProfileName: "apple-usw2", AppleEmail: " APPLE@EXAMPLE.COM ", Status: ReleaseReminderStatusActive,
+			AutoReleaseEnabled: true, AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled,
+		}, now)
+		if err != nil || !created {
+			t.Fatalf("create reminder: created=%t err=%v", created, err)
+		}
+		if got.AppleEmail != "apple@example.com" || got.CreatedAt != now.Format(time.RFC3339) || got.UpdatedAt != now.Format(time.RFC3339) {
+			t.Fatalf("created reminder = %+v", got)
+		}
+	})
+
+	t.Run("returns existing after duplicate race", func(t *testing.T) {
+		current := ReleaseReminder{ProfileName: "apple-usw2", HostID: "h-winner", AutoReleaseEnabled: false, AutoReleaseAttempts: 3, AutoReleaseState: ReleaseReminderAutoReleaseStateFailed}
+		tx := &fakeMySQLReleaseReminderTransaction{
+			rows: []mysqlReleaseReminderScanner{
+				fakeMySQLReleaseReminderRow{err: sql.ErrNoRows},
+				fakeMySQLReleaseReminderRow{reminder: current},
+			},
+			execErr: &mysqlDriver.MySQLError{Number: 1062, Message: "Duplicate entry"},
+		}
+		got, created, err := createReleaseReminderIfAbsentInMySQLTransaction(tx, ReleaseReminder{ProfileName: current.ProfileName, HostID: "h-loser", AutoReleaseEnabled: true}, now)
+		if err != nil || created {
+			t.Fatalf("duplicate race: created=%t err=%v", created, err)
+		}
+		if !reflect.DeepEqual(got, current) {
+			t.Fatalf("duplicate race reminder = %+v, want %+v", got, current)
+		}
+	})
+}
+
+func TestMySQLPersistReleaseReminderOwner(t *testing.T) {
+	now := time.Date(2026, 7, 2, 8, 3, 0, 0, time.UTC)
+	reminder := ReleaseReminder{ProfileName: "mac", AppleEmail: "apple@example.com", HostID: "h-1", OwnerEmail: "new@example.com", AutoReleaseAt: "2026-07-02T08:10:00Z", Status: ReleaseReminderStatusDueNotified}
+	member := Member{ID: "member-new", Name: "New", Email: "new@example.com", Username: "new@example.com", Role: "operator", Enabled: true, CreatedAt: "created", UpdatedAt: "updated"}
+
+	t.Run("success", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		defer db.Close()
+		store := mysqlTransferTestStore(db, now)
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).WithArgs(mysqlStoreLockName).
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlReleaseReminderSelectForUpdate)).WithArgs("mac").
+			WillReturnRows(sqlmockReleaseReminderRow(reminder))
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlMemberByEmailForUpdateQuery)).WithArgs("new@example.com").
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "username", "role", "enabled", "password_hash", "password_salt", "api_token_hash", "api_token_at", "created_at", "updated_at"}).
+				AddRow(member.ID, member.Name, member.Email, member.Username, member.Role, member.Enabled, "", "", "", "", member.CreatedAt, member.UpdatedAt))
+		mock.ExpectExec(regexp.QuoteMeta(mysqlAssignmentOwnerUpsertQuery)).WithArgs("apple@example.com", member.ID, now.Format(time.RFC3339)).WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec(regexp.QuoteMeta(mysqlProfileOwnerUpsertQuery)).WithArgs("mac", member.ID, now.Format(time.RFC3339)).WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).WithArgs(mysqlStoreLockName).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+		owner, err := store.PersistReleaseReminderOwner(releaseReminderOwnerCycle(reminder), "apple@example.com", "new@example.com")
+		if err != nil || owner.Owner.Email != member.Email {
+			t.Fatalf("persist owner: got=%+v err=%v", owner, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("stale cycle rolls back before ownership writes", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		defer db.Close()
+		store := mysqlTransferTestStore(db, now)
+		stale := releaseReminderOwnerCycle(reminder)
+		stale.HostID = "h-stale"
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).WithArgs(mysqlStoreLockName).
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlReleaseReminderSelectForUpdate)).WithArgs("mac").
+			WillReturnRows(sqlmockReleaseReminderRow(reminder))
+		mock.ExpectRollback()
+		if _, err := store.PersistReleaseReminderOwner(stale, "apple@example.com", "new@example.com"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+			t.Fatalf("stale persist error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		current    ReleaseReminder
+		appleEmail string
+	}{
+		{name: "released status", current: func() ReleaseReminder {
+			value := reminder
+			value.Status = ReleaseReminderStatusReleased
+			return value
+		}(), appleEmail: "apple@example.com"},
+		{name: "released timestamp", current: func() ReleaseReminder {
+			value := reminder
+			value.ReleasedAt = "2026-07-02T09:00:00Z"
+			return value
+		}(), appleEmail: "apple@example.com"},
+		{name: "mismatched apple email", current: reminder, appleEmail: "other@example.com"},
+	} {
+		t.Run(test.name+" rolls back before ownership writes", func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			store := mysqlTransferTestStore(db, now)
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).WithArgs(mysqlStoreLockName).
+				WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlReleaseReminderSelectForUpdate)).WithArgs("mac").
+				WillReturnRows(sqlmockReleaseReminderRow(test.current))
+			mock.ExpectRollback()
+			if _, err := store.PersistReleaseReminderOwner(releaseReminderOwnerCycle(test.current), test.appleEmail, "new@example.com"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+				t.Fatalf("persist error = %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func sqlmockReleaseReminderRow(reminder ReleaseReminder) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"profile_name", "apple_email", "host_id", "host_architecture", "host_created_at", "release_due_at", "owner_email", "owner_name", "last_extended_by_email", "last_extended_by_name", "last_extended_at", "last_notified_at", "released_at", "status", "auto_release_enabled", "auto_release_at", "auto_release_started_at", "auto_release_last_attempt_at", "auto_release_accepted_at", "auto_release_stalled_notify_claimed_at", "auto_release_stalled_notified_at", "auto_release_notified_at", "auto_release_attempts", "auto_release_last_error", "auto_release_state", "created_at", "updated_at"}).AddRow(
+		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt,
+		reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt,
+		reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt,
+		reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt,
+		reminder.AutoReleaseStalledNotifyClaimedAt, reminder.AutoReleaseStalledNotifiedAt, reminder.AutoReleaseNotifiedAt,
+		reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt,
+	)
 }
 
 func TestMySQLUpdateReleaseReminderMissingRollsBack(t *testing.T) {

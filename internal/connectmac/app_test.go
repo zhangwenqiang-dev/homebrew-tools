@@ -4551,6 +4551,9 @@ func TestUpsertReleaseReminderAfterOpenEnablesAutomaticReleaseForNewReminder(t *
 	configPath := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("Owner", "owner@example.com", "operator"); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
 	hostCreatedAt := time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC)
 	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
 		return &fakeAWSClient{status: AWSStatus{Hosts: []DedicatedHostStatus{{
@@ -4580,12 +4583,65 @@ func TestUpsertReleaseReminderAfterOpenEnablesAutomaticReleaseForNewReminder(t *
 	}
 }
 
+func TestAfterConfirmedWebAWSActionAbortsWhenConcurrentReminderWins(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	configPath := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{Hosts: []DedicatedHostStatus{{
+			HostID: "h-open", State: "available", CreatedAt: "2026-07-16T01:00:00Z", Tags: managedTestTags(),
+		}}}}, nil
+	}
+	if _, err := app.MemberStore.AddMember("Old Owner", "old-owner@example.com", "operator"); err != nil {
+		t.Fatalf("add old owner: %v", err)
+	}
+	if _, err := app.MemberStore.AddMember("New Owner", "new-owner@example.com", "operator"); err != nil {
+		t.Fatalf("add new owner: %v", err)
+	}
+	if _, err := app.MemberStore.AssignMember("user@example.com", "old-owner@example.com", "owner"); err != nil {
+		t.Fatalf("assign old owner: %v", err)
+	}
+	if _, err := app.MemberStore.SetProfileOwner("xcode-vnc", "old-owner@example.com"); err != nil {
+		t.Fatalf("set old owner: %v", err)
+	}
+	winner := ReleaseReminder{ProfileName: "xcode-vnc", HostID: "h-winner", Status: ReleaseReminderStatusDueNotified, AutoReleaseEnabled: false, AutoReleaseAttempts: 5, AutoReleaseState: ReleaseReminderAutoReleaseStateFailed}
+	app.MemberStore = &racingCreateReminderRepository{MemberRepository: app.MemberStore, winner: winner}
+	req := httptest.NewRequest(http.MethodPost, "/api/aws/open", nil)
+	addWebAuth(t, &app, req, "admin")
+	err := app.afterConfirmedWebAWSAction(req, configPath, "open", "xcode-vnc", "new-owner@example.com")
+	if !errors.Is(err, ErrReleaseReminderCycleChanged) {
+		t.Fatalf("upsert error = %v", err)
+	}
+	got, ok, lookupErr := app.MemberStore.ReleaseReminder("xcode-vnc")
+	if lookupErr != nil || !ok || got.HostID != winner.HostID || got.AutoReleaseEnabled || got.AutoReleaseAttempts != winner.AutoReleaseAttempts {
+		t.Fatalf("winning reminder changed: got=%+v ok=%t err=%v", got, ok, lookupErr)
+	}
+	owner, ok, lookupErr := app.MemberStore.ProfileOwner("xcode-vnc")
+	if lookupErr != nil || !ok || owner.Owner.Email != "old-owner@example.com" {
+		t.Fatalf("profile owner changed: got=%+v ok=%t err=%v", owner, ok, lookupErr)
+	}
+	members, lookupErr := app.MemberStore.MembersForApple("user@example.com")
+	if lookupErr != nil {
+		t.Fatalf("members for apple: %v", lookupErr)
+	}
+	for _, member := range members {
+		if member.Email == "new-owner@example.com" {
+			t.Fatalf("losing owner was assigned: %+v", members)
+		}
+	}
+}
+
 func TestUpsertReleaseReminderAfterOpenPreservesDisabledAutomaticReleaseWhenOwnerChanges(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
 	configPath := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
+	if _, err := app.MemberStore.AddMember("New Owner", "new-owner@example.com", "operator"); err != nil {
+		t.Fatalf("add new owner: %v", err)
+	}
 	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
 		return &fakeAWSClient{status: AWSStatus{Hosts: []DedicatedHostStatus{{
 			HostID: "h-1", State: "available", InstanceType: "mac2-m2.metal", CreatedAt: "2026-07-16T01:00:00Z", Tags: managedTestTags(),

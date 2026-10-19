@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -752,6 +753,26 @@ func TestAWSServiceDestroyRetriesPendingHostReleaseUntilSuccess(t *testing.T) {
 	}
 	if strings.Join(result.ReleasedHosts, ",") != "h-1" || len(result.DeferredHosts) != 0 {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestAWSServiceDestroyDoesNotRetryGenericPendingHostReleaseFailure(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "pending", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
+		},
+		releaseErr: errors.New("malformed release failure"),
+	}
+	service := testAWSService(fake)
+	_, _, err := service.Destroy(context.Background(), validAWSProfile())
+	if err == nil || !strings.Contains(err.Error(), "malformed release failure") {
+		t.Fatalf("Destroy error = %v", err)
+	}
+	want := []string{"status", "release:h-1"}
+	if !reflect.DeepEqual(fake.calls, want) {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
 }
 

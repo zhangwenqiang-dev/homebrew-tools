@@ -2297,14 +2297,11 @@ func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, pr
 		if ownerEmail == "" {
 			return nil
 		}
-		if _, err = a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
-			return err
-		}
-		owner, err := a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
+		owner, err := a.releaseReminderOwner(ownerEmail)
 		if err != nil {
 			return err
 		}
-		return a.upsertReleaseReminderAfterOpen(r.Context(), profile, owner.Owner)
+		return a.upsertReleaseReminderAfterOpen(r.Context(), profile, owner)
 	case "destroy":
 		if err := a.MemberStore.ClearProfileOwner(profile.Name); err != nil {
 			return err
@@ -2312,6 +2309,36 @@ func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, pr
 		return a.markReleaseReminderAfterDestroy(profile)
 	default:
 		return nil
+	}
+}
+
+func (a App) releaseReminderOwner(ownerEmail string) (PublicMember, error) {
+	ownerEmail = normalizeEmail(ownerEmail)
+	members, err := a.MemberStore.ListMembers()
+	if err != nil {
+		return PublicMember{}, err
+	}
+	for _, member := range members {
+		if normalizeEmail(member.Email) == ownerEmail {
+			return member.PublicMember, nil
+		}
+	}
+	return PublicMember{}, fmt.Errorf("member %s not found", ownerEmail)
+}
+
+func (a App) persistReleaseReminderOwner(profile Profile, reminder ReleaseReminder, owner PublicMember) error {
+	_, err := a.MemberStore.PersistReleaseReminderOwner(releaseReminderOwnerCycle(reminder), profile.AWS.AccountEmail, owner.Email)
+	return err
+}
+
+func releaseReminderOwnerCycle(reminder ReleaseReminder) ReleaseReminderCycle {
+	return ReleaseReminderCycle{
+		ProfileName:          reminder.ProfileName,
+		AutoReleaseAt:        reminder.AutoReleaseAt,
+		AutoReleaseStartedAt: reminder.AutoReleaseStartedAt,
+		HostID:               reminder.HostID,
+		AppleEmail:           reminder.AppleEmail,
+		OwnerEmail:           reminder.OwnerEmail,
 	}
 }
 
@@ -2338,7 +2365,7 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 		return err
 	}
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
-		existing, err = a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+		reminder, err := a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
 			if current.HostID != hostID || current.Status == ReleaseReminderStatusReleased {
 				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 			}
@@ -2350,7 +2377,10 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 		if err != nil {
 			return err
 		}
-		a.notifyReleaseReminder("open", existing, owner.Name, "Mac 打开确认成功")
+		if err := a.persistReleaseReminderOwner(profile, reminder, owner); err != nil {
+			return err
+		}
+		a.notifyReleaseReminder("open", reminder, owner.Name, "Mac 打开确认成功")
 		return nil
 	}
 	reminder := newActiveReleaseReminder(
@@ -2371,9 +2401,16 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 			return reminder, nil
 		})
 	} else {
-		reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
+		var created bool
+		reminder, created, err = a.MemberStore.CreateReleaseReminderIfAbsent(reminder)
+		if err == nil && !created {
+			return ErrReleaseReminderCycleChanged
+		}
 	}
 	if err != nil {
+		return err
+	}
+	if err := a.persistReleaseReminderOwner(profile, reminder, owner); err != nil {
 		return err
 	}
 	a.notifyReleaseReminder("open", reminder, owner.Name, "Mac 打开确认成功")

@@ -474,10 +474,7 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 	if ownerEmail == "" {
 		return ReleaseReminder{}, errors.New("lifecycle owner email is required")
 	}
-	if _, err := a.MemberStore.AssignMember(profile.AWS.AccountEmail, ownerEmail, "owner"); err != nil {
-		return ReleaseReminder{}, err
-	}
-	owner, err := a.MemberStore.SetProfileOwner(profile.Name, ownerEmail)
+	owner, err := a.releaseReminderOwner(ownerEmail)
 	if err != nil {
 		return ReleaseReminder{}, err
 	}
@@ -501,15 +498,22 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 		return ReleaseReminder{}, err
 	}
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
-		return a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+		reminder, err := a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
 			if current.HostID != hostID || current.Status == ReleaseReminderStatusReleased {
 				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 			}
-			current.OwnerEmail = owner.Owner.Email
-			current.OwnerName = owner.Owner.Name
+			current.OwnerEmail = owner.Email
+			current.OwnerName = owner.Name
 			current.HostArchitecture = hostArchitecture
 			return current, nil
 		})
+		if err != nil {
+			return ReleaseReminder{}, err
+		}
+		if err := a.persistReleaseReminderOwner(profile, reminder, owner); err != nil {
+			return ReleaseReminder{}, err
+		}
+		return reminder, nil
 	}
 	reminder := newActiveReleaseReminder(
 		profile.Name,
@@ -517,19 +521,31 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 		hostID,
 		hostArchitecture,
 		hostCreatedAt,
-		owner.Owner.Email,
-		owner.Owner.Name,
+		owner.Email,
+		owner.Name,
 		now,
 	)
 	if ok {
-		return a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
+		reminder, err = a.MemberStore.UpdateReleaseReminder(profile.Name, func(current ReleaseReminder) (ReleaseReminder, error) {
 			if current.HostID != existing.HostID || current.AppleEmail != existing.AppleEmail || current.Status != existing.Status {
 				return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 			}
 			return reminder, nil
 		})
+	} else {
+		var created bool
+		reminder, created, err = a.MemberStore.CreateReleaseReminderIfAbsent(reminder)
+		if err == nil && !created {
+			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+		}
 	}
-	return a.MemberStore.UpsertReleaseReminder(reminder)
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err := a.persistReleaseReminderOwner(profile, reminder, owner); err != nil {
+		return ReleaseReminder{}, err
+	}
+	return reminder, nil
 }
 
 func newActiveReleaseReminder(profileName, appleEmail, hostID, hostArchitecture, hostCreatedAt, ownerEmail, ownerName string, fallbackCreatedAt time.Time) ReleaseReminder {

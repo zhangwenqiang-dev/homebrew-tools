@@ -75,6 +75,8 @@ type MemberRepository interface {
 	MembersForProfile(profileName string) ([]PublicMember, error)
 	ListReleaseReminders(memberEmail string) ([]ReleaseReminder, error)
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
+	CreateReleaseReminderIfAbsent(reminder ReleaseReminder) (ReleaseReminder, bool, error)
+	PersistReleaseReminderOwner(cycle ReleaseReminderCycle, appleEmail, memberEmail string) (PublicProfileOwner, error)
 	UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error)
@@ -883,6 +885,117 @@ func (s MemberStore) ListReleaseReminders(memberEmail string) ([]ReleaseReminder
 
 func (s MemberStore) ReleaseReminder(profileName string) (ReleaseReminder, bool, error) {
 	return releaseReminderInStore(s, profileName)
+}
+
+func (s MemberStore) CreateReleaseReminderIfAbsent(reminder ReleaseReminder) (ReleaseReminder, bool, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	defer unlock()
+	reminder = normalizeReleaseReminder(reminder)
+	if reminder.ProfileName == "" {
+		return ReleaseReminder{}, false, errors.New("profile is required")
+	}
+	s = s.normalize()
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	for _, current := range db.Reminders {
+		if current.ProfileName == reminder.ProfileName {
+			return current, false, nil
+		}
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	if reminder.CreatedAt == "" {
+		reminder.CreatedAt = now
+	}
+	reminder.UpdatedAt = now
+	db.Reminders = append(db.Reminders, reminder)
+	if err := s.saveUnlocked(db); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	return reminder, true, nil
+}
+
+func (s MemberStore) PersistReleaseReminderOwner(cycle ReleaseReminderCycle, appleEmail, memberEmail string) (PublicProfileOwner, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	defer unlock()
+	cycle, appleEmail, memberEmail, err = normalizeReleaseReminderOwnerPersistence(cycle, appleEmail, memberEmail)
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	s = s.normalize()
+	db, err := s.Load()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	var current ReleaseReminder
+	found := false
+	for _, reminder := range db.Reminders {
+		if reminder.ProfileName == cycle.ProfileName {
+			current, found = reminder, true
+			break
+		}
+	}
+	if !found || !releaseReminderMatchesCycle(current, cycle) ||
+		current.Status == ReleaseReminderStatusReleased || current.ReleasedAt != "" ||
+		normalizeEmail(appleEmail) != normalizeEmail(current.AppleEmail) {
+		return PublicProfileOwner{}, ErrReleaseReminderCycleChanged
+	}
+	appleEmail = normalizeEmail(current.AppleEmail)
+	member, ok := findMemberByEmail(db, memberEmail)
+	if !ok {
+		return PublicProfileOwner{}, fmt.Errorf("member %s not found", memberEmail)
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	assigned := false
+	for i := range db.Assignments {
+		if strings.EqualFold(db.Assignments[i].AppleEmail, appleEmail) && db.Assignments[i].MemberID == member.ID {
+			db.Assignments[i].Relation = "owner"
+			assigned = true
+			break
+		}
+	}
+	if !assigned {
+		db.Assignments = append(db.Assignments, AppleAccountMember{AppleEmail: appleEmail, MemberID: member.ID, Relation: "owner", CreatedAt: now})
+	}
+	record := ProfileOwner{ProfileName: cycle.ProfileName, MemberID: member.ID, UpdatedAt: now}
+	updated := false
+	for i := range db.ProfileOwners {
+		if db.ProfileOwners[i].ProfileName == cycle.ProfileName {
+			db.ProfileOwners[i] = record
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		db.ProfileOwners = append(db.ProfileOwners, record)
+	}
+	if err := s.saveUnlocked(db); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	return PublicProfileOwner{ProfileName: cycle.ProfileName, Owner: publicMember(member), UpdatedAt: now}, nil
+}
+
+func normalizeReleaseReminderOwnerPersistence(cycle ReleaseReminderCycle, appleEmail, memberEmail string) (ReleaseReminderCycle, string, string, error) {
+	cycle.ProfileName = strings.TrimSpace(cycle.ProfileName)
+	appleEmail = normalizeEmail(appleEmail)
+	memberEmail = normalizeEmail(memberEmail)
+	if cycle.ProfileName == "" {
+		return ReleaseReminderCycle{}, "", "", errors.New("profile is required")
+	}
+	if appleEmail == "" || !strings.Contains(appleEmail, "@") {
+		return ReleaseReminderCycle{}, "", "", errors.New("valid apple email is required")
+	}
+	if memberEmail == "" || !strings.Contains(memberEmail, "@") {
+		return ReleaseReminderCycle{}, "", "", errors.New("valid member email is required")
+	}
+	return cycle, appleEmail, memberEmail, nil
 }
 
 func (s MemberStore) UpsertReleaseReminder(reminder ReleaseReminder) (ReleaseReminder, error) {

@@ -162,7 +162,7 @@ func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, 
 	return false, fmt.Sprintf("release was attempted after EC2 termination but AWS Mac host transition was still in progress after %s: %v", timeout, lastErr), nil
 }
 
-func hostReleaseTransitionInProgress(host DedicatedHostStatus, err error) bool {
+func hostReleaseTransitionInProgress(_ DedicatedHostStatus, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -170,7 +170,7 @@ func hostReleaseTransitionInProgress(host DedicatedHostStatus, err error) bool {
 	if errors.As(err, &apiError) {
 		return apiError.ErrorCode() == "Client.InvalidHost.Occupied"
 	}
-	return emptyStatus(host.State) == "pending"
+	return false
 }
 
 func hostReleaseRetryInterval(base, elapsed time.Duration) time.Duration {

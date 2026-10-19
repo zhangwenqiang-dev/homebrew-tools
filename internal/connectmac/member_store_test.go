@@ -238,6 +238,95 @@ func TestMemberStoreReleaseReminders(t *testing.T) {
 	}
 }
 
+func TestMemberStoreCreateReleaseReminderIfAbsent(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	store.Now = func() time.Time { return time.Date(2026, 7, 2, 8, 3, 0, 0, time.UTC) }
+	want := ReleaseReminder{
+		ProfileName: " apple-usw2 ", AppleEmail: " APPLE@EXAMPLE.COM ", HostID: "h-new",
+		Status: ReleaseReminderStatusActive, AutoReleaseEnabled: true,
+		AutoReleaseAt: "2026-07-02T08:00:00Z", AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled,
+	}
+	created, ok, err := store.CreateReleaseReminderIfAbsent(want)
+	if err != nil || !ok {
+		t.Fatalf("create reminder: created=%t err=%v", ok, err)
+	}
+	if created.ProfileName != "apple-usw2" || created.AppleEmail != "apple@example.com" || created.CreatedAt == "" || created.UpdatedAt == "" {
+		t.Fatalf("created reminder = %+v", created)
+	}
+
+	existing := created
+	existing.AutoReleaseEnabled = false
+	existing.AutoReleaseAttempts = 4
+	existing.AutoReleaseState = ReleaseReminderAutoReleaseStateFailed
+	if _, err := store.UpdateReleaseReminder(existing.ProfileName, func(ReleaseReminder) (ReleaseReminder, error) { return existing, nil }); err != nil {
+		t.Fatalf("seed existing reminder: %v", err)
+	}
+	got, ok, err := store.CreateReleaseReminderIfAbsent(ReleaseReminder{ProfileName: "apple-usw2", HostID: "h-replacement", AutoReleaseEnabled: true})
+	if err != nil || ok {
+		t.Fatalf("existing reminder: created=%t err=%v", ok, err)
+	}
+	if got.HostID != existing.HostID || got.AutoReleaseEnabled || got.AutoReleaseAttempts != 4 || got.AutoReleaseState != ReleaseReminderAutoReleaseStateFailed {
+		t.Fatalf("existing reminder mutated: %+v", got)
+	}
+}
+
+func TestMemberStorePersistReleaseReminderOwner(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	for _, member := range []struct{ name, email string }{{"Old", "old@example.com"}, {"New", "new@example.com"}} {
+		if _, err := store.AddMember(member.name, member.email, "operator"); err != nil {
+			t.Fatalf("add member: %v", err)
+		}
+	}
+	if _, err := store.AssignMember("apple@example.com", "old@example.com", "owner"); err != nil {
+		t.Fatalf("assign old owner: %v", err)
+	}
+	if _, err := store.SetProfileOwner("mac", "old@example.com"); err != nil {
+		t.Fatalf("set old owner: %v", err)
+	}
+	reminder, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "mac", AppleEmail: "apple@example.com", HostID: "h-1", OwnerEmail: "new@example.com", AutoReleaseAt: "2026-07-02T08:10:00Z", Status: ReleaseReminderStatusDueNotified})
+	if err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	owner, err := store.PersistReleaseReminderOwner(releaseReminderOwnerCycle(reminder), "apple@example.com", "new@example.com")
+	if err != nil || owner.Owner.Email != "new@example.com" {
+		t.Fatalf("persist owner: got=%+v err=%v", owner, err)
+	}
+
+	stale := releaseReminderOwnerCycle(reminder)
+	stale.HostID = "h-stale"
+	if _, err := store.PersistReleaseReminderOwner(stale, "other@example.com", "old@example.com"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+		t.Fatalf("stale persist error = %v", err)
+	}
+	persisted, ok, err := store.ProfileOwner("mac")
+	if err != nil || !ok || persisted.Owner.Email != "new@example.com" {
+		t.Fatalf("owner changed after stale persist: got=%+v ok=%t err=%v", persisted, ok, err)
+	}
+	if members, err := store.MembersForApple("other@example.com"); err != nil || len(members) != 0 {
+		t.Fatalf("stale assignment persisted: got=%+v err=%v", members, err)
+	}
+	if _, err := store.PersistReleaseReminderOwner(releaseReminderOwnerCycle(reminder), "other@example.com", "old@example.com"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+		t.Fatalf("mismatched apple email error = %v", err)
+	}
+	if members, err := store.MembersForApple("other@example.com"); err != nil || len(members) != 0 {
+		t.Fatalf("mismatched apple assignment persisted: got=%+v err=%v", members, err)
+	}
+	for _, blocked := range []ReleaseReminder{
+		func() ReleaseReminder { value := reminder; value.Status = ReleaseReminderStatusReleased; return value }(),
+		func() ReleaseReminder { value := reminder; value.ReleasedAt = "2026-07-02T09:00:00Z"; return value }(),
+	} {
+		if _, err := store.UpsertReleaseReminder(blocked); err != nil {
+			t.Fatalf("block reminder ownership: %v", err)
+		}
+		if _, err := store.PersistReleaseReminderOwner(releaseReminderOwnerCycle(blocked), "apple@example.com", "old@example.com"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+			t.Fatalf("blocked reminder persist error = %v", err)
+		}
+	}
+	persisted, ok, err = store.ProfileOwner("mac")
+	if err != nil || !ok || persisted.Owner.Email != "new@example.com" {
+		t.Fatalf("owner changed after released persist: got=%+v ok=%t err=%v", persisted, ok, err)
+	}
+}
+
 func TestMemberStoreReleaseReminderLegacyJSONDefaultsAutoRelease(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "members.json")
 	legacy := `{"release_reminders":[{"profile_name":"apple-usw2","status":"active","created_at":"2026-07-01T08:00:00Z","updated_at":"2026-07-01T08:00:00Z"}]}`
