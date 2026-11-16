@@ -1210,9 +1210,9 @@ func TestAutoReleaseTerminalErrorsAndAppleMismatchDoNotRetry(t *testing.T) {
 			p.AWS.AccountEmail = "other@example.com"
 			return p, nil
 		}},
-		{name: "apple case mismatch", resolve: func(context.Context, ReleaseReminder) (Profile, error) {
+		{name: "apple empty profile email", resolve: func(context.Context, ReleaseReminder) (Profile, error) {
 			p := autoReleaseTestProfile()
-			p.AWS.AccountEmail = "Apple@example.com"
+			p.AWS.AccountEmail = " \t"
 			return p, nil
 		}},
 	} {
@@ -1228,6 +1228,38 @@ func TestAutoReleaseTerminalErrorsAndAppleMismatchDoNotRetry(t *testing.T) {
 			}
 			if len(*notifications) != 1 || (*notifications)[0].Kind != AutoReleaseNotificationFinalFailure {
 				t.Fatalf("notifications = %+v", *notifications)
+			}
+		})
+	}
+}
+
+func TestAutoReleaseProfileEmailComparison(t *testing.T) {
+	for _, tt := range []struct {
+		name, stored, configured string
+		wantError                bool
+	}{
+		{"case and surrounding spaces", " klmne164426@2980.com\t", " KLmne164426@2980.com ", false},
+		{"empty stored email", " ", "KLmne164426@2980.com", true},
+		{"both empty", " ", "\t", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := autoReleaseTestProfile()
+			profile.AWS.AccountEmail = tt.configured
+			coordinator := AutoReleaseCoordinator{
+				ResolveProfile: func(context.Context, ReleaseReminder) (Profile, error) {
+					return profile, nil
+				},
+			}
+			got, err := coordinator.resolveAndValidateProfile(context.Background(), ReleaseReminder{
+				ProfileName: profile.Name,
+				AppleEmail:  tt.stored,
+			})
+			if tt.wantError {
+				if autoReleaseErrorCategoryOf(err) != autoReleaseErrorTerminal {
+					t.Fatalf("expected terminal error, got %v", err)
+				}
+			} else if err != nil || got.AWS.AccountEmail != tt.configured {
+				t.Fatalf("resolved email = %q, error = %v", got.AWS.AccountEmail, err)
 			}
 		})
 	}

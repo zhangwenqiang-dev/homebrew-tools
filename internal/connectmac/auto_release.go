@@ -702,7 +702,8 @@ func (c *AutoReleaseCoordinator) resolveAndValidateProfile(ctx context.Context, 
 	if profile.Name != reminder.ProfileName {
 		return Profile{}, TerminalAutoReleaseError(fmt.Errorf("resolved profile %q does not match stored profile %q", profile.Name, reminder.ProfileName))
 	}
-	if strings.TrimSpace(reminder.AppleEmail) == "" || strings.TrimSpace(profile.AWS.AccountEmail) != strings.TrimSpace(reminder.AppleEmail) {
+	storedEmail := strings.TrimSpace(reminder.AppleEmail)
+	if storedEmail == "" || !strings.EqualFold(storedEmail, strings.TrimSpace(profile.AWS.AccountEmail)) {
 		return Profile{}, TerminalAutoReleaseError(fmt.Errorf("apple account mismatch: stored=%q profile=%q", reminder.AppleEmail, profile.AWS.AccountEmail))
 	}
 	return profile, nil
